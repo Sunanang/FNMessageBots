@@ -1,0 +1,38 @@
+.git
+.github
+.cursor
+.idea
+.vscode
+
+# macOS
+.DS_Store
+
+# Python
+**/__pycache__/
+**/*.py[cod]
+**/*.pyo
+**/*.pyd
+.venv
+venv
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Local runtime data (do not bake into image)
+data
+**/*.db
+**/*.db3
+**/*.sqlite
+**/*.sqlite3
+**/*.log
+
+# Docs / dev-only helpers
+docs
+scripts
+tools
+
+# Misc artifacts
+*.zip
+*.tar
+*.tar.gz
+*.tgz
