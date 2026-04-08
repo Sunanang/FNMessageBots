@@ -30,7 +30,7 @@ https://api.day.app/LkDty2key/{content}?icon=https://day.app/assets/images/avata
 创作不易，为了项目的稳定和可持续发展，欢迎大家捐赠支持
 <table>
   <tr>
-    <td><img src="images/wechat_pay.jpg" width="300" alt="图1说明" /></td>
-    <td><img src="images/ali_pay.jpg" width="300" alt="图2说明" /></td>
+    <td><img src="../../assets/icons/wechat_pay.jpg" width="300" alt="图1说明" /></td>
+    <td><img src="../../assets/icons/ali_pay.jpg" width="300" alt="图2说明" /></td>
   </tr>
 </table>

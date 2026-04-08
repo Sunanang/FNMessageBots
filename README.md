@@ -52,7 +52,7 @@ python tools/log_manager.py cleanup 30
 
 ### 1. [配置通知渠道](docs/notification-channels.md)
 
-至少配置一个推送渠道；环境变量与 Web 配置页二选一即可（亦可混用）。各平台图文说明见 **[配置通知渠道](docs/notification-channels.md)**（内含企业微信、钉钉、飞书、Bark、PushPlus 的独立文档入口）。
+至少配置一个推送渠道；环境变量与 Web 配置页二选一即可（亦可混用）。各平台图文说明见 **[配置通知渠道](docs/notification-channels.md)**（内含企业微信、钉钉、飞书、Bark、魔法推送、PushPlus 的独立文档入口）。
 
 未配置任何 Webhook / PushPlus 时进程仍可启动，仅提供 Web 配置页；配置完成后自动开始监控与推送。
 

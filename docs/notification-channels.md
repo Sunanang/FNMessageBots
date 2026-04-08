@@ -13,6 +13,7 @@
 | 钉钉 | 群机器人 Webhook | [钉钉](channels/dingtalk.md) |
 | 飞书 | 群机器人 Webhook | [飞书](channels/feishu.md) |
 | Bark | iOS 推送（HTTP API） | [Bark](channels/bark.md) |
+| 魔法推送 | 推送聚合 | [魔法推送](channels/magicpush.md) |
 | PushPlus | 微信模板消息等 | [官方消息接口文档](https://www.pushplus.plus/doc/guide/api.html) |
 
 ## 按渠道打开文档
@@ -21,6 +22,7 @@
 - [钉钉](channels/dingtalk.md)
 - [飞书](channels/feishu.md)
 - [Bark](channels/bark.md)
+- [魔法推送](channels/magicpush.md)
 - [PushPlus 官方消息接口文档](https://www.pushplus.plus/doc/guide/api.html)
 
 ## 环境变量速查
