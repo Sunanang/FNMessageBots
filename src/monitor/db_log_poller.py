@@ -52,6 +52,8 @@ DB_EVENT_ID_TO_PROJECT: Dict[str, str] = {
     "DiskSpindown": "DiskSpindown",
     "CPU_USAGE_ALARM": "CPU_USAGE_ALARM",
     "CPU_USAGE_RESTORED": "CPU_USAGE_RESTORED",
+    "MEMORY_USAGE_ALARM": "MEMORY_USAGE_ALARM",
+    "MEMORY_USAGE_RESTORED": "MEMORY_USAGE_RESTORED",
     # 可选事件（默认不推送，需用户在配置中勾选）
     "ARCHIVING_SUCCESS": "ARCHIVING_SUCCESS",
     "DeleteFile": "DeleteFile",
@@ -75,7 +77,6 @@ DB_EVENT_ID_TO_PROJECT: Dict[str, str] = {
     "STATUS_RUNNING_VM": "STATUS_RUNNING_VM",
     "DESTROY_VM": "DESTROY_VM",
 }
-
 
 def _logtime_to_datetime(logtime: int) -> str:
     """10 位 Unix 时间戳转 YYYY-MM-DD HH:MM:SS（Asia/Shanghai）。可设 LOGTIME_DISPLAY_OFFSET_SECONDS 修正存库偏差（如 28800=+8h）。"""
@@ -134,7 +135,7 @@ class DBLogPoller:
         self,
         db_path: str,
         cursor_dir: str,
-        poll_interval: int = 1,
+        poll_interval: int = 5,
         monitor_events: Optional[List[str]] = None,
     ):
         self.db_path = db_path
@@ -142,6 +143,7 @@ class DBLogPoller:
         self.poll_interval = max(1, poll_interval)
         self.monitor_events = set(monitor_events or [])
         self.event_handlers: Dict[str, Callable] = {}
+        self.batch_handler: Optional[Callable[[List[Dict[str, Any]]], None]] = None
         self.running = False
         self._thread: Optional[threading.Thread] = None
         self._cursor_file = self.cursor_dir / "db_poller_cursor.txt"
@@ -156,6 +158,10 @@ class DBLogPoller:
     def clear_handlers(self) -> None:
         """清空已注册的事件处理器（热加载配置前调用）。"""
         self.event_handlers.clear()
+
+    def set_batch_handler(self, handler: Optional[Callable[[List[Dict[str, Any]]], None]]) -> None:
+        """注册按轮询批量处理函数（同一轮仅调用一次）。"""
+        self.batch_handler = handler
 
     def update_config(
         self,
@@ -217,11 +223,11 @@ class DBLogPoller:
 
     def _poll_once(self, last_id: int) -> int:
         rows = self._fetch_new_rows(last_id)
+        batch_events: List[Dict[str, Any]] = []
         for row in rows:
             row_id = row.get("id", 0)
             db_event_id = (row.get("eventId") or "").strip()
             if not db_event_id:
-                self._write_last_id(row_id)
                 continue
             project_type = DB_EVENT_ID_TO_PROJECT.get(db_event_id, db_event_id)
             # SshdLoginAuthFail 且 uname=invalid 才是无效用户尝试，按 SSH_INVALID_USER 处理
@@ -229,11 +235,9 @@ class DBLogPoller:
             if db_event_id == "SshdLoginAuthFail" and uname_raw.lower() == "invalid":
                 project_type = "SSH_INVALID_USER"
             if self.monitor_events and project_type not in self.monitor_events:
-                self._write_last_id(row_id)
                 continue
             handler = self.event_handlers.get(project_type)
             if not handler:
-                self._write_last_id(row_id)
                 continue
             event_data = _parse_parameter(
                 row.get("parameter"),
@@ -241,11 +245,29 @@ class DBLogPoller:
                 row.get("uid"),
             )
             entry = _row_to_entry(row)
-            try:
-                handler(event_data, entry)
-            except Exception as e:
-                self.logger.error("处理事件失败 eventId=%s: %s", db_event_id, e)
-            self._write_last_id(row_id)
+            batch_events.append({
+                "row_id": row_id,
+                "db_event_id": db_event_id,
+                "event_type": project_type,
+                "event_data": event_data,
+                "entry": entry,
+                "handler": handler,
+            })
+        if batch_events:
+            if self.batch_handler:
+                try:
+                    self.batch_handler(batch_events)
+                except Exception as e:
+                    self.logger.error("批量处理事件失败（count=%s）: %s", len(batch_events), e, exc_info=True)
+            else:
+                # 兼容旧逻辑：未注册批处理时按条处理
+                for item in batch_events:
+                    try:
+                        item["handler"](item["event_data"], item["entry"])
+                    except Exception as e:
+                        self.logger.error("处理事件失败 eventId=%s: %s", item["db_event_id"], e)
+        if rows:
+            self._write_last_id(rows[-1].get("id", last_id))
         return last_id if not rows else rows[-1].get("id", last_id)
 
     def _run_loop(self) -> None:

@@ -8,6 +8,10 @@ from typing import List, Dict, Any
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# 推送标题前缀默认值；配置文件无 title_prefix 项时使用。仅当配置里显式存空字符串时才关闭前缀。
+TITLE_PREFIX_DEFAULT = "飞牛NAS"
+
+
 @dataclass
 class Config:
     """应用配置"""
@@ -18,9 +22,10 @@ class Config:
     feishu_webhook_url: str = ""   # 飞书Webhook URL
     bark_url: str = ""  # Bark推送URL
     pushplus_params: str = ""  # PushPlus 推送参数（JSON 字符串，多个用 | 分隔）
+    magic_push_params: str = ""  # 魔法推送（JSON：base_url、token、可选 title，多个用 | 分隔）
     
-    # 通知标题配置
-    title_prefix: str = "飞牛NAS"  # 推送标题前缀；未配置或空白时使用默认「飞牛NAS」
+    # 通知标题配置；默认「飞牛NAS」。仅在配置中显式写入空字符串时，推送标题不包含此前缀。
+    title_prefix: str = field(default=TITLE_PREFIX_DEFAULT)
 
     # 监控配置
     monitor_events: List[str] = field(default_factory=lambda: [
@@ -28,6 +33,8 @@ class Config:
         "APP_UPDATE_FAILED", "APP_START_FAILED_LOCAL_APP_RUN_EXCEPTION",
         "APP_AUTO_START_FAILED_DOCKER_NOT_AVAILABLE",         "CPU_USAGE_ALARM",
         "CPU_USAGE_RESTORED",
+        "MEMORY_USAGE_ALARM",
+        "MEMORY_USAGE_RESTORED",
         "CPU_TEMPERATURE_ALARM", "UPS_ONBATT", "UPS_ONBATT_LOWBATT", "UPS_ONLINE",
         "UPS_ENABLE", "UPS_DISABLE",
         "DiskWakeup", "DiskSpindown",
@@ -50,7 +57,10 @@ class Config:
     # 系统路径配置
     cursor_dir: str = "./data/cursor"  # 数据库轮询游标等
     logger_db_path: str = "/usr/trim/var/eventlogger_service/logger_data.db3"
-    logger_poll_interval: int = 3  # 秒，不宜过小以免频繁读库
+    logger_poll_interval: int = 5  # 秒，轮询间隔
+
+    # 轮询汇总模式：开启后同一轮查询到的多条事件合并为一条通知；关闭则逐条推送（易触发渠道限流）
+    poll_batch_summary_enabled: bool = False
     
     # 勿扰模式（开启后在该时段内不推送，结束后汇总为一条消息）
     dnd_enabled: bool = False
@@ -74,7 +84,7 @@ class Config:
         self._load_from_env()
         # 然后从配置文件加载，但仅当配置项未从环境变量设置时才覆盖
         self._load_from_file_skip_if_set()
-        self.title_prefix = (self.title_prefix or "").strip() or "飞牛NAS"
+        self.title_prefix = (self.title_prefix or "").strip()
         self._validate()
         self._ensure_directories()
     
@@ -137,8 +147,10 @@ class Config:
             self.bark_url = data["bark_url"]
         if "pushplus_params" in data and isinstance(data["pushplus_params"], str):
             self.pushplus_params = data["pushplus_params"]
+        if "magic_push_params" in data and isinstance(data["magic_push_params"], str):
+            self.magic_push_params = data["magic_push_params"]
         if "title_prefix" in data and isinstance(data["title_prefix"], str):
-            self.title_prefix = (data["title_prefix"] or "飞牛NAS").strip() or "飞牛NAS"
+            self.title_prefix = (data["title_prefix"] or "").strip()
         if "log_retention_days" in data and data["log_retention_days"] is not None:
             try:
                 self.log_retention_days = int(data["log_retention_days"])
@@ -157,6 +169,8 @@ class Config:
             self.dnd_start_time = data["dnd_start_time"].strip()
         if "dnd_end_time" in data and isinstance(data["dnd_end_time"], str):
             self.dnd_end_time = data["dnd_end_time"].strip()
+        if "poll_batch_summary_enabled" in data:
+            self.poll_batch_summary_enabled = bool(data["poll_batch_summary_enabled"])
         return True
 
     def _load_from_env(self):
@@ -270,6 +284,21 @@ class Config:
                 except json.JSONDecodeError as e:
                     raise ValueError(f"PushPlus 参数不是合法 JSON: {e}")
 
+        if self.magic_push_params:
+            for part in (p.strip() for p in self.magic_push_params.split("|") if p.strip()):
+                try:
+                    obj = json.loads(part)
+                    if not isinstance(obj, dict):
+                        raise ValueError("魔法推送参数必须为 JSON 对象")
+                    base = (obj.get("base_url") or "").strip()
+                    token = (obj.get("token") or "").strip()
+                    if not base or not token:
+                        raise ValueError("魔法推送须包含 base_url 与 token")
+                    if not base.startswith("http"):
+                        raise ValueError("魔法推送 base_url 须为有效 http(s) 地址")
+                except json.JSONDecodeError as e:
+                    raise ValueError(f"魔法推送参数不是合法 JSON: {e}")
+
         if not self.monitor_events:
             raise ValueError("必须配置至少一个监控事件")
         
@@ -277,7 +306,9 @@ class Config:
         valid_events = {"LoginSucc", "LoginSucc2FA1", "LoginFail", "Logout", "FoundDisk", "APP_CRASH",
                         "APP_UPDATE_FAILED", "APP_START_FAILED_LOCAL_APP_RUN_EXCEPTION",
                         "APP_AUTO_START_FAILED_DOCKER_NOT_AVAILABLE", "CPU_USAGE_ALARM",
-                        "CPU_USAGE_RESTORED", "CPU_TEMPERATURE_ALARM", "UPS_ONBATT", "UPS_ONBATT_LOWBATT", "UPS_ONLINE",
+                        "CPU_USAGE_RESTORED",
+                        "MEMORY_USAGE_ALARM", "MEMORY_USAGE_RESTORED",
+                        "CPU_TEMPERATURE_ALARM", "UPS_ONBATT", "UPS_ONBATT_LOWBATT", "UPS_ONLINE",
                         "UPS_ENABLE", "UPS_DISABLE",
                         "DiskWakeup", "DiskSpindown",
                         "SSH_INVALID_USER", "SSH_AUTH_FAILED",
@@ -288,9 +319,12 @@ class Config:
                         "WEBDAV_ENABLED", "WEBDAV_DISABLED", "SAMBA_ENABLED", "SAMBA_DISABLED",
                         "DLNA_ENABLED", "DLNA_DISABLED", "FTP_ENABLED", "FTP_DISABLED", "NFS_ENABLED", "NFS_DISABLED",
                         "FW_ENABLE", "FW_DISABLE", "SECURITY_PORTCHANGED",
-                        "SHUTDOWN_VM", "STATUS_RUNNING_VM", "DESTROY_VM"}
+                        "SHUTDOWN_VM", "STATUS_RUNNING_VM", "STATUS_REBOOTED_VM", "DESTROY_VM"}
         # 过滤掉已移除或未知的事件类型，避免旧配置导致启动失败
-        self.monitor_events = [e for e in self.monitor_events if e in valid_events]
+        self.monitor_events = [
+            e for e in self.monitor_events
+            if e in valid_events or ("VM" in str(e).upper())
+        ]
         if not self.monitor_events:
             raise ValueError("必须配置至少一个监控事件")
         

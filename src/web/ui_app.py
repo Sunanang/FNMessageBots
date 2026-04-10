@@ -1,4 +1,3 @@
-import hashlib
 import json
 import os
 import re
@@ -6,7 +5,6 @@ import secrets
 import socket
 import sys
 import threading
-import time
 from pathlib import Path
 
 # 直接运行本文件时（python src/web/ui_app.py），把 src 加入 path 以便导入 notifier 等
@@ -16,264 +14,103 @@ if __name__ == "__main__":
     if _src.exists() and str(_src) not in sys.path:
         sys.path.insert(0, str(_src))
 
-from flask import Flask, jsonify, request, render_template_string
+from flask import Flask, jsonify, request, render_template_string, send_from_directory, abort, redirect
 
 from notifier.multi_platform_notifier import MultiPlatformNotifier
+from web.auth_service import get_password_config as _get_password_config
+from web.auth_service import hash_password as _hash_password
+from web.auth_service import has_password_set as _has_password_set_fn
+from web.auth_service import is_password_verification_enabled as _is_password_verification_enabled_fn
+from web.auth_service import verify_password as _verify_password
+from web.api_helpers import build_notifier_from_raw as _build_notifier_from_raw
+from web.api_helpers import parse_success_filter as _parse_success_filter
+from web.app_paths import BASE_DIR
+from web.app_paths import CONFIG_FILE
+from web.app_paths import GITHUB_ICON_FILE
+from web.app_paths import ICON_FILE
+from web.app_paths import SUPPORT_QR_DIR
+from web.app_paths import SUPPORT_QR_FILENAMES
+from web.config_store import join_urls as _join_urls
+from web.config_store import load_raw_config as _load_raw_config_from_file
+from web.config_store import save_raw_config as _save_raw_config_to_file
+from web.config_store import split_urls as _split_urls
+from web.config_store import title_prefix_from_dict as _title_prefix_from_dict
+from web.event_catalog import APP_LIFECYCLE_EVENTS
+from web.event_catalog import DEFAULT_SELECTED_EVENTS
+from web.event_catalog import EVENT_IDS_HIDDEN_IN_UI
+from web.event_catalog import OLD_DEFAULT_SELECTED_EVENTS_WITH_EXTRA
+from web.event_catalog import build_events_for_ui
+from web.push_history_service import get_record as get_push_history_record
+from web.push_history_service import get_stats as get_push_history_stats
+from web.push_history_service import list_records as list_push_history_records
+from web.session_service import create_session as _create_session
+from web.session_service import touch_session as _touch_session
+from web.ui_templates import HISTORY_PAGE_TEMPLATE, SUPPORT_PAGE_TEMPLATE
 
 # 配置页密码：会话空闲超时（秒），超时后需重新输入密码
 SESSION_IDLE_SECONDS = 300
 AUTH_COOKIE_NAME = "fnmb_session"
-PBKDF2_ITERATIONS = 100000
-
-# 内存会话：session_id -> {"last_activity": float}
-_sessions = {}
-_sessions_lock = threading.Lock()
-
-
-def _hash_password(password: str, salt: bytes) -> str:
-    """PBKDF2-HMAC-SHA256，返回 hex。"""
-    h = hashlib.pbkdf2_hmac(
-        "sha256",
-        password.encode("utf-8"),
-        salt,
-        PBKDF2_ITERATIONS,
-    )
-    return h.hex()
-
-
-def _verify_password(password: str, salt_hex: str, stored_hash: str) -> bool:
-    """验证密码是否与存储的 hash 一致。"""
-    try:
-        salt = bytes.fromhex(salt_hex)
-        got = _hash_password(password, salt)
-        return secrets.compare_digest(got, stored_hash)
-    except Exception:
-        return False
-
-
-def _get_password_config(raw: dict) -> tuple:
-    """返回 (salt_hex, hash_hex)，未设置则 (None, None)。"""
-    salt = (raw.get("web_password_salt") or "").strip()
-    h = (raw.get("web_password_hash") or "").strip()
-    if salt and h:
-        return (salt, h)
-    return (None, None)
-
 
 def _has_password_set() -> bool:
-    raw = _load_raw_config()
-    salt, h = _get_password_config(raw)
-    return salt is not None and h is not None
-
-
-def _create_session() -> str:
-    sid = secrets.token_urlsafe(32)
-    with _sessions_lock:
-        _sessions[sid] = {"last_activity": time.time()}
-    return sid
+    return _has_password_set_fn(_load_raw_config)
 
 
 def _get_session_id_from_cookie() -> str:
     return (request.cookies.get(AUTH_COOKIE_NAME) or "").strip()
 
 
-def _touch_session(session_id: str) -> bool:
-    """若会话有效则更新 last_activity 并返回 True。"""
-    if not session_id:
-        return False
-    with _sessions_lock:
-        if session_id not in _sessions:
-            return False
-        last = _sessions[session_id]["last_activity"]
-        if time.time() - last > SESSION_IDLE_SECONDS:
-            del _sessions[session_id]
-            return False
-        _sessions[session_id]["last_activity"] = time.time()
-        return True
-
-
 def _is_authenticated() -> bool:
-    return _touch_session(_get_session_id_from_cookie())
+    return _touch_session(_get_session_id_from_cookie(), SESSION_IDLE_SECONDS)
 
 
 def _is_password_verification_enabled() -> bool:
     """是否开启密码验证（默认 True）。关闭后不删密码，但访问配置页无需验证。"""
-    raw = _load_raw_config()
-    return bool(raw.get("web_password_enabled", True))
-
-
-def _get_base_dir() -> Path:
-    """Docker 下用 /app，本地调试用项目根目录（含 config 的目录）。"""
-    app_home = os.getenv("APP_HOME")
-    if app_home:
-        return Path(app_home)
-    # 从 src/web/ui_app.py 向上到项目根
-    candidate = Path(__file__).resolve().parent.parent.parent
-    if (candidate / "config").exists():
-        return candidate
-    return Path("/app")
-
-
-BASE_DIR = _get_base_dir()
-CONFIG_FILE = BASE_DIR / "config" / "config.json"
-
-
-def _title_prefix_from_dict(d: dict, key: str = "title_prefix") -> str:
-    """从配置或请求体读取标题前缀；缺省、null 或纯空白时均为默认「飞牛NAS」。"""
-    if key not in d:
-        return "飞牛NAS"
-    v = d[key]
-    if v is None:
-        return "飞牛NAS"
-    s = v.strip() if isinstance(v, str) else str(v).strip()
-    return s or "飞牛NAS"
+    return _is_password_verification_enabled_fn(_load_raw_config)
 
 
 def _load_raw_config() -> dict:
-    if CONFIG_FILE.exists():
-        try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            # 如果配置损坏，回退到空配置，避免 UI 崩溃
-            return {}
-    return {}
+    return _load_raw_config_from_file(CONFIG_FILE)
 
 
 def _save_raw_config(data: dict) -> None:
-    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-
-def _split_urls(raw: str):
-    if not raw:
-        return []
-    return [u.strip() for u in str(raw).split("|") if u.strip()]
-
-
-def _join_urls(urls):
-    clean = [u.strip() for u in urls if u and u.strip()]
-    return "|".join(clean)
-
-
-# 事件分类（顺序即展示顺序）；不在此处的事件不会在 UI 中展示
-EVENT_CATEGORIES = [
-    ("login", "登录与认证", ["LoginSucc", "LoginSucc2FA1", "LoginFail", "Logout"]),
-    ("ssh", "SSH", ["SSH_INVALID_USER", "SSH_AUTH_FAILED", "SSH_LOGIN_SUCCESS", "SSH_DISCONNECTED"]),
-    ("security", "安全", [
-        "FW_ENABLE", "FW_DISABLE", "SECURITY_PORTCHANGED",
-    ]),
-    ("hardware", "硬件与告警", ["CPU_USAGE_ALARM", "CPU_USAGE_RESTORED", "CPU_TEMPERATURE_ALARM"]),
-    ("disk", "磁盘与存储", ["FoundDisk", "DiskWakeup", "DiskSpindown", "DISK_IO_ERR"]),
-    ("ups", "UPS", ["UPS_ENABLE", "UPS_DISABLE", "UPS_ONBATT", "UPS_ONBATT_LOWBATT", "UPS_ONLINE"]),
-    ("share_protocol", "共享协议", [
-        "WEBDAV_ENABLED", "WEBDAV_DISABLED", "SAMBA_ENABLED", "SAMBA_DISABLED",
-        "DLNA_ENABLED", "DLNA_DISABLED", "FTP_ENABLED", "FTP_DISABLED", "NFS_ENABLED", "NFS_DISABLED",
-    ]),
-    ("app_manage", "应用管理", [
-        "APP_CRASH", "APP_UPDATE_FAILED",
-        "APP_START_FAILED_LOCAL_APP_RUN_EXCEPTION",
-        "APP_AUTO_START_FAILED_DOCKER_NOT_AVAILABLE",
-        "APP_STARTED", "APP_STOPPED", "APP_UPDATED",
-        "APP_INSTALLED", "APP_AUTO_STARTED", "APP_UNINSTALLED",
-    ]),
-    ("file_ops", "文件操作", [
-        "ARCHIVING_SUCCESS", "DeleteFile", "MovetoTrashbin", "SHARE_EVENTID_DEL", "SHARE_EVENTID_PUT",
-    ]),
-    ("vm", "虚拟机", [
-        "STATUS_RUNNING_VM", "SHUTDOWN_VM", "DESTROY_VM",
-    ]),
-]
-# 不在 UI 中提供选择（内部使用的系统事件）
-EVENT_IDS_HIDDEN_IN_UI = {"APP_START", "APP_STOP"}
-
-# 应用生命周期事件（默认不勾选）
-APP_LIFECYCLE_EVENTS = {
-    "APP_STARTED",
-    "APP_STOPPED",
-    "APP_UPDATED",
-    "APP_INSTALLED",
-    "APP_AUTO_STARTED",
-    "APP_UNINSTALLED",
-}
-
-# 后端认可的事件 ID（与 config.Config 校验一致，保存时只保留此集合内的项）
-VALID_EVENT_IDS = frozenset({
-    "LoginSucc", "LoginSucc2FA1", "LoginFail", "Logout", "FoundDisk",
-    "SSH_INVALID_USER", "SSH_AUTH_FAILED", "SSH_LOGIN_SUCCESS", "SSH_DISCONNECTED",
-    "APP_CRASH", "APP_UPDATE_FAILED", "APP_START_FAILED_LOCAL_APP_RUN_EXCEPTION",
-    "APP_AUTO_START_FAILED_DOCKER_NOT_AVAILABLE",
-    "APP_STARTED", "APP_STOPPED", "APP_UPDATED", "APP_INSTALLED", "APP_AUTO_STARTED", "APP_UNINSTALLED",
-    "CPU_USAGE_ALARM", "CPU_USAGE_RESTORED", "CPU_TEMPERATURE_ALARM",
-    "UPS_ONBATT", "UPS_ONBATT_LOWBATT", "UPS_ONLINE", "UPS_ENABLE", "UPS_DISABLE",
-    "DiskWakeup", "DiskSpindown", "DISK_IO_ERR",
-    "ARCHIVING_SUCCESS", "DeleteFile", "MovetoTrashbin", "SHARE_EVENTID_DEL", "SHARE_EVENTID_PUT",
-    "WEBDAV_ENABLED", "WEBDAV_DISABLED", "SAMBA_ENABLED", "SAMBA_DISABLED",
-    "DLNA_ENABLED", "DLNA_DISABLED", "FTP_ENABLED", "FTP_DISABLED", "NFS_ENABLED", "NFS_DISABLED",
-    "FW_ENABLE", "FW_DISABLE", "SECURITY_PORTCHANGED",
-    "SHUTDOWN_VM", "STATUS_RUNNING_VM", "DESTROY_VM",
-})
-
-# 默认勾选的事件（不含应用生命周期 6 项；应用启动/自启动失败、UPS 开启/关闭 默认不勾选）
-DEFAULT_SELECTED_EVENTS = [
-    "LoginSucc",
-    "LoginSucc2FA1",
-    "LoginFail",
-    "Logout",
-    "FoundDisk",
-    "APP_CRASH",
-    "APP_UPDATE_FAILED",
-    "CPU_USAGE_ALARM",
-    "CPU_USAGE_RESTORED",
-    "CPU_TEMPERATURE_ALARM",
-    "UPS_ONBATT",
-    "UPS_ONBATT_LOWBATT",
-    "UPS_ONLINE",
-    "DiskWakeup",
-    "DiskSpindown",
-    "SSH_INVALID_USER",
-    "SSH_AUTH_FAILED",
-    "SSH_LOGIN_SUCCESS",
-    "SSH_DISCONNECTED",
-    "DISK_IO_ERR",
-]
-
-# 旧版默认勾选（含应用启动失败、自启动失败、UPS 开启/关闭），用于迁移：若当前配置等于此集合则改为新默认
-OLD_DEFAULT_SELECTED_EVENTS_WITH_EXTRA = {
-    "APP_START_FAILED_LOCAL_APP_RUN_EXCEPTION",
-    "APP_AUTO_START_FAILED_DOCKER_NOT_AVAILABLE",
-    "UPS_ENABLE",
-    "UPS_DISABLE",
-}
+    _save_raw_config_to_file(CONFIG_FILE, data)
 
 
 def create_app(on_config_saved=None) -> Flask:
     """创建 Flask 应用。on_config_saved: 保存配置成功后的回调（用于热加载，无需重启）。"""
     app = Flask(__name__)
+    icon_ver = str(int(ICON_FILE.stat().st_mtime)) if ICON_FILE.exists() else ""
+    icon_url = f"/assets/icons/app-icon.png?v={icon_ver}" if icon_ver else ""
+    favicon_url = f"/favicon.ico?v={icon_ver}" if icon_ver else ""
+    gh_ver = str(int(GITHUB_ICON_FILE.stat().st_mtime)) if GITHUB_ICON_FILE.exists() else ""
+    github_icon_url = f"/assets/icons/github.svg?v={gh_ver}" if gh_ver else "/assets/icons/github.svg"
+    assets_dir = BASE_DIR / "assets"
+
+    @app.get("/assets/<path:filename>")
+    def serve_assets(filename: str):
+        """提供项目 assets 目录下的静态文件。"""
+        if not assets_dir.exists():
+            abort(404)
+        return send_from_directory(str(assets_dir), filename)
+
+    @app.get("/favicon.ico")
+    def favicon():
+        """浏览器 favicon；复用 app-icon.png，避免 404。"""
+        if ICON_FILE.exists():
+            return send_from_directory(str(ICON_FILE.parent), ICON_FILE.name)
+        abort(404)
 
     from notifier.multi_platform_notifier import MultiPlatformNotifier
 
     titles = MultiPlatformNotifier.EVENT_TITLES
     notes = MultiPlatformNotifier.EVENT_NOTES
-    # 按分类构造事件列表，并排除 APP_START、APP_STOP
-    events_by_category = []
-    for cat_id, cat_name, event_ids in EVENT_CATEGORIES:
-        events = []
-        for key in event_ids:
-            if key in EVENT_IDS_HIDDEN_IN_UI or key not in titles:
-                continue
-            # UI 里事件选择标题不展示“飞牛NAS”前缀：因为前缀已在下方“事件标题前缀”配置。
-            raw_title = titles[key]
-            display_title = raw_title.replace("飞牛NAS-", "").replace("飞牛NAS", "")
-            display_title = re.sub(r"\s+", " ", display_title).strip()
-            events.append({
-                "id": key,
-                "title": display_title,
-                "note": notes.get(key, ""),
-            })
-        if events:
-            events_by_category.append({"id": cat_id, "name": cat_name, "events": events})
+    raw_cfg = _load_raw_config()
+    logger_db_path = (raw_cfg.get("logger_db_path") or "/usr/trim/var/eventlogger_service/logger_data.db3").strip()
+    events_by_category, valid_event_ids, discovered_vm_event_ids = build_events_for_ui(
+        logger_db_path=logger_db_path,
+        titles=titles,
+        notes=notes,
+    )
 
     CHANNEL_OPTIONS = [
         {"id": "wechat", "name": "企业微信"},
@@ -281,6 +118,7 @@ def create_app(on_config_saved=None) -> Flask:
         {"id": "feishu", "name": "飞书"},
         {"id": "bark", "name": "Bark"},
         {"id": "pushplus", "name": "PushPlus"},
+        {"id": "magic_push", "name": "魔法推送"},
     ]
 
     PROTECTED_PATHS = {"/", "/history", "/api/config", "/api/save-config", "/api/test", "/api/push-stats"}
@@ -292,6 +130,19 @@ def create_app(on_config_saved=None) -> Flask:
         if request.path == "/":
             return None
         if request.path == "/history" and request.method == "GET":
+            return None
+        # 捐赠页与收款码：与配置页同一套密码与空闲超时（SESSION_IDLE_SECONDS，默认 300s）
+        if request.path == "/support" and request.method == "GET":
+            if not _has_password_set() or not _is_password_verification_enabled():
+                return None
+            if not _is_authenticated():
+                return redirect("/")
+            return None
+        if request.path.startswith("/support/img/") and request.method == "GET":
+            if not _has_password_set() or not _is_password_verification_enabled():
+                return None
+            if not _is_authenticated():
+                abort(403)
             return None
         if request.path not in PROTECTED_PATHS and not request.path.startswith(PROTECTED_PREFIXES):
             return None
@@ -364,6 +215,8 @@ def create_app(on_config_saved=None) -> Flask:
             return jsonify({"ok": False, "message": "请输入密码。"}), 400
         raw = _load_raw_config()
         salt, stored_hash = _get_password_config(raw)
+        if not salt or not stored_hash:
+            return jsonify({"ok": False, "message": "密码配置无效，请重新设置密码。"}), 400
         if not _verify_password(password, salt, stored_hash):
             return jsonify({"ok": False, "message": "密码错误。"}), 401
         session_id = _create_session()
@@ -411,6 +264,7 @@ def create_app(on_config_saved=None) -> Flask:
             ("feishu", "feishu_webhook_url"),
             ("bark", "bark_url"),
             ("pushplus", "pushplus_params"),
+            ("magic_push", "magic_push_params"),
         ]:
             for url in _split_urls(raw.get(key, "")):
                 # 过滤掉模板中的 ${WECHAT_WEBHOOK_URL} 这类占位符
@@ -419,9 +273,9 @@ def create_app(on_config_saved=None) -> Flask:
                 channels.append({"type": ch_type, "url": url})
 
         data = {
-            "title": "FnMessageBots",
+            "title": "FnMessageBot",
             "subtitle": "飞牛日志消息推送机器人",
-            "version": "2.0.4",
+            "version": "2.1.0",
             "events_by_category": events_by_category,
             "selected_events": monitor_events,
             "channels": channels,
@@ -435,6 +289,7 @@ def create_app(on_config_saved=None) -> Flask:
             "dnd_start_time": (raw.get("dnd_start_time") or "22:00").strip(),
             "dnd_end_time": (raw.get("dnd_end_time") or "07:00").strip(),
             "web_password_enabled": bool(raw.get("web_password_enabled", True)),
+            "poll_batch_summary_enabled": bool(raw.get("poll_batch_summary_enabled", False)),
             "channel_options": CHANNEL_OPTIONS,
         }
         return jsonify({"ok": True, "data": data})
@@ -445,7 +300,7 @@ def create_app(on_config_saved=None) -> Flask:
 
         events = payload.get("events") or []
         # 只保留后端认可的事件 ID，避免写入非法值导致热加载或重启异常
-        events = [e for e in events if e in VALID_EVENT_IDS]
+        events = [e for e in events if e in valid_event_ids]
         channels = payload.get("channels") or []
         log_retention_days = payload.get("log_retention_days", 7)
         logger_poll_interval = payload.get("logger_poll_interval", 3)
@@ -454,6 +309,7 @@ def create_app(on_config_saved=None) -> Flask:
         dnd_start_time = (payload.get("dnd_start_time") or "22:00").strip()
         dnd_end_time = (payload.get("dnd_end_time") or "07:00").strip()
         web_password_enabled = bool(payload.get("web_password_enabled", True))
+        poll_batch_summary_enabled = bool(payload.get("poll_batch_summary_enabled", False))
         title_prefix = _title_prefix_from_dict(payload)
         if title_prefix and len(title_prefix) > 20:
             return jsonify({"ok": False, "message": "标题前缀过长（最多 20 个字符）。"}), 400
@@ -480,7 +336,7 @@ def create_app(on_config_saved=None) -> Flask:
         for ch in channels:
             ch_type = ch.get("type")
             url = (ch.get("url") or "").strip()
-            if ch_type not in {"wechat", "dingtalk", "feishu", "bark", "pushplus"}:
+            if ch_type not in {"wechat", "dingtalk", "feishu", "bark", "pushplus", "magic_push"}:
                 return jsonify({"ok": False, "message": "存在未知的推送渠道类型。"}), 400
             if not url:
                 return jsonify({"ok": False, "message": "推送渠道地址不能为空。"}), 400
@@ -491,6 +347,19 @@ def create_app(on_config_saved=None) -> Flask:
                         return jsonify({"ok": False, "message": "PushPlus 参数必须是包含 token 的 JSON 对象。"}), 400
                 except json.JSONDecodeError as e:
                     return jsonify({"ok": False, "message": f"PushPlus 参数不是合法 JSON：{e}"}), 400
+            elif ch_type == "magic_push":
+                try:
+                    obj = json.loads(url)
+                    if not isinstance(obj, dict):
+                        return jsonify({"ok": False, "message": "魔法推送配置须为 JSON 对象。"}), 400
+                    base = (obj.get("base_url") or "").strip()
+                    token = (obj.get("token") or "").strip()
+                    if not base or not token:
+                        return jsonify({"ok": False, "message": "魔法推送须填写基础 URL 与 Token。"}), 400
+                    if not base.startswith("http"):
+                        return jsonify({"ok": False, "message": "魔法推送基础 URL 须为 http(s) 地址。"}), 400
+                except json.JSONDecodeError as e:
+                    return jsonify({"ok": False, "message": f"魔法推送配置不是合法 JSON：{e}"}), 400
             elif not url.startswith("http"):
                 return (
                     jsonify({"ok": False, "message": f"推送地址格式不正确：{url}"}),
@@ -520,6 +389,7 @@ def create_app(on_config_saved=None) -> Flask:
         feishu_urls = []
         bark_urls = []
         pushplus_urls = []
+        magic_push_urls = []
         for ch in channels:
             ch_type = ch.get("type")
             url = (ch.get("url") or "").strip()
@@ -533,6 +403,8 @@ def create_app(on_config_saved=None) -> Flask:
                 bark_urls.append(url)
             elif ch_type == "pushplus":
                 pushplus_urls.append(url)
+            elif ch_type == "magic_push":
+                magic_push_urls.append(url)
 
         raw = _load_raw_config()
         raw.update(
@@ -542,6 +414,7 @@ def create_app(on_config_saved=None) -> Flask:
                 "feishu_webhook_url": _join_urls(feishu_urls),
                 "bark_url": _join_urls(bark_urls),
                 "pushplus_params": _join_urls(pushplus_urls),
+                "magic_push_params": _join_urls(magic_push_urls),
                 "monitor_events": events,
                 "log_retention_days": log_retention_days,
                 "logger_poll_interval": logger_poll_interval,
@@ -550,6 +423,7 @@ def create_app(on_config_saved=None) -> Flask:
                 "dnd_start_time": dnd_start_time,
                 "dnd_end_time": dnd_end_time,
                 "web_password_enabled": web_password_enabled,
+                "poll_batch_summary_enabled": poll_batch_summary_enabled,
                 "title_prefix": title_prefix,
             }
         )
@@ -576,26 +450,14 @@ def create_app(on_config_saved=None) -> Flask:
                 return jsonify({"ok": False, "message": "请输入要测试的内容。"}), 400
 
             raw = _load_raw_config()
-
-            notifier = MultiPlatformNotifier(
-                wechat_webhook_url=raw.get("wechat_webhook_url", ""),
-                dingtalk_webhook_url=raw.get("dingtalk_webhook_url", ""),
-                feishu_webhook_url=raw.get("feishu_webhook_url", ""),
-                bark_url=raw.get("bark_url", ""),
-                pushplus_params=raw.get("pushplus_params", ""),
-                title_prefix=_title_prefix_from_dict(raw),
-                dedup_window=int(raw.get("dedup_window", 300)),
-                pool_size=int(raw.get("http_pool_size", 10)),
-                retries=int(raw.get("http_retry_count", 3)),
-                timeout=int(raw.get("http_timeout", 10)),
-            )
+            notifier = _build_notifier_from_raw(raw)
 
             out = notifier.send_system_notification(
                 "TEST_PUSH",
                 content,
                 {
                     "hostname": socket.gethostname(),
-                    "version": "2.0.4",
+                    "version": "2.1.0",
                 },
             )
             ok = out.get("success", False) if isinstance(out, dict) else bool(out)
@@ -609,17 +471,10 @@ def create_app(on_config_saved=None) -> Flask:
     def get_push_stats():
         """推送数据汇总：总条数/成功/失败，当日条数/成功/失败（基于 SQLite push_history）。"""
         try:
-            from utils import push_history
-            if not push_history.get_db_path():
-                from utils import push_stats
-                raw = _load_raw_config()
-                push_stats.init(raw.get("cursor_dir", "./data/cursor"))
+            stats = get_push_history_stats(_load_raw_config)
             return jsonify({
                 "ok": True,
-                "data": {
-                    "total": push_history.get_total_counts(),
-                    "today": push_history.get_today_counts(),
-                },
+                "data": stats,
             })
         except Exception:
             return jsonify({
@@ -634,21 +489,15 @@ def create_app(on_config_saved=None) -> Flask:
     def get_push_history():
         """推送记录列表：分页，可选按成功/失败筛选。"""
         try:
-            from utils import push_stats
-            from utils import push_history
-            if not push_history.get_db_path():
-                raw = _load_raw_config()
-                push_stats.init(raw.get("cursor_dir", "./data/cursor"))
             limit = min(100, max(1, request.args.get("limit", 50, type=int)))
             offset = max(0, request.args.get("offset", 0, type=int))
-            success_param = request.args.get("success")
-            success_filter = None
-            if success_param is not None:
-                if success_param in ("1", "true"):
-                    success_filter = True
-                elif success_param in ("0", "false"):
-                    success_filter = False
-            rows = push_history.get_records(limit=limit, offset=offset, success_filter=success_filter)
+            success_filter = _parse_success_filter(request.args.get("success"))
+            rows = list_push_history_records(
+                _load_raw_config,
+                limit=limit,
+                offset=offset,
+                success_filter=success_filter,
+            )
             return jsonify({"ok": True, "data": rows})
         except Exception as e:
             return jsonify({"ok": False, "message": str(e)}), 500
@@ -657,20 +506,9 @@ def create_app(on_config_saved=None) -> Flask:
     def get_push_history_detail(record_id):
         """单条推送记录详情。"""
         try:
-            from utils import push_stats
-            from utils import push_history
-            if not push_history.get_db_path():
-                raw = _load_raw_config()
-                push_stats.init(raw.get("cursor_dir", "./data/cursor"))
-            row = push_history.get_record(record_id)
+            row = get_push_history_record(_load_raw_config, record_id)
             if row is None:
                 return jsonify({"ok": False, "message": "记录不存在"}), 404
-            if row.get("detail"):
-                try:
-                    row = dict(row)
-                    row["detail"] = json.loads(row["detail"]) if isinstance(row["detail"], str) else row["detail"]
-                except Exception:
-                    pass
             return jsonify({"ok": True, "data": row})
         except Exception as e:
             return jsonify({"ok": False, "message": str(e)}), 500
@@ -678,131 +516,40 @@ def create_app(on_config_saved=None) -> Flask:
     @app.get("/history")
     def history_page():
         """推送记录二级页：列表 + 筛选 + 加载更多 + 查看详情。"""
-        return render_template_string("""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-  <meta charset="UTF-8" />
-  <title>推送记录 - FnMessageBots</title>
-  <style>
-    body { margin: 0; padding: 24px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f3f4f6; color: #111827; }
-    h1 { font-size: 20px; margin: 0 0 8px; }
-    .page-hint { font-size: 13px; color: #6b7280; line-height: 1.5; margin: 0 0 16px; }
-    .toolbar { margin-bottom: 12px; display: flex; gap: 8px; align-items: center; }
-    .btn { padding: 6px 12px; font-size: 13px; border-radius: 6px; border: 1px solid #e5e7eb; background: #fff; cursor: pointer; color: #374151; text-decoration: none; }
-    .btn:hover { background: #f3f4f6; }
-    .filter-btn.active { background: #3b82f6; border-color: #3b82f6; color: #fff; }
-    table { width: 100%; border-collapse: collapse; font-size: 13px; background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
-    th, td { padding: 10px 12px; border-bottom: 1px solid #e5e7eb; text-align: left; }
-    th { background: #f9fafb; font-weight: 600; }
-    .result-ok { color: #16a34a; }
-    .result-fail { color: #dc2626; }
-    .summary { max-width: 320px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .empty { padding: 24px; text-align: center; color: #9ca3af; font-size: 13px; }
-    .link { color: #3b82f6; cursor: pointer; }
-    .link:hover { text-decoration: underline; }
-    .more-wrap { margin-top: 12px; text-align: center; }
-    .detail-wrap { margin-top: 20px; padding: 16px; background: #fff; border-radius: 8px; border: 1px solid #e5e7eb; }
-    .detail-wrap h2 { font-size: 14px; margin: 0 0 8px; }
-    pre { margin: 0; white-space: pre-wrap; word-break: break-all; font-size: 12px; background: #1f2937; color: #e5e7eb; padding: 12px; border-radius: 6px; }
-  </style>
-</head>
-<body>
-  <h1>推送记录</h1>
-  <p class="page-hint">最多存储一万条数据，超过限制会自动删除。</p>
-  <div class="toolbar">
-    <a class="btn" href="/">返回配置页</a>
-    <span>筛选：</span>
-    <button class="btn filter-btn active" data-filter="">全部</button>
-    <button class="btn filter-btn" data-filter="true">成功</button>
-    <button class="btn filter-btn" data-filter="false">失败</button>
-  </div>
-  <table>
-    <thead><tr><th style="width:160px;">时间</th><th style="width:120px;">事件类型</th><th style="width:60px;">结果</th><th>摘要</th><th>渠道返回结果</th></tr></thead>
-    <tbody id="tbody"></tbody>
-  </table>
-  <div id="empty" class="empty" style="display:none;">暂无推送记录</div>
-  <div class="more-wrap"><button id="btn-more" class="btn" style="display:none;">加载更多</button></div>
-  <script>
-  var fetchOpts = { credentials: "include" };
-  var offset = 0;
-  var pageSize = 30;
-  var currentFilter = "";
-  function loadList(reset) {
-    if (reset) { offset = 0; document.getElementById("tbody").innerHTML = ""; }
-    var params = "limit=" + pageSize + "&offset=" + offset;
-    if (currentFilter !== "") params += "&success=" + currentFilter;
-    fetch("/api/push-history?" + params, fetchOpts).then(function(r){
-      if (r.status === 401) { window.location.href = "/"; return; }
-      return r.json();
-    }).then(function(json){
-      if (!json || !json.ok || !Array.isArray(json.data)) return;
-      var rows = json.data;
-      var tbody = document.getElementById("tbody");
-      var emptyEl = document.getElementById("empty");
-      if (rows.length === 0 && offset === 0) { emptyEl.style.display = "block"; } else { emptyEl.style.display = "none"; }
-      for (var i = 0; i < rows.length; i++) {
-        var r = rows[i];
-        var tr = document.createElement("tr");
-        var td1 = document.createElement("td"); td1.textContent = r.created_at || ""; tr.appendChild(td1);
-        var td2 = document.createElement("td"); td2.textContent = r.event_type || ""; tr.appendChild(td2);
-        var td3 = document.createElement("td"); td3.textContent = r.success ? "成功" : "失败"; td3.className = r.success ? "result-ok" : "result-fail"; tr.appendChild(td3);
-        var td4 = document.createElement("td"); td4.className = "summary"; td4.textContent = r.summary || "-"; td4.title = r.summary || ""; tr.appendChild(td4);
-        var td5 = document.createElement("td"); td5.className = "summary";
-        var channelText = "-";
-        var channelTitle = "";
-        if (r.detail) {
-          try {
-            var detail = typeof r.detail === "string" ? JSON.parse(r.detail) : r.detail;
-            if (detail && Array.isArray(detail.channel_results) && detail.channel_results.length > 0) {
-              var parts = [];
-              var fullParts = [];
-              detail.channel_results.forEach(function(c){
-                var status = c.success ? "成功" : "失败";
-                var extra = "";
-                if (!c.success) {
-                  if (c.response != null && typeof c.response === "object") {
-                    extra = JSON.stringify(c.response);
-                  } else if (typeof c.response === "string") {
-                    extra = c.response;
-                  }
-                  if (!extra && c.error) extra = c.error;
-                  if (!extra) extra = "无返回详情";
-                }
-                var extraShort = extra ? (extra.length > 45 ? extra.slice(0, 45) + "…" : extra) : "";
-                var short = c.channel + ": " + status + (extraShort ? " (" + extraShort + ")" : "");
-                parts.push(short);
-                var fullExtra = extra ? " — " + extra : "";
-                fullParts.push(c.channel + ": " + status + fullExtra);
-              });
-              channelText = parts.join("; ");
-              channelTitle = fullParts.join(String.fromCharCode(10));
-            }
-          } catch (e) {
-            channelText = "详情解析失败";
-          }
-        }
-        td5.textContent = channelText;
-        td5.title = channelTitle || channelText;
-        tr.appendChild(td5);
-        tbody.appendChild(tr);
-      }
-      offset += rows.length;
-      document.getElementById("btn-more").style.display = rows.length >= pageSize ? "inline-block" : "none";
-    }).catch(function(){});
-  }
-  document.querySelectorAll(".filter-btn").forEach(function(btn){
-    btn.onclick = function(){
-      document.querySelectorAll(".filter-btn").forEach(function(b){ b.classList.remove("active"); });
-      this.classList.add("active");
-      currentFilter = this.getAttribute("data-filter") || "";
-      loadList(true);
-    };
-  });
-  document.getElementById("btn-more").onclick = function(){ loadList(false); };
-  loadList(true);
-  </script>
-</body>
-</html>""")
+        return render_template_string(HISTORY_PAGE_TEMPLATE, favicon_url=favicon_url)
+
+    @app.get("/support/img/<path:name>")
+    def support_qr(name: str):
+        """支持作者页收款码（仅允许白名单文件名）。"""
+        safe = Path(name).name
+        if safe not in SUPPORT_QR_FILENAMES:
+            abort(404)
+        if not SUPPORT_QR_DIR.is_dir():
+            abort(404)
+        target = SUPPORT_QR_DIR / safe
+        if not target.is_file():
+            abort(404)
+        return send_from_directory(str(SUPPORT_QR_DIR), safe)
+
+    @app.get("/support")
+    def support_page():
+        """支持作者：展示 README 中与捐赠说明一致的收款二维码。"""
+        wechat_src = (
+            "/support/img/wechat_pay.jpg"
+            if SUPPORT_QR_DIR.is_dir() and (SUPPORT_QR_DIR / "wechat_pay.jpg").is_file()
+            else ""
+        )
+        ali_src = (
+            "/support/img/ali_pay.jpg"
+            if SUPPORT_QR_DIR.is_dir() and (SUPPORT_QR_DIR / "ali_pay.jpg").is_file()
+            else ""
+        )
+        return render_template_string(
+            SUPPORT_PAGE_TEMPLATE,
+            favicon_url=favicon_url,
+            wechat_src=wechat_src,
+            ali_src=ali_src,
+        )
 
     @app.get("/")
     def index():
@@ -813,9 +560,15 @@ def create_app(on_config_saved=None) -> Flask:
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <title>FnMessageBots 配置</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  {% if favicon_url %}
+  <link rel="icon" href="{{ favicon_url }}" />
+  {% endif %}
+<title>FnMessageBot</title>
   <style>
     * { box-sizing: border-box; }
+    :root { color-scheme: light; }
+    html[data-theme="dark"] { color-scheme: dark; }
     body {
       margin: 0;
       padding: 0;
@@ -843,13 +596,68 @@ def create_app(on_config_saved=None) -> Flask:
     .header {
       text-align: center;
       margin-bottom: 28px;
+      position: relative;
+    }
+    .theme-switcher {
+      position: absolute;
+      top: 0;
+      right: 0;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: #6b7280;
+    }
+    .theme-buttons {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .theme-btn {
+      width: 30px;
+      height: 30px;
+      border-radius: 999px;
+      border: 1px solid #d1d5db;
+      background: #fff;
+      color: #4b5563;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      font-size: 14px;
+      line-height: 1;
+      padding: 0;
+      transition: background-color .15s, border-color .15s, color .15s, transform .05s;
+    }
+    .theme-btn:hover {
+      background: #f3f4f6;
+      border-color: #9ca3af;
+    }
+    .theme-btn.active {
+      background: #2563eb;
+      border-color: #1d4ed8;
+      color: #fff;
+    }
+    .header-brand {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      margin-bottom: 6px;
+    }
+    .app-icon {
+      width: 34px;
+      height: 34px;
+      object-fit: cover;
+      flex-shrink: 0;
     }
     .header-title {
       font-size: 28px;
       font-weight: 700;
       letter-spacing: 0.06em;
       color: #111827;
-      margin-bottom: 6px;
+      margin-bottom: 0;
+      display: block;
     }
     .header-sub {
       font-size: 14px;
@@ -995,6 +803,11 @@ def create_app(on_config_saved=None) -> Flask:
       width: 100%;
       border-collapse: collapse;
     }
+    .table-wrap {
+      width: 100%;
+      overflow-x: auto;
+      border-radius: 8px;
+    }
     .channels-table th,
     .channels-table td {
       padding: 6px 8px;
@@ -1082,6 +895,39 @@ def create_app(on_config_saved=None) -> Flask:
       gap: 10px;
       margin-top: 16px;
     }
+    .home-footer {
+      margin-top: 24px;
+      padding-top: 20px;
+      border-top: 1px solid #e5e7eb;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: center;
+      gap: 8px 14px;
+      font-size: 13px;
+      color: #6b7280;
+    }
+    .home-footer .footer-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: #4b5563;
+      text-decoration: none;
+    }
+    .home-footer .footer-link:hover {
+      color: #2563eb;
+      text-decoration: underline;
+    }
+    .home-footer .footer-github-icon {
+      width: 18px;
+      height: 18px;
+      flex-shrink: 0;
+      display: block;
+    }
+    .home-footer .footer-sep {
+      color: #d1d5db;
+      user-select: none;
+    }
     .system-grid {
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1162,16 +1008,169 @@ def create_app(on_config_saved=None) -> Flask:
       }
     }
     @media (max-width: 768px) {
-      .card {
-        padding: 24px 18px 24px;
+      .page {
+        align-items: flex-start;
+        padding: 12px;
       }
+      .card {
+        padding: 16px 12px 18px;
+        border-radius: 12px;
+        max-width: 100%;
+      }
+      .theme-switcher {
+        position: absolute;
+        top: -2px;
+        right: 0;
+        justify-content: flex-end;
+        width: auto;
+        margin-bottom: 0;
+      }
+      .theme-switcher span { display: none; }
+      .theme-buttons { gap: 4px; }
+      .theme-btn { width: 28px; height: 28px; font-size: 13px; }
+      .header { margin-bottom: 16px; }
+      .header-brand { gap: 8px; margin-bottom: 4px; padding-right: 74px; }
+      .app-icon { width: 30px; height: 30px; }
+      .header-title {
+        font-size: 22px;
+        letter-spacing: 0.02em;
+        max-width: calc(100vw - 130px);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .header-sub { font-size: 13px; }
+      .header-ver { font-size: 12px; }
+      .section { padding: 12px; margin-bottom: 12px; }
+      .section-title { font-size: 14px; margin-bottom: 8px; }
+      .events-by-category { max-height: none; }
+      .events-grid { grid-template-columns: 1fr; gap: 8px; padding-right: 0; }
+      .event-item { padding: 8px 10px; }
+      .channels-header { flex-wrap: wrap; gap: 8px; }
+      .channels-table { min-width: 760px; }
+      .footer-actions { justify-content: stretch; }
+      .footer-actions .btn { width: 100%; min-width: 0; }
+      .btn { min-width: 0; }
       .system-grid {
         grid-template-columns: 1fr;
+        gap: 10px;
       }
       .stats-grid {
         grid-template-columns: 1fr;
       }
+      textarea { min-height: 88px; }
+      .home-footer { margin-top: 16px; padding-top: 16px; gap: 6px 10px; font-size: 12px; }
     }
+    html[data-theme="dark"] .home-footer {
+      border-top-color: #374151;
+      color: #9ca3af;
+    }
+    html[data-theme="dark"] .home-footer .footer-link {
+      color: #d1d5db;
+    }
+    html[data-theme="dark"] .home-footer .footer-github-icon {
+      filter: invert(1) brightness(1.05);
+    }
+    .license-footer {
+      margin: 0;
+      padding-top: 12px;
+      text-align: center;
+      font-size: 11px;
+      line-height: 1.5;
+      color: #9ca3af;
+    }
+    html[data-theme="dark"] .license-footer {
+      color: #6b7280;
+    }
+    html[data-theme="dark"] body {
+      background: #111827;
+      color: #e5e7eb;
+    }
+    html[data-theme="dark"] .card {
+      background: rgba(17,24,39,0.9);
+      border-color: rgba(75,85,99,0.55);
+      box-shadow: 0 18px 40px rgba(0,0,0,0.45);
+    }
+    html[data-theme="dark"] .section {
+      background: #111827;
+      border-color: #374151;
+    }
+    html[data-theme="dark"] .header-title { color: #f9fafb; }
+    html[data-theme="dark"] .section-title { color: #f9fafb; }
+    html[data-theme="dark"] .section-title small { color: #9ca3af; }
+    html[data-theme="dark"] .event-category-title {
+      color: #e5e7eb;
+      border-bottom-color: #374151;
+    }
+    html[data-theme="dark"] .stats-label { color: #d1d5db; }
+    html[data-theme="dark"] .event-item span { color: #e5e7eb; }
+    html[data-theme="dark"] .header-sub,
+    html[data-theme="dark"] .header-ver,
+    html[data-theme="dark"] .field-label,
+    html[data-theme="dark"] .field-helper,
+    html[data-theme="dark"] .theme-switcher {
+      color: #9ca3af;
+    }
+    html[data-theme="dark"] .theme-btn {
+      background: #111827;
+      border-color: #4b5563;
+      color: #d1d5db;
+    }
+    html[data-theme="dark"] .theme-btn:hover {
+      background: #1f2937;
+      border-color: #6b7280;
+    }
+    html[data-theme="dark"] .theme-btn.active {
+      background: #2563eb;
+      border-color: #1d4ed8;
+      color: #fff;
+    }
+    html[data-theme="dark"] .stats-block {
+      background: #0f172a;
+      border-color: #374151;
+    }
+    html[data-theme="dark"] .stats-row .stats-total { color: #e5e7eb; }
+    html[data-theme="dark"] .event-item {
+      background: #0f172a;
+      border-color: #374151;
+      color: #d1d5db;
+    }
+    html[data-theme="dark"] .event-item:hover {
+      background: #111827;
+      border-color: #4b5563;
+    }
+    html[data-theme="dark"] .channels-table thead th {
+      border-bottom-color: #374151;
+      color: #9ca3af;
+    }
+    html[data-theme="dark"] .channels-table tbody tr:not(:last-child) td {
+      border-bottom-color: #1f2937;
+    }
+    html[data-theme="dark"] select,
+    html[data-theme="dark"] input[type="text"],
+    html[data-theme="dark"] input[type="number"],
+    html[data-theme="dark"] input[type="password"],
+    html[data-theme="dark"] textarea {
+      background-color: #111827;
+      color: #e5e7eb;
+      border-color: #4b5563;
+    }
+    html[data-theme="dark"] .btn-ghost {
+      background: #111827;
+      color: #e5e7eb;
+      border-color: #4b5563;
+    }
+    html[data-theme="dark"] .btn-ghost:hover {
+      background: #1f2937;
+    }
+    html[data-theme="dark"] .auth-page { background: #111827; }
+    html[data-theme="dark"] .auth-card {
+      background: rgba(17,24,39,0.95);
+      border-color: rgba(75,85,99,0.55);
+      box-shadow: 0 18px 40px rgba(0,0,0,0.45);
+    }
+    html[data-theme="dark"] .auth-title { color: #f9fafb; }
+    html[data-theme="dark"] .auth-sub { color: #9ca3af; }
     .auth-page {
       min-height: 100vh;
       display: flex;
@@ -1256,13 +1255,25 @@ def create_app(on_config_saved=None) -> Flask:
         <div id="auth-login-msg" class="auth-msg"></div>
       </div>
     </div>
+    <p class="license-footer">© 2024 Sunanang · FnMessageBot · MIT License terms apply.</p>
   </div>
   <div id="app-main" class="page" style="display:none;">
     <div class="card">
       <div class="header">
-        <div class="header-title" id="app-title">FnMessageBots</div>
+        <div class="theme-switcher">
+          <div class="theme-buttons" role="group" aria-label="主题模式">
+            <button type="button" class="theme-btn" data-theme-mode="light" title="浅色模式" aria-label="浅色模式">☀</button>
+            <button type="button" class="theme-btn" data-theme-mode="dark" title="深色模式" aria-label="深色模式">🌙</button>
+          </div>
+        </div>
+        <div class="header-brand">
+          {% if icon_url %}
+          <img class="app-icon" src="{{ icon_url }}" alt="FnMessageBot" />
+          {% endif %}
+          <div class="header-title" id="app-title">FnMessageBot</div>
+        </div>
         <div class="header-sub" id="app-subtitle">飞牛日志消息推送机器人</div>
-        <div class="header-ver" id="app-version">2.0.4</div>
+        <div class="header-ver" id="app-version">2.1.0</div>
       </div>
 
       <div class="section stats-section">
@@ -1308,16 +1319,24 @@ def create_app(on_config_saved=None) -> Flask:
             <span>＋</span> 添加渠道
           </button>
         </div>
-        <table class="channels-table">
-          <thead>
-          <tr>
-            <th style="width: 120px;">渠道类型</th>
-            <th>推送地址（Webhook / Bark URL）或 PushPlus 参数（JSON）</th>
-            <th style="width: 64px; text-align: right;">操作</th>
-          </tr>
-          </thead>
-          <tbody id="channels-body"></tbody>
-        </table>
+        <div class="table-wrap">
+          <table class="channels-table">
+            <thead>
+            <tr>
+              <th style="width: 120px;">渠道类型</th>
+              <th>推送地址（Webhook / Bark URL）或 PushPlus 参数（JSON）</th>
+              <th style="width: 64px; text-align: right;">操作</th>
+            </tr>
+            </thead>
+            <tbody id="channels-body"></tbody>
+          </table>
+        </div>
+        <div class="field-helper" style="margin-top: 10px;">
+          渠道配置教程：
+          <a href="https://github.com/Sunanang/FNMessageBots/blob/main/docs/notification-channels.md" target="_blank" rel="noopener noreferrer">
+            推送渠道配置教程
+          </a>
+        </div>
       </div>
 
       <div class="section">
@@ -1343,14 +1362,21 @@ def create_app(on_config_saved=None) -> Flask:
             <div class="field-helper">轮询日志数据库的间隔时间，过小会增加磁盘 IO。</div>
           </div>
           <div>
-            <div class="field-label">数据库地址（不确定就不要修改）</div>
+            <div class="field-label" style="display: flex; align-items: center; gap: 8px;">
+              <input type="checkbox" id="input-poll-batch-summary" />
+              <span>轮询汇总模式</span>
+            </div>
+            <div class="field-helper">开启后短时间内的多条事件合并为一条推送。若关闭，短时间内频繁推送可能触发渠道限流。</div>
+          </div>
+          <div>
+            <div class="field-label">数据库地址</div>
             <input id="input-db-path" type="text" />
-            <div class="field-helper">默认：/usr/trim/var/eventlogger_service/logger_data.db3</div>
+            <div class="field-helper">默认设置，不确定就不要修改！否则可能导致无法正常运行！</div>
           </div>
           <div>
             <div class="field-label">事件标题前缀</div>
             <input id="input-title-prefix" type="text" placeholder="飞牛NAS" />
-            <div class="field-helper">默认「飞牛NAS」；未填写或仅空格保存后仍使用默认。</div>
+            <div class="field-helper">默认「飞牛NAS」，内容为空则无前缀。</div>
           </div>
         </div>
         <div class="dnd-section" style="margin-top: 16px; padding-top: 16px; border-top: 1px solid #e5e7eb;">
@@ -1380,19 +1406,61 @@ def create_app(on_config_saved=None) -> Flask:
 
       <div class="section test-section">
         <div class="section-title">
-          <span>测试推送 <small>保存成功后，可发送测试消息验证渠道是否配置正确</small></span>
+          <span>测试推送 <small>保存成功后，可发送测试消息验证渠道是否配置正确（PS:发送不成功，尝试一下保存配置）</small></span>
         </div>
-        <textarea id="test-content" placeholder="请输入要发送的测试内容，例如：这是一条 FnMessageBots 配置测试消息。"></textarea>
+        <textarea id="test-content" placeholder="请输入要发送的测试内容，例如：这是一条 FnMessageBot 配置测试消息。"></textarea>
         <div class="footer-actions" style="margin-top: 10px;">
           <button class="btn btn-ghost" id="test-btn" type="button" disabled>发送测试</button>
         </div>
         <div class="status-bar" id="status-bar"></div>
       </div>
+
+      <div class="home-footer">
+        <a class="footer-link" href="https://github.com/Sunanang/FNMessageBots" target="_blank" rel="noopener noreferrer">
+          <img class="footer-github-icon" src="{{ github_icon_url }}" alt="" width="18" height="18" decoding="async" />
+          开源地址
+        </a>
+        <span class="footer-sep" aria-hidden="true">·</span>
+        <a class="footer-link" href="/support">支持作者</a>
+      </div>
+      <p class="license-footer">© 2024 Sunanang · FnMessageBot · MIT License terms apply.</p>
     </div>
   </div>
   <div id="toast-container" class="toast-container"></div>
 
   <script>
+    const THEME_STORAGE_KEY = "fnmb_theme";
+    const themeButtons = Array.from(document.querySelectorAll(".theme-btn[data-theme-mode]"));
+
+    function getStoredThemeMode() {
+      const mode = localStorage.getItem(THEME_STORAGE_KEY);
+      return (mode === "light" || mode === "dark") ? mode : "light";
+    }
+
+    function resolveTheme(mode) {
+      return mode === "dark" ? "dark" : "light";
+    }
+
+    function applyTheme(mode) {
+      const resolved = resolveTheme(mode);
+      document.documentElement.setAttribute("data-theme", resolved);
+      themeButtons.forEach(function(btn) {
+        btn.classList.toggle("active", btn.getAttribute("data-theme-mode") === mode);
+      });
+    }
+
+    function initTheme() {
+      const mode = getStoredThemeMode();
+      applyTheme(mode);
+      themeButtons.forEach(function(btn) {
+        btn.addEventListener("click", function() {
+          const nextMode = btn.getAttribute("data-theme-mode") || "light";
+          localStorage.setItem(THEME_STORAGE_KEY, nextMode);
+          applyTheme(nextMode);
+        });
+      });
+    }
+
     const eventsContainer = document.getElementById("events-container");
     const channelsBody = document.getElementById("channels-body");
     const addChannelBtn = document.getElementById("add-channel-btn");
@@ -1507,6 +1575,18 @@ def create_app(on_config_saved=None) -> Flask:
 
     const PUSHPLUS_PLACEHOLDER = '{"token":"你的token","title":"{title}","content":"消息内容","template":"html","channel":"wechat"}';
 
+    function serializeMagicPushFromInputs(wrap) {
+      if (!wrap) return "";
+      const base = (wrap.querySelector(".magic-push-base") && wrap.querySelector(".magic-push-base").value || "").trim();
+      const token = (wrap.querySelector(".magic-push-token") && wrap.querySelector(".magic-push-token").value || "").trim();
+      const titleEl = wrap.querySelector(".magic-push-title");
+      const title = titleEl ? titleEl.value.trim() : "";
+      if (!base || !token) return "";
+      const o = { base_url: base, token: token };
+      if (title) o.title = title;
+      return JSON.stringify(o);
+    }
+
     function createChannelRow(chType, url) {
       const tr = document.createElement("tr");
 
@@ -1522,29 +1602,90 @@ def create_app(on_config_saved=None) -> Flask:
       tdType.appendChild(sel);
 
       const tdUrl = document.createElement("td");
-      function setUrlWidget(isPushPlus, val) {
+      let rowChannelType = chType;
+
+      function readCurrentSerializedUrl() {
+        if (rowChannelType === "pushplus") {
+          const ta = tdUrl.querySelector("textarea");
+          return ta ? ta.value.trim() : "";
+        }
+        if (rowChannelType === "magic_push") {
+          const wrap = tdUrl.querySelector(".magic-push-fields");
+          return serializeMagicPushFromInputs(wrap);
+        }
+        const inp = tdUrl.querySelector("input.channel-url-input");
+        return inp ? inp.value.trim() : "";
+      }
+
+      function setChannelWidget(type, val) {
+        rowChannelType = type;
         tdUrl.innerHTML = "";
-        if (isPushPlus) {
+        if (type === "pushplus") {
           const ta = document.createElement("textarea");
           ta.rows = 3;
           ta.placeholder = PUSHPLUS_PLACEHOLDER;
           ta.value = val || "";
           ta.style.minHeight = "60px";
           tdUrl.appendChild(ta);
+        } else if (type === "magic_push") {
+          let base = "", token = "", title = "";
+          if (val) {
+            try {
+              const o = JSON.parse(val);
+              if (o && typeof o === "object") {
+                base = (o.base_url || "").trim();
+                token = (o.token || "").trim();
+                title = (o.title || "").trim();
+              }
+            } catch (e) { /* ignore */ }
+          }
+          const wrap = document.createElement("div");
+          wrap.className = "magic-push-fields";
+          wrap.style.display = "flex";
+          wrap.style.flexDirection = "row";
+          wrap.style.flexWrap = "wrap";
+          wrap.style.alignItems = "center";
+          wrap.style.gap = "8px";
+          const inBase = document.createElement("input");
+          inBase.type = "text";
+          inBase.className = "magic-push-base channel-url-input";
+          inBase.placeholder = "基础 URL（如 https://push.example.com，不含 /api/push）";
+          inBase.value = base;
+          inBase.style.flex = "2 1 200px";
+          inBase.style.minWidth = "160px";
+          const inTok = document.createElement("input");
+          inTok.type = "text";
+          inTok.className = "magic-push-token";
+          inTok.placeholder = "Token";
+          inTok.autocomplete = "off";
+          inTok.value = token;
+          inTok.style.flex = "1 1 140px";
+          inTok.style.minWidth = "100px";
+          const inTitle = document.createElement("input");
+          inTitle.type = "text";
+          inTitle.className = "magic-push-title";
+          inTitle.placeholder = "标题（留空则使用事件标题）";
+          inTitle.value = title;
+          inTitle.style.flex = "1 1 160px";
+          inTitle.style.minWidth = "120px";
+          wrap.appendChild(inBase);
+          wrap.appendChild(inTok);
+          wrap.appendChild(inTitle);
+          tdUrl.appendChild(wrap);
         } else {
           const inp = document.createElement("input");
           inp.type = "text";
+          inp.className = "channel-url-input";
           inp.placeholder = "例如：https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...";
           inp.value = val || "";
           tdUrl.appendChild(inp);
         }
       }
-      setUrlWidget(chType === "pushplus", url || "");
+      setChannelWidget(chType, url || "");
 
       sel.addEventListener("change", function() {
-        const prev = tdUrl.querySelector("input[type=text], textarea");
-        const prevVal = prev ? prev.value : "";
-        setUrlWidget(sel.value === "pushplus", prevVal);
+        const prevVal = readCurrentSerializedUrl();
+        setChannelWidget(sel.value, prevVal);
       });
 
       const tdOp = document.createElement("td");
@@ -1578,7 +1719,7 @@ def create_app(on_config_saved=None) -> Flask:
           return;
         }
         const data = json.data;
-        document.getElementById("app-title").textContent = data.title || "FnMessageBots";
+        document.getElementById("app-title").textContent = data.title || "FnMessageBot";
         document.getElementById("app-subtitle").textContent = data.subtitle || "";
         document.getElementById("app-version").textContent = data.version || "";
 
@@ -1679,21 +1820,26 @@ def create_app(on_config_saved=None) -> Flask:
 
         document.getElementById("input-web-password-enabled").checked = data.web_password_enabled !== false;
         document.getElementById("input-log-days").value = data.log_retention_days || 7;
-        document.getElementById("input-poll-interval").value = data.logger_poll_interval || 3;
+        document.getElementById("input-poll-interval").value = data.logger_poll_interval || 5;
+        document.getElementById("input-poll-batch-summary").checked = !!data.poll_batch_summary_enabled;
         document.getElementById("input-db-path").value = data.logger_db_path || "";
-        document.getElementById("input-title-prefix").value = data.title_prefix || "飞牛NAS";
+        document.getElementById("input-title-prefix").value =
+          typeof data.title_prefix === "string" ? data.title_prefix : "飞牛NAS";
         const dndEnabled = !!data.dnd_enabled;
         document.getElementById("input-dnd-enabled").checked = dndEnabled;
         document.getElementById("input-dnd-start").value = data.dnd_start_time || "22:00";
         document.getElementById("input-dnd-end").value = data.dnd_end_time || "07:00";
         document.getElementById("input-dnd-start").disabled = !dndEnabled;
         document.getElementById("input-dnd-end").disabled = !dndEnabled;
-        document.getElementById("input-dnd-enabled").addEventListener("change", function() {
+        const dndToggle = document.getElementById("input-dnd-enabled");
+        dndToggle.onchange = function() {
           const en = document.getElementById("input-dnd-enabled").checked;
           document.getElementById("input-dnd-start").disabled = !en;
           document.getElementById("input-dnd-end").disabled = !en;
-        });
+        };
 
+        // 配置已从服务端加载成功即可测推送，不必再次点「保存配置」。
+        testBtn.disabled = false;
         setStatus(false, "");
         loadPushStats();
       } catch (e) {
@@ -1733,13 +1879,21 @@ def create_app(on_config_saved=None) -> Flask:
       const channels = [];
       channelsBody.querySelectorAll("tr").forEach(tr => {
         const sel = tr.querySelector("select");
-        const inp = tr.querySelector("input[type=text]");
-        const ta = tr.querySelector("textarea");
-        const urlEl = inp || ta;
-        if (!sel || !urlEl) return;
-        const url = urlEl.value.trim();
+        if (!sel) return;
         const type = sel.value;
-        if (!url) return;
+        let url = "";
+        if (type === "magic_push") {
+          const wrap = tr.querySelector(".magic-push-fields");
+          url = serializeMagicPushFromInputs(wrap);
+          if (!url) return;
+        } else {
+          const inp = tr.querySelector("input.channel-url-input");
+          const ta = tr.querySelector("textarea");
+          const urlEl = ta || inp;
+          if (!urlEl) return;
+          url = urlEl.value.trim();
+          if (!url) return;
+        }
         channels.push({ type, url });
       });
 
@@ -1751,6 +1905,7 @@ def create_app(on_config_saved=None) -> Flask:
         logger_db_path: document.getElementById("input-db-path").value,
         title_prefix: (document.getElementById("input-title-prefix").value || "").trim(),
         web_password_enabled: document.getElementById("input-web-password-enabled").checked,
+        poll_batch_summary_enabled: document.getElementById("input-poll-batch-summary").checked,
         dnd_enabled: document.getElementById("input-dnd-enabled").checked,
         dnd_start_time: document.getElementById("input-dnd-start").value || "22:00",
         dnd_end_time: document.getElementById("input-dnd-end").value || "07:00",
@@ -1807,13 +1962,17 @@ def create_app(on_config_saved=None) -> Flask:
     });
 
     window.addEventListener("load", () => {
+      initTheme();
       initAuth();
       setInterval(loadPushStats, 30000);
     });
   </script>
 </body>
 </html>
-            """
+            """,
+            icon_url=icon_url,
+            favicon_url=favicon_url,
+            github_icon_url=github_icon_url,
         )
 
     return app

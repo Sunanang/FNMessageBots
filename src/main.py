@@ -39,7 +39,7 @@ class Application:
         banner = f"""
         启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         监控模式: 数据库轮询 (logger_data.db3 log 表)
-        通知方式: 企业微信/钉钉/飞书机器人/Bark/PushPlus
+        通知方式: 企业微信/钉钉/飞书机器人/Bark/PushPlus/魔法推送
 
         """
         print(banner)
@@ -52,7 +52,14 @@ class Application:
             # 加载配置（可不配置 Webhook，部署后通过 UI 配置）
             self.config = Config()
             init_push_stats(self.config.cursor_dir)
-            has_webhook = any([self.config.wechat_webhook_url, self.config.dingtalk_webhook_url, self.config.feishu_webhook_url, self.config.bark_url, self.config.pushplus_params])
+            has_webhook = any([
+                self.config.wechat_webhook_url,
+                self.config.dingtalk_webhook_url,
+                self.config.feishu_webhook_url,
+                self.config.bark_url,
+                self.config.pushplus_params,
+                getattr(self.config, "magic_push_params", "") or "",
+            ])
             if has_webhook:
                 print("配置加载完成（已配置推送渠道）")
             else:
@@ -82,6 +89,8 @@ class Application:
                 print(f"Bark: 已配置")
             if self.config.pushplus_params:
                 print(f"PushPlus: 已配置")
+            if getattr(self.config, "magic_push_params", ""):
+                print(f"魔法推送: 已配置")
             if not has_webhook:
                 print("未配置推送渠道：不轮询数据库、不推送消息，仅提供 Web 配置页面。")
                 print("初始化完成（待配置）。")
@@ -103,6 +112,12 @@ class Application:
                 poll_interval=self.config.logger_poll_interval,
                 monitor_events=self.config.monitor_events,
             )
+            if getattr(self.config, "poll_batch_summary_enabled", False):
+                self.log_poller.set_batch_handler(self.event_processor.process_batch_events)
+                print("轮询汇总模式：已开启（同一轮查询内多事件合并为一条推送）")
+            else:
+                self.log_poller.set_batch_handler(None)
+                print("轮询汇总模式：已关闭（逐条推送；事件密集时可能触发渠道限流）")
             print(f"数据库轮询器初始化完成（间隔: {self.config.logger_poll_interval}秒，数据库: {self.config.logger_db_path}）")
             
             print("开始注册事件处理器...")
@@ -135,6 +150,7 @@ class Application:
             self.config.feishu_webhook_url,
             self.config.bark_url,
             self.config.pushplus_params,
+            getattr(self.config, "magic_push_params", "") or "",
         ])
         if self.notifier is None and has_webhook:
             print("配置已保存并热加载：检测到新配置的推送渠道，正在启动监控...")
@@ -146,6 +162,10 @@ class Application:
                 poll_interval=self.config.logger_poll_interval,
                 monitor_events=self.config.monitor_events,
             )
+            if getattr(self.config, "poll_batch_summary_enabled", False):
+                self.log_poller.set_batch_handler(self.event_processor.process_batch_events)
+            else:
+                self.log_poller.set_batch_handler(None)
             for event_type in self.config.monitor_events:
                 handler = self.event_processor.get_handler(event_type)
                 if handler:
@@ -162,6 +182,10 @@ class Application:
                     poll_interval=self.config.logger_poll_interval,
                     db_path=self.config.logger_db_path,
                 )
+                if getattr(self.config, "poll_batch_summary_enabled", False):
+                    self.log_poller.set_batch_handler(self.event_processor.process_batch_events)
+                else:
+                    self.log_poller.set_batch_handler(None)
                 self.log_poller.clear_handlers()
                 for event_type in self.config.monitor_events:
                     handler = self.event_processor.get_handler(event_type)
@@ -185,7 +209,7 @@ class Application:
                     self.notifier.send_system_notification(
                         'APP_ERROR',
                         '应用初始化失败: 未知错误',
-                        {'hostname': socket.gethostname(), 'version': '2.0.4'}
+                        {'hostname': socket.gethostname(), 'version': '2.1.0'}
                     )
                 sys.exit(1)
             
@@ -208,7 +232,7 @@ class Application:
                 self.notifier.send_system_notification(
                     'APP_START',
                     '飞牛NAS日志监控系统已启动，开始监控系统事件',
-                    {'hostname': socket.gethostname(), 'version': '2.0.4'}
+                    {'hostname': socket.gethostname(), 'version': '2.1.0'}
                 )
                 if self.log_poller:
                     print("启动数据库日志轮询器...")
@@ -333,7 +357,7 @@ class Application:
                 self.notifier.send_system_notification(
                     'APP_ERROR',
                     f'触发自动重启: {reason}',
-                    {'hostname': socket.gethostname(), 'version': '2.0.4'}
+                    {'hostname': socket.gethostname(), 'version': '2.1.0'}
                 )
         except Exception:
             pass
@@ -350,7 +374,7 @@ class Application:
             self.notifier.send_system_notification(
                 'APP_STOP',
                 '飞牛NAS日志监控系统已停止，监控服务暂停',
-                {'hostname': socket.gethostname(), 'version': '2.0.4'}
+                {'hostname': socket.gethostname(), 'version': '2.1.0'}
             )
 
         # 停止数据库轮询器

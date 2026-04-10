@@ -4,7 +4,7 @@ HTTP连接池管理
 
 import logging
 import threading
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Mapping
 from dataclasses import dataclass
 
 import requests
@@ -41,6 +41,7 @@ class PoolStats:
 
 class ConnectionPool:
     """HTTP连接池"""
+    _BODY_PREVIEW_CHARS = 1200
     
     def __init__(self, 
                  pool_size: int = 10,
@@ -106,7 +107,12 @@ class ConnectionPool:
         
         return session
     
-    def post(self, url: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    def post(
+        self,
+        url: str,
+        data: Dict[str, Any],
+        headers: Optional[Mapping[str, str]] = None,
+    ) -> Dict[str, Any]:
         """
         发送POST请求
         
@@ -118,11 +124,10 @@ class ConnectionPool:
             self.stats.total_requests += 1
         out = {"success": False, "response": None, "error": None}
         try:
-            response = self.session.post(
-                url,
-                json=data,
-                timeout=self.timeout
-            )
+            kwargs: Dict[str, Any] = {"json": data, "timeout": self.timeout}
+            if headers:
+                kwargs["headers"] = dict(headers)
+            response = self.session.post(url, **kwargs)
             response.raise_for_status()
             result = None
             try:
@@ -162,16 +167,28 @@ class ConnectionPool:
             self.logger.error(f"POST HTTP错误: {url} - 状态码: {code}")
             with self.stats_lock:
                 self.stats.failed_requests += 1
-            try:
-                body = e.response.json() if e.response is not None else None
-            except Exception:
-                body = None
-            out["response"] = body if isinstance(body, dict) else None
-            if isinstance(body, dict):
-                msg = body.get("errmsg") or body.get("message") or ""
+            body_dict = None
+            body_text = ""
+            if e.response is not None:
+                try:
+                    body_dict = e.response.json()
+                except Exception:
+                    body_dict = None
+                try:
+                    body_text = e.response.text or ""
+                except Exception:
+                    body_text = ""
+            # 失败也保留接口返回体（优先 JSON，否则 text 预览）
+            resp_obj: Dict[str, Any] = {"status_code": code}
+            if isinstance(body_dict, dict):
+                resp_obj["json"] = body_dict
+                msg = body_dict.get("errmsg") or body_dict.get("message") or ""
                 out["error"] = f"HTTP {code}" + (f": {msg}" if msg else "")
             else:
+                preview = (body_text or "")[: self._BODY_PREVIEW_CHARS]
+                resp_obj["text_preview"] = preview
                 out["error"] = f"HTTP {code}"
+            out["response"] = resp_obj
             return out
         except Exception as e:
             self.logger.error(f"POST请求异常: {url} - {type(e).__name__}: {str(e)}", exc_info=True)
@@ -207,15 +224,22 @@ class ConnectionPool:
                 try:
                     out["response"] = response.json() if response.content else {}
                 except Exception:
-                    out["response"] = {"status_code": response.status_code}
+                    out["response"] = {"status_code": response.status_code, "text_preview": (response.text or "")[: self._BODY_PREVIEW_CHARS]}
                 return out
             self.logger.error(f"GET请求失败: {response.status_code}")
             with self.stats_lock:
                 self.stats.failed_requests += 1
+            # 失败也保留接口返回体（优先 JSON，否则 text 预览）
+            resp_obj: Dict[str, Any] = {"status_code": response.status_code}
             try:
-                out["response"] = response.json() if response.content else None
+                body = response.json() if response.content else None
             except Exception:
-                out["response"] = None
+                body = None
+            if isinstance(body, dict):
+                resp_obj["json"] = body
+            else:
+                resp_obj["text_preview"] = (response.text or "")[: self._BODY_PREVIEW_CHARS]
+            out["response"] = resp_obj
             out["error"] = f"HTTP {response.status_code}"
             return out
         except requests.exceptions.Timeout:
@@ -237,6 +261,21 @@ class ConnectionPool:
             with self.stats_lock:
                 self.stats.failed_requests += 1
             out["error"] = f"HTTP {code}"
+            # 失败也尽量带上返回体
+            if e.response is not None:
+                resp_obj: Dict[str, Any] = {"status_code": code}
+                try:
+                    body = e.response.json()
+                except Exception:
+                    body = None
+                if isinstance(body, dict):
+                    resp_obj["json"] = body
+                else:
+                    try:
+                        resp_obj["text_preview"] = (e.response.text or "")[: self._BODY_PREVIEW_CHARS]
+                    except Exception:
+                        pass
+                out["response"] = resp_obj
             return out
         except Exception as e:
             self.logger.error(f"GET请求异常: {url} - {type(e).__name__}: {str(e)}", exc_info=True)

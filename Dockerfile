@@ -25,6 +25,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # 复制源代码
 COPY src/ ./src/
+COPY assets/ ./assets/
 
 # 复制健康检查脚本（已在复制时设置执行权限）
 COPY --chmod=755 healthcheck.sh /app/healthcheck.sh

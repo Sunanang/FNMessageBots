@@ -3,6 +3,7 @@
 """
 
 import logging
+import json
 from typing import Dict, Any, Callable, Optional, List
 from datetime import datetime
 from threading import Timer
@@ -51,6 +52,8 @@ class EventProcessor:
             'APP_AUTO_START_FAILED_DOCKER_NOT_AVAILABLE': self._handle_app_auto_start_failed_docker,
             'CPU_USAGE_ALARM': self._handle_cpu_usage_alarm,
             'CPU_USAGE_RESTORED': self._handle_cpu_usage_restored,
+            'MEMORY_USAGE_ALARM': self._handle_memory_usage_alarm,
+            'MEMORY_USAGE_RESTORED': self._handle_memory_usage_restored,
             'CPU_TEMPERATURE_ALARM': self._handle_cpu_temperature_alarm,
             'UPS_ONBATT': self._handle_ups_onbatt,
             'UPS_ONBATT_LOWBATT': self._handle_ups_onbatt_lowbatt,
@@ -86,6 +89,10 @@ class EventProcessor:
             'FW_ENABLE': lambda ed, e: self._handle_simple_notification('FW_ENABLE', ed, e),
             'FW_DISABLE': lambda ed, e: self._handle_simple_notification('FW_DISABLE', ed, e),
             'SECURITY_PORTCHANGED': lambda ed, e: self._handle_simple_notification('SECURITY_PORTCHANGED', ed, e),
+            # 虚拟机事件（默认不勾选；勾选后直接推送）
+            'SHUTDOWN_VM': lambda ed, e: self._handle_simple_notification('SHUTDOWN_VM', ed, e),
+            'STATUS_RUNNING_VM': lambda ed, e: self._handle_simple_notification('STATUS_RUNNING_VM', ed, e),
+            'DESTROY_VM': lambda ed, e: self._handle_simple_notification('DESTROY_VM', ed, e),
         }
         
         # 磁盘事件合并缓存
@@ -105,6 +112,84 @@ class EventProcessor:
         self.ssh_pending = {}
         
         self.logger.info("事件处理器初始化完成")
+
+    def _build_batch_event_brief(self, event_type: str, event_data: Dict[str, Any]) -> str:
+        """为批量汇总生成单条简述。"""
+        data = event_data.get('data') if isinstance(event_data.get('data'), dict) else {}
+        parts = []
+        if event_data.get('user') or event_data.get('IP'):
+            parts.append(f"{event_data.get('user', '')}@{event_data.get('IP', '')}".strip("@"))
+        if data.get('DISPLAY_NAME') or data.get('APP_NAME'):
+            parts.append(data.get('DISPLAY_NAME') or data.get('APP_NAME'))
+        if event_data.get('name'):
+            parts.append(str(event_data.get('name')))
+        if event_data.get('message'):
+            parts.append(str(event_data.get('message'))[:40])
+        if not parts:
+            parts.append(event_type)
+        return " | ".join([str(p).strip() for p in parts if p])[:120]
+
+    def process_batch_events(self, batch_events: List[Dict[str, Any]]) -> bool:
+        """同一轮轮询的事件合并为一条消息推送，避免高频触发渠道限流。"""
+        if not batch_events:
+            return False
+
+        latest_entry = batch_events[-1].get("entry")
+        timestamp = getattr(latest_entry, "timestamp", datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        by_type: Dict[str, int] = {}
+        preview_items: List[Dict[str, str]] = []
+        grouped_events: Dict[str, List[Dict[str, Any]]] = {}
+        raw_for_storage: List[Dict[str, Any]] = []
+
+        for item in batch_events:
+            event_type = str(item.get("event_type") or "unknown")
+            event_data = item.get("event_data") or {}
+            entry = item.get("entry")
+            by_type[event_type] = by_type.get(event_type, 0) + 1
+            grouped_events.setdefault(event_type, []).append({
+                "timestamp": getattr(entry, "timestamp", timestamp),
+                "event_data": event_data,
+                "raw_log": getattr(entry, "raw_data", "{}"),
+            })
+
+            if len(preview_items) < 10:
+                preview_items.append({
+                    "event_type": event_type,
+                    "timestamp": getattr(entry, "timestamp", timestamp),
+                    "brief": self._build_batch_event_brief(event_type, event_data),
+                })
+
+            raw_for_storage.append({
+                "event_type": event_type,
+                "event_data": event_data,
+                "timestamp": getattr(entry, "timestamp", timestamp),
+                "raw_log": getattr(entry, "raw_data", "{}"),
+            })
+
+            # 原始日志仍逐条落库，便于后续排查
+            self._store_notification_log(
+                event_type=event_type,
+                event_data=event_data,
+                raw_log=getattr(entry, "raw_data", "{}"),
+                entry=entry,
+                source='db'
+            )
+
+        summary_event_data = {
+            "count": len(batch_events),
+            "by_type": by_type,
+            "items": preview_items,
+            "grouped_events": grouped_events,
+        }
+        raw_log = json.dumps(raw_for_storage, ensure_ascii=False)[:6000]
+        self.logger.info("轮询批量汇总推送：count=%s, types=%s", len(batch_events), len(by_type))
+        self.notifier.send_notification(
+            event_type='POLL_BATCH_SUMMARY',
+            event_data=summary_event_data,
+            raw_log=raw_log,
+            timestamp=timestamp
+        )
+        return True
 
     def _send_ssh_notification(self, event_type: str, event_data: Dict[str, Any], entry: JournalEntry):
         """发送SSH相关通知并存储日志"""
@@ -185,7 +270,14 @@ class EventProcessor:
         Returns:
             处理函数或None
         """
-        return self.handlers.get(event_type)
+        handler = self.handlers.get(event_type)
+        if handler:
+            return handler
+        # 数据库中若出现新的 VM 事件（如 CREATE_VM / START_VM 等），
+        # 且用户已在 monitor_events 中勾选该 eventId，则走通用推送。
+        if "VM" in str(event_type).upper():
+            return lambda ed, e, _et=event_type: self._handle_simple_notification(_et, ed, e)
+        return None
     
     def _handle_login_success(self, event_data: Dict[str, Any], entry: JournalEntry):
         """处理登录成功事件"""
@@ -504,6 +596,36 @@ class EventProcessor:
             timestamp=timestamp
         )
         self._store_notification_log('CPU_USAGE_RESTORED', event_data, raw_log, entry, source='db')
+
+    def _handle_memory_usage_alarm(self, event_data: Dict[str, Any], entry: JournalEntry):
+        """处理内存使用率告警（trim.resource-manager，parameter 含 data.THRESHOLD）"""
+        data = event_data.get('data', {})
+        threshold = data.get('THRESHOLD', 0)
+        timestamp = getattr(entry, 'timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        self.logger.warning(f"内存使用率告警: 超过 {threshold}%")
+        raw_log = getattr(entry, 'raw_data', '{}')
+        self.notifier.send_notification(
+            event_type='MEMORY_USAGE_ALARM',
+            event_data=event_data,
+            raw_log=raw_log,
+            timestamp=timestamp
+        )
+        self._store_notification_log('MEMORY_USAGE_ALARM', event_data, raw_log, entry, source='db')
+
+    def _handle_memory_usage_restored(self, event_data: Dict[str, Any], entry: JournalEntry):
+        """处理内存使用率恢复（parameter 含 data.THRESHOLD）"""
+        data = event_data.get('data', {})
+        threshold = data.get('THRESHOLD', 0)
+        timestamp = getattr(entry, 'timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        self.logger.info(f"内存使用率恢复: 已低于阈值 {threshold}%")
+        raw_log = getattr(entry, 'raw_data', '{}')
+        self.notifier.send_notification(
+            event_type='MEMORY_USAGE_RESTORED',
+            event_data=event_data,
+            raw_log=raw_log,
+            timestamp=timestamp
+        )
+        self._store_notification_log('MEMORY_USAGE_RESTORED', event_data, raw_log, entry, source='db')
 
     def _handle_cpu_temperature_alarm(self, event_data: Dict[str, Any], entry: JournalEntry):
         """处理 CPU 温度告警"""

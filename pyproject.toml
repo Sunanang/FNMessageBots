@@ -1,6 +1,6 @@
 [project]
 name = "fnmessagebots"
-version = "2.0.4"
+version = "2.1.0"
 description = "FN Message Bots"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -17,3 +17,4 @@ dependencies = [
 venvPath = "."
 venv = ".venv"
 pythonVersion = "3.9"
+extraPaths = ["src"]

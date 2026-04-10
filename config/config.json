@@ -3,6 +3,7 @@
   "dingtalk_webhook_url": "",
   "feishu_webhook_url": "",
   "bark_url": "",
+  "magic_push_params": "",
   "monitor_events": [
     "LoginSucc",
     "LoginSucc2FA1",
@@ -33,7 +34,8 @@
   "dedup_window": 300,
   "cursor_dir": "./data/cursor",
   "logger_db_path": "/usr/trim/var/eventlogger_service/logger_data.db3",
-  "logger_poll_interval": 3,
+  "logger_poll_interval": 5,
+  "poll_batch_summary_enabled": false,
   "max_log_age": 7,
   "log_retention_days": 7,
   "dnd_enabled": false,
@@ -41,5 +43,5 @@
   "dnd_end_time": "07:00",
   "pushplus_params": "",
   "web_password_enabled": true,
-  "title_prefix": ""
+  "title_prefix": "飞牛NAS"
 }

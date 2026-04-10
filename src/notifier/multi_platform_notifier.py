@@ -9,7 +9,8 @@ import logging
 import hashlib
 import urllib.parse
 import threading
-from typing import Dict, Any, List, Tuple
+import re
+from typing import Dict, Any, List, Tuple, Optional
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -56,6 +57,25 @@ class MultiPlatformMessage:
 
 class MultiPlatformNotifier:
     """多平台通知器"""
+    BATCH_PER_TYPE_LIMIT = 3
+    BATCH_MAX_TYPES = 6
+    BATCH_MAX_CHARS = 3200
+    _EMOJI_RE = re.compile(
+        "["  # 常见 emoji / pictographs 范围（覆盖面足够用于“去表情展示”）
+        "\U0001F300-\U0001F5FF"  # symbols & pictographs
+        "\U0001F600-\U0001F64F"  # emoticons
+        "\U0001F680-\U0001F6FF"  # transport & map
+        "\U0001F700-\U0001F77F"  # alchemical symbols
+        "\U0001F780-\U0001F7FF"  # geometric extended
+        "\U0001F800-\U0001F8FF"  # arrows-c
+        "\U0001F900-\U0001F9FF"  # supplemental symbols
+        "\U0001FA00-\U0001FAFF"  # symbols & pictographs extended
+        "\u2600-\u27BF"          # misc symbols + dingbats
+        "\u200d"                 # zero width joiner
+        "\ufe0f"                 # variation selector
+        "]+",
+        flags=re.UNICODE,
+    )
     
     # 事件标题映射
     EVENT_TITLES = {
@@ -74,6 +94,8 @@ class MultiPlatformNotifier:
         'APP_AUTO_START_FAILED_DOCKER_NOT_AVAILABLE': '💥 飞牛NAS-应用自启动失败告警',
         'CPU_USAGE_ALARM': '📊 飞牛NAS-CPU使用率告警',
         'CPU_USAGE_RESTORED': '✅ 飞牛NAS-CPU使用率恢复',
+        'MEMORY_USAGE_ALARM': '📊 飞牛NAS-内存使用率告警',
+        'MEMORY_USAGE_RESTORED': '✅ 飞牛NAS-内存使用率恢复',
         'CPU_TEMPERATURE_ALARM': '🌡️ 飞牛NAS-CPU温度告警',
         'UPS_ONBATT': '⚠️ 飞牛NAS-UPS切换到电池供电模式',
         'UPS_ONBATT_LOWBATT': '🚨 飞牛NAS-UPS切换到电池供电模式',
@@ -94,6 +116,7 @@ class MultiPlatformNotifier:
         'DISK_IO_ERR': '⚠️ 飞牛NAS-磁盘IO错误告警',
         'TEST_PUSH': '🧪 飞牛NAS-测试推送',
         'DND_SUMMARY': '📋 飞牛NAS-勿扰时段汇总',
+        'POLL_BATCH_SUMMARY': '飞牛NAS-多事件合并通知',
         # 可选事件（默认不推送）
         'ARCHIVING_SUCCESS': '📦 飞牛NAS-归档成功',
         'DeleteFile': '🗑️ 飞牛NAS-文件删除',
@@ -113,8 +136,20 @@ class MultiPlatformNotifier:
         'FW_ENABLE': '🔥 飞牛NAS-防火墙已开启',
         'FW_DISABLE': '🔥 飞牛NAS-防火墙已关闭',
         'SECURITY_PORTCHANGED': '🔒 飞牛NAS-安全/端口变更',
-        'SHUTDOWN_VM': '🖥️ 飞牛NAS-用户关闭虚拟机',
-        'STATUS_RUNNING_VM': '🖥️ 飞牛NAS-用户开启虚拟机',
+        'CREATE_VM': '🖥️ 飞牛NAS-创建虚拟机',
+        'START_VM': '🖥️ 飞牛NAS-操作虚拟机开机',
+        'STATUS_SHUTOFF_VM': '🖥️ 飞牛NAS-虚拟机已关机',
+        'STATUS_PAUSED_VM': '🖥️ 飞牛NAS-虚拟机已暂停',
+        'PAUSE_VM': '🖥️ 飞牛NAS-操作虚拟机暂停',
+        'RESUME_VM': '🖥️ 飞牛NAS-操作虚拟机恢复',
+        'STATUS_RESUMED_VM': '🖥️ 飞牛NAS-虚拟机已恢复',
+        'REBOOT_VM': '🖥️ 飞牛NAS-操作虚拟机重启',
+        'STATUS_REBOOTED_VM': '🖥️ 飞牛NAS-虚拟机已重启',
+        'EDIT_VM': '🖥️ 飞牛NAS-修改虚拟机配置',
+        'OVA_EXPORT_VM': '🖥️ 飞牛NAS-导出 OVA 成功',
+        'DELETE_VM': '🗑️ 飞牛NAS-删除虚拟机',
+        'SHUTDOWN_VM': '🖥️ 飞牛NAS-操作虚拟机关机',
+        'STATUS_RUNNING_VM': '🖥️ 飞牛NAS-虚拟机已开机',
         'DESTROY_VM': '🗑️ 飞牛NAS-虚拟机已销毁',
     }
     
@@ -135,6 +170,8 @@ class MultiPlatformNotifier:
         'APP_AUTO_START_FAILED_DOCKER_NOT_AVAILABLE': '应用{name}自启动失败(Docker不可用)',
         'CPU_USAGE_ALARM': 'CPU使用率超过{threshold}%',
         'CPU_USAGE_RESTORED': 'CPU使用率已恢复至阈值{threshold}%以下',
+        'MEMORY_USAGE_ALARM': '内存使用率超过{threshold}%',
+        'MEMORY_USAGE_RESTORED': '内存使用率已恢复至阈值{threshold}%以下',
         'CPU_TEMPERATURE_ALARM': 'CPU温度超过{threshold}°C',
         'UPS_ONBATT': 'UPS提示：UPS切换到电池供电',
         'UPS_ONBATT_LOWBATT': 'UPS提示：UPS低电量自动关机',
@@ -154,6 +191,7 @@ class MultiPlatformNotifier:
         'DISK_IO_ERR': '磁盘{dev}发生IO错误，错误次数{err_cnt}',
         'TEST_PUSH': '测试推送',
         'DND_SUMMARY': '勿扰时段事件汇总',
+        'POLL_BATCH_SUMMARY': '多事件合并通知',
         'ARCHIVING_SUCCESS': '归档成功',
         'DeleteFile': '文件删除',
         'MovetoTrashbin': '移到回收站',
@@ -172,6 +210,18 @@ class MultiPlatformNotifier:
         'FW_ENABLE': '防火墙已开启',
         'FW_DISABLE': '防火墙已关闭',
         'SECURITY_PORTCHANGED': '安全/端口变更',
+        'CREATE_VM': '创建虚拟机{vm_title}',
+        'START_VM': '用户{user}操作虚拟机{vm_title}开机',
+        'STATUS_SHUTOFF_VM': '虚拟机{vm_title}切换到关机状态',
+        'STATUS_PAUSED_VM': '虚拟机{vm_title}切换到暂停状态',
+        'PAUSE_VM': '用户{user}操作虚拟机{vm_title}暂停',
+        'RESUME_VM': '用户{user}操作虚拟机{vm_title}恢复',
+        'STATUS_RESUMED_VM': '虚拟机{vm_title}切换到恢复状态',
+        'REBOOT_VM': '用户{user}操作虚拟机{vm_title}重启',
+        'STATUS_REBOOTED_VM': '虚拟机{vm_title}已重启',
+        'EDIT_VM': '修改了虚拟机{vm_title}的配置',
+        'OVA_EXPORT_VM': '导出虚拟机{vm_title}的 OVA 文件成功',
+        'DELETE_VM': '删除了虚拟机{vm_title}',
         'SHUTDOWN_VM': '用户{user}关闭虚拟机{vm_title}',
         'STATUS_RUNNING_VM': '用户{user}开启虚拟机{vm_title}',
         'DESTROY_VM': '用户{user}销毁虚拟机{vm_title}',
@@ -194,6 +244,8 @@ class MultiPlatformNotifier:
         'APP_AUTO_START_FAILED_DOCKER_NOT_AVAILABLE': '❗ 应用程序自启动失败（Docker 不可用），请检查 Docker 服务。',
         'CPU_USAGE_ALARM': '⚠️ CPU 使用率超过阈值，建议检查系统负载或关闭占用高的进程。',
         'CPU_USAGE_RESTORED': '✅ CPU 使用率已恢复至阈值以下，负载正常。',
+        'MEMORY_USAGE_ALARM': '⚠️ 内存使用率超过阈值，建议检查占用内存的进程或服务。',
+        'MEMORY_USAGE_RESTORED': '✅ 内存使用率已恢复至阈值以下。',
         'CPU_TEMPERATURE_ALARM': '⚠️ CPU 温度超过阈值，请检查散热与机箱通风。',
         'UPS_ONBATT': '⚠️ UPS切换到电池供电模式，请注意电池电量。',
         'UPS_ONBATT_LOWBATT': '⚠️ UPS切换到电池供电模式，低电量自动关机，请尽快恢复市电供应。',
@@ -212,6 +264,7 @@ class MultiPlatformNotifier:
         'APP_UNINSTALLED': '🗑️ 应用已卸载。',
         'DISK_IO_ERR': '⚠️ 磁盘发生IO错误，请检查硬盘健康与连接。',
         'TEST_PUSH': '🧪 Web 配置页发送的测试消息。',
+        'POLL_BATCH_SUMMARY': '',
         'ARCHIVING_SUCCESS': '📦 系统完成归档任务。',
         'DeleteFile': '🗑️ 文件已被删除。',
         'MovetoTrashbin': '🗑️ 文件已移至回收站。',
@@ -230,6 +283,18 @@ class MultiPlatformNotifier:
         'FW_ENABLE': '🔥 防火墙已开启。',
         'FW_DISABLE': '🔥 防火墙已关闭。',
         'SECURITY_PORTCHANGED': '🔒 安全或端口设置已变更。',
+        'CREATE_VM': '🖥️ 用户已创建虚拟机。',
+        'START_VM': '🖥️ 用户已操作虚拟机开机。',
+        'STATUS_SHUTOFF_VM': '🖥️ 虚拟机当前为关机状态。',
+        'STATUS_PAUSED_VM': '🖥️ 虚拟机当前为暂停状态。',
+        'PAUSE_VM': '🖥️ 用户已操作虚拟机暂停。',
+        'RESUME_VM': '🖥️ 用户已操作虚拟机恢复。',
+        'STATUS_RESUMED_VM': '🖥️ 虚拟机当前为恢复状态。',
+        'REBOOT_VM': '🖥️ 用户已操作虚拟机重启。',
+        'STATUS_REBOOTED_VM': '🖥️ 虚拟机已完成重启。',
+        'EDIT_VM': '🖥️ 用户已修改虚拟机配置。',
+        'OVA_EXPORT_VM': '🖥️ 虚拟机 OVA 导出成功。',
+        'DELETE_VM': '🗑️ 用户已删除虚拟机。',
         'SHUTDOWN_VM': '🖥️ 用户已执行虚拟机关机操作。',
         'STATUS_RUNNING_VM': '🖥️ 用户已执行虚拟机开机操作。',
         'DESTROY_VM': '🗑️ 用户已销毁虚拟机，请确认是否为预期操作。',
@@ -241,7 +306,8 @@ class MultiPlatformNotifier:
                  feishu_webhook_url: str = "",
                  bark_url: str = "",
                  pushplus_params: str = "",
-                 title_prefix: str = "飞牛NAS",
+                 magic_push_params: str = "",
+                 title_prefix: str = "",
                  dedup_window: int = 300,
                  pool_size: int = 10,
                  retries: int = 3,
@@ -255,6 +321,7 @@ class MultiPlatformNotifier:
             feishu_webhook_url: 飞书Webhook URL
             bark_url: Bark推送URL
             pushplus_params: PushPlus 参数（JSON 字符串，多个用 | 分隔）
+            magic_push_params: 魔法推送（JSON 含 base_url、token、可选 title，多个用 | 分隔）
             dedup_window: 去重时间窗口（秒）
             pool_size: 连接池大小
             retries: 重试次数
@@ -265,10 +332,11 @@ class MultiPlatformNotifier:
         self.feishu_webhook_url = feishu_webhook_url
         self.bark_url = bark_url
         self.pushplus_params = pushplus_params or ""
+        self.magic_push_params = magic_push_params or ""
         if not isinstance(title_prefix, str):
-            self.title_prefix = "飞牛NAS"
+            self.title_prefix = ""
         else:
-            self.title_prefix = (title_prefix or "").strip() or "飞牛NAS"
+            self.title_prefix = (title_prefix or "").strip()
         self.dedup_window = dedup_window
         
         # 连接池
@@ -315,6 +383,8 @@ class MultiPlatformNotifier:
             platforms.append('Bark')
         if self.pushplus_params:
             platforms.append('PushPlus')
+        if self.magic_push_params:
+            platforms.append('魔法推送')
 
         self.logger.info(f"多平台通知器初始化完成，支持平台: {', '.join(platforms) if platforms else '无'}, 去重窗口: {dedup_window}秒")
 
@@ -366,6 +436,7 @@ class MultiPlatformNotifier:
                     'feishu': bool(self.feishu_webhook_url),
                     'bark': bool(self.bark_url),
                     'pushplus': bool(self.pushplus_params),
+                    'magic_push': bool(self.magic_push_params),
                 }
             }
     
@@ -463,6 +534,12 @@ class MultiPlatformNotifier:
             results.append(ok)
             channel_results.append(cr)
             self.logger.debug("合并事件-PushPlus: %s", cr)
+        if self.magic_push_params:
+            magic_message = self._build_bark_message(event_type, merged_data, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), '')
+            ok, cr = self._send_to_magic_push(magic_message)
+            results.append(ok)
+            channel_results.append(cr)
+            self.logger.debug("合并事件-魔法推送: %s", cr)
         if results and any(results):
             self._record_send_result(True)
             self.logger.info(f"合并事件发送成功: {event_type}, 数量: {len(event_list)}")
@@ -538,6 +615,12 @@ class MultiPlatformNotifier:
             results.append(ok)
             channel_results.append(cr)
             self.logger.debug("PushPlus通知发送结果: %s", cr)
+        if self.magic_push_params:
+            magic_message = self._build_bark_message(event_type, event_data, timestamp, raw_log)
+            ok, cr = self._send_to_magic_push(magic_message)
+            results.append(ok)
+            channel_results.append(cr)
+            self.logger.debug("魔法推送通知发送结果: %s", cr)
         
         if results and any(results):  # 至少一个平台发送成功
             self.sent_events[event_fingerprint] = time.time()
@@ -548,6 +631,49 @@ class MultiPlatformNotifier:
             self._record_send_result(False)
             self.logger.warning(f"所有通知发送失败: {event_type}")
             return False, channel_results
+
+    def build_history_summary(
+        self,
+        event_type: str,
+        event_data: Dict[str, Any],
+        raw_log: str,
+        timestamp: str,
+    ) -> str:
+        """
+        用于「推送记录」列表的摘要：尽量还原实际推送文案，但去掉表情/emoji，并压成单行。
+        """
+        try:
+            msg = self._build_message(event_type, event_data, timestamp, raw_log)
+            title = self._strip_emoji(msg.title or "")
+            content = self._strip_emoji(msg.content or "")
+            merged = (title + "\n" + content).strip()
+            merged = re.sub(r"[ \t]+", " ", merged)
+            merged = re.sub(r"\n{3,}", "\n\n", merged)
+            # 表格里更易读：压成单行
+            merged = merged.replace("\r\n", "\n").replace("\r", "\n")
+            merged = " / ".join([p.strip() for p in merged.split("\n") if p.strip()])
+            return merged[:500]
+        except Exception:
+            # 回退：至少保证有事件类型
+            return str(event_type)[:200]
+
+    def _strip_emoji(self, text: str) -> str:
+        if not text:
+            return ""
+        return self._EMOJI_RE.sub("", text).strip()
+
+    def _strip_body_emojis(self, text: str) -> str:
+        """正文去掉符号/表情类字符（标题单独构建，不在此处理）。"""
+        if not text:
+            return ""
+        out_lines = []
+        for line in text.split("\n"):
+            cleaned = self._EMOJI_RE.sub("", line)
+            if cleaned.startswith("\t"):
+                out_lines.append("\t" + cleaned[1:].lstrip())
+            else:
+                out_lines.append(cleaned.lstrip())
+        return "\n".join(out_lines)
     
     def _handle_disk_event(self, event_type: str, event_data: Dict[str, Any], raw_log: str, timestamp: str) -> bool:
         """处理磁盘事件，将其添加到合并缓存中"""
@@ -663,6 +789,49 @@ class MultiPlatformNotifier:
                 results.append({"success": False, "response": None, "error": str(e)[:80]})
         any_ok = any(r.get("success") for r in results)
         return any_ok, self._channel_result("PushPlus", results)
+
+    def _send_to_magic_push(self, message: MultiPlatformMessage) -> tuple:
+        """魔法推送：POST {base_url}/api/push，Bearer token，JSON body title/content。"""
+        param_list = self._iter_urls(self.magic_push_params)
+        if not param_list:
+            return False, {"channel": "魔法推送", "success": False, "response": None, "error": "未配置"}
+        results = []
+        for param_str in param_list:
+            try:
+                cfg = json.loads(param_str)
+                if not isinstance(cfg, dict):
+                    results.append({"success": False, "response": None, "error": "参数须为 JSON 对象"})
+                    continue
+                base = (cfg.get("base_url") or "").strip().rstrip("/")
+                token = (cfg.get("token") or "").strip()
+                if not base or not token:
+                    results.append({"success": False, "response": None, "error": "缺少 base_url 或 token"})
+                    continue
+                if not base.startswith("http"):
+                    results.append({"success": False, "response": None, "error": "base_url 须为 http(s) 地址"})
+                    continue
+                url = f"{base}/api/push"
+                custom_title = (cfg.get("title") or "").strip()
+                if custom_title:
+                    # 用户显式填写标题时：同样应用事件标题前缀（与事件标题一致的体验）
+                    # 若用户已包含前缀则不重复追加。
+                    api_title = custom_title.replace("飞牛NAS", self.title_prefix or "飞牛NAS")
+                    if self.title_prefix and self.title_prefix not in api_title:
+                        api_title = f"{self.title_prefix}-{api_title}"
+                else:
+                    api_title = message.title or ""
+                api_content = (message.content or "").strip()
+                if not api_content and message.title:
+                    api_content = (message.title or "").strip()
+                payload = {"title": api_title, "content": api_content}
+                hdrs = {"Authorization": f"Bearer {token}"}
+                results.append(self.connection_pool.post(url, payload, headers=hdrs))
+            except json.JSONDecodeError:
+                results.append({"success": False, "response": None, "error": "参数 JSON 解析失败"})
+            except Exception as e:
+                results.append({"success": False, "response": None, "error": str(e)[:80]})
+        any_ok = any(r.get("success") for r in results)
+        return any_ok, self._channel_result("魔法推送", results)
     
     def _generate_fingerprint(self, event_type: str, event_data: Dict[str, Any]) -> str:
         """生成事件指纹（用于去重）"""
@@ -697,7 +866,11 @@ class MultiPlatformNotifier:
             app_name = data.get('DISPLAY_NAME', data.get('APP_NAME', 'unknown'))
             minute_window = int(time.time() / 300)
             key = f"{event_type}_{app_name}_{minute_window}"
-        elif event_type in ['CPU_USAGE_ALARM', 'CPU_USAGE_RESTORED', 'CPU_TEMPERATURE_ALARM']:
+        elif event_type in [
+            'CPU_USAGE_ALARM', 'CPU_USAGE_RESTORED',
+            'MEMORY_USAGE_ALARM', 'MEMORY_USAGE_RESTORED',
+            'CPU_TEMPERATURE_ALARM',
+        ]:
             minute_window = int(time.time() / 300)
             key = f"{event_type}_{minute_window}"
         
@@ -732,6 +905,26 @@ class MultiPlatformNotifier:
         }:
             minute_window = int(time.time() / 60)
             key = f"{event_type}_{minute_window}"
+        elif event_type == 'POLL_BATCH_SUMMARY':
+            minute_window = int(time.time() / 60)
+            count = int(event_data.get('count') or 0)
+            by_type_raw = event_data.get('by_type')
+            by_type: Dict[str, Any] = by_type_raw if isinstance(by_type_raw, dict) else {}
+            type_count = len(by_type)
+            # 避免同一分钟内“总数和类型数相同但内容不同”的批次被误去重
+            by_type_sig = "|".join(f"{k}:{by_type[k]}" for k in sorted(by_type.keys()))
+            items_raw = event_data.get('items')
+            items: List[Dict[str, Any]] = items_raw if isinstance(items_raw, list) else []
+            preview_sig_parts = []
+            for it in items[:5]:
+                if not isinstance(it, dict):
+                    continue
+                et = str(it.get('event_type') or '')
+                ts = str(it.get('timestamp') or '')
+                brief = str(it.get('brief') or '')[:30]
+                preview_sig_parts.append(f"{et}@{ts}#{brief}")
+            preview_sig = "|".join(preview_sig_parts)
+            key = f"{event_type}_{minute_window}_{count}_{type_count}_{by_type_sig}_{preview_sig}"
         else:
             # 登录/退出：按用户、IP和时间（分钟）去重
             user = event_data.get('user', 'unknown')
@@ -757,91 +950,163 @@ class MultiPlatformNotifier:
     def _build_message(self, event_type: str, event_data: Dict[str, Any], 
                       timestamp: str, raw_log: str) -> MultiPlatformMessage:
         """构建多平台消息"""
-        
+        title_event_type = event_type
+        # 批量汇总若仅包含单一事件类型，则标题回退为该事件原始标题
+        if event_type == 'POLL_BATCH_SUMMARY':
+            try:
+                total = int(event_data.get('count') or 0)
+            except Exception:
+                total = 0
+            by_type_raw = event_data.get('by_type')
+            by_type: Dict[str, Any] = by_type_raw if isinstance(by_type_raw, dict) else {}
+            if total >= 1 and len(by_type) == 1:
+                title_event_type = str(next(iter(by_type.keys())))
+
         title = self._with_title_prefix(
-            self.EVENT_TITLES.get(event_type, self._fallback_event_title(event_type))
+            self.EVENT_TITLES.get(title_event_type, self._fallback_event_title(title_event_type))
         )
         content = self._build_content(event_type, event_data, timestamp, raw_log)
         
         return MultiPlatformMessage(title=title, content=content)
     
-    def _build_content(self, event_type: str, event_data: Dict[str, Any], 
-                      timestamp: str, raw_log: str) -> str:
-        """构建消息内容"""
-        content = f"🕐 {timestamp}"
-        
-        # 根据事件类型添加特定字段
+    def _build_content(
+        self,
+        event_type: str,
+        event_data: Dict[str, Any],
+        timestamp: str,
+        raw_log: str,
+        *,
+        for_batch_inner: bool = False,
+    ) -> str:
+        """构建消息内容。for_batch_inner=True 时用于多事件汇总内的子块：无首行时间、无 EVENT_NOTES。"""
+        # 批量汇总：多条时整段在入口处理（仅一条时间行 + 子块无时间/无备注）
+        if event_type == 'POLL_BATCH_SUMMARY':
+            single_event = self._extract_single_event_from_batch(event_data)
+            if single_event:
+                original_type, original_data, _original_ts, original_raw = single_event
+                return self._build_content(
+                    original_type,
+                    original_data,
+                    timestamp,
+                    original_raw,
+                    for_batch_inner=False,
+                )
+            body = self._build_poll_batch_summary_content(event_data)
+            content = f"{timestamp}\n{body}" if body else timestamp
+            return self._strip_body_emojis(content)
+
+        fragments: List[str] = []
+        if not for_batch_inner:
+            fragments.append(str(timestamp))
+
+        detail = ""
         if event_type in ['LoginSucc', 'LoginSucc2FA1', 'LoginFail', 'Logout']:
-            content += '\n' + self._build_login_content(event_data)
+            detail = self._build_login_content(event_data)
         elif event_type in ['SSH_INVALID_USER', 'SSH_AUTH_FAILED', 'SSH_LOGIN_SUCCESS', 'SSH_DISCONNECTED']:
-            content += '\n' + self._build_ssh_content(event_type, event_data)
+            detail = self._build_ssh_content(event_type, event_data)
         elif event_type == 'FoundDisk':
-            content += '\n' + self._build_disk_content(event_data)
+            detail = self._build_disk_content(event_data)
         elif event_type == 'APP_CRASH':
-            content += '\n' + self._build_app_crash_content(event_data)
+            detail = self._build_app_crash_content(event_data)
         elif event_type in ('APP_STARTED', 'APP_STOPPED', 'APP_UPDATED', 'APP_INSTALLED', 'APP_AUTO_STARTED', 'APP_UNINSTALLED'):
-            content += '\n' + self._build_app_lifecycle_content(event_data)
+            detail = self._build_app_lifecycle_content(event_data)
         elif event_type == 'APP_UPDATE_FAILED':
-            content += '\n' + self._build_app_update_failed_content(event_data)
+            detail = self._build_app_update_failed_content(event_data)
         elif event_type == 'APP_START_FAILED_LOCAL_APP_RUN_EXCEPTION':
-            content += '\n' + self._build_app_start_failed_content(event_data)
+            detail = self._build_app_start_failed_content(event_data)
         elif event_type == 'APP_AUTO_START_FAILED_DOCKER_NOT_AVAILABLE':
-            content += '\n' + self._build_app_auto_start_failed_content(event_data)
+            detail = self._build_app_auto_start_failed_content(event_data)
         elif event_type == 'CPU_USAGE_ALARM':
-            content += '\n' + self._build_cpu_usage_alarm_content(event_data)
+            detail = self._build_cpu_usage_alarm_content(event_data)
         elif event_type == 'CPU_USAGE_RESTORED':
-            content += '\n' + self._build_cpu_usage_restored_content(event_data)
+            detail = self._build_cpu_usage_restored_content(event_data)
+        elif event_type == 'MEMORY_USAGE_ALARM':
+            detail = self._build_memory_usage_alarm_content(event_data)
+        elif event_type == 'MEMORY_USAGE_RESTORED':
+            detail = self._build_memory_usage_restored_content(event_data)
         elif event_type == 'CPU_TEMPERATURE_ALARM':
-            content += '\n' + self._build_cpu_temperature_alarm_content(event_data)
+            detail = self._build_cpu_temperature_alarm_content(event_data)
         elif event_type == 'UPS_ONBATT':
-            content += '\n' + self._build_ups_onbatt_content(event_data)
+            detail = self._build_ups_onbatt_content(event_data)
         elif event_type == 'UPS_ONBATT_LOWBATT':
-            content += '\n' + self._build_ups_onbatt_lowbatt_content(event_data)
+            detail = self._build_ups_onbatt_lowbatt_content(event_data)
         elif event_type == 'UPS_ONLINE':
-            content += '\n' + self._build_ups_online_content(event_data)
+            detail = self._build_ups_online_content(event_data)
         elif event_type == 'UPS_ENABLE':
-            content += '\n' + self._build_ups_enable_disable_content('UPS_ENABLE', event_data)
+            detail = self._build_ups_enable_disable_content('UPS_ENABLE', event_data)
         elif event_type == 'UPS_DISABLE':
-            content += '\n' + self._build_ups_enable_disable_content('UPS_DISABLE', event_data)
+            detail = self._build_ups_enable_disable_content('UPS_DISABLE', event_data)
         elif event_type == 'DiskWakeup':
-            # 所有磁盘唤醒事件都使用合并样式
             if 'merged_disks' in event_data:
-                content += '\n' + self._build_merged_disk_wakeup_content(event_data)
+                detail = self._build_merged_disk_wakeup_content(event_data)
             else:
-                # 单个磁盘事件也转换为合并格式
-                single_disk_as_merged = {
-                    'merged_disks': [event_data],
-                    'count': 1
-                }
-                content += '\n' + self._build_merged_disk_wakeup_content(single_disk_as_merged)
+                detail = self._build_disk_wakeup_content(event_data)
         elif event_type == 'DiskSpindown':
-            # 所有磁盘休眠事件都使用合并样式
             if 'merged_disks' in event_data:
-                content += '\n' + self._build_merged_disk_spindown_content(event_data)
+                detail = self._build_merged_disk_spindown_content(event_data)
             else:
-                # 单个磁盘事件也转换为合并格式
-                single_disk_as_merged = {
-                    'merged_disks': [event_data],
-                    'count': 1
-                }
-                content += '\n' + self._build_merged_disk_spindown_content(single_disk_as_merged)
+                detail = self._build_disk_spindown_content(event_data)
         elif event_type == 'DISK_IO_ERR':
-            content += '\n' + self._build_disk_io_err_content(event_data)
-        elif event_type in {'SHUTDOWN_VM', 'STATUS_RUNNING_VM', 'DESTROY_VM'}:
-            content += '\n' + self._build_vm_content(event_data)
+            detail = self._build_disk_io_err_content(event_data)
+        elif event_type in {'SHUTDOWN_VM', 'STATUS_RUNNING_VM', 'DESTROY_VM'} or ("VM" in str(event_type).upper()):
+            detail = self._build_vm_content(event_data)
         elif event_type in {
             'ARCHIVING_SUCCESS', 'DeleteFile', 'MovetoTrashbin', 'SHARE_EVENTID_DEL', 'SHARE_EVENTID_PUT',
             'WEBDAV_ENABLED', 'WEBDAV_DISABLED', 'SAMBA_ENABLED', 'SAMBA_DISABLED',
             'DLNA_ENABLED', 'DLNA_DISABLED', 'FTP_ENABLED', 'FTP_DISABLED', 'NFS_ENABLED', 'NFS_DISABLED',
             'FW_ENABLE', 'FW_DISABLE', 'SECURITY_PORTCHANGED',
         }:
-            content += '\n' + self._build_simple_content(event_data)
-        
-        # 添加备注（去掉尾部多余换行，避免与备注之间出现空行）
+            detail = self._build_simple_content(event_data)
+
+        if detail:
+            fragments.append(detail.rstrip('\n'))
+
+        content = "\n".join(fragments)
+        content = self._strip_body_emojis(content)
+
+        # 备注行保留 EVENT_NOTES 中的图标（仅单事件正文；批量子块 for_batch_inner 不追加备注）
         note = self.EVENT_NOTES.get(event_type, '')
-        if note:
+        if note and not for_batch_inner:
             content = content.rstrip('\n') + f"\n{note}"
         return content
+
+    def _extract_single_event_from_batch(
+        self, event_data: Dict[str, Any]
+    ) -> Optional[Tuple[str, Dict[str, Any], str, str]]:
+        """从批量事件中提取唯一的一条原始事件。"""
+        try:
+            total = int(event_data.get('count') or 0)
+        except Exception:
+            total = 0
+        if total != 1:
+            return None
+
+        grouped_events_raw = event_data.get('grouped_events')
+        grouped_events: Dict[str, Any] = grouped_events_raw if isinstance(grouped_events_raw, dict) else {}
+        if len(grouped_events) != 1:
+            return None
+
+        original_type = str(next(iter(grouped_events.keys())))
+        events_raw = grouped_events.get(original_type)
+        events: List[Dict[str, Any]] = events_raw if isinstance(events_raw, list) else []
+        if not events:
+            return None
+
+        first = events[0] if isinstance(events[0], dict) else {}
+        ed_raw = first.get('event_data')
+        original_data: Dict[str, Any] = ed_raw if isinstance(ed_raw, dict) else {}
+        original_ts = str(first.get('timestamp') or '')
+        original_raw = str(first.get('raw_log') or '')
+        return original_type, original_data, original_ts, original_raw
+
+    def _strip_batch_inner_title_prefix(self, title: str) -> str:
+        """批量汇总内部类型标题去前缀（如“飞牛NAS-”）。"""
+        result = title
+        result = result.replace("飞牛NAS-", "", 1)
+        custom_prefix = (self.title_prefix or "").strip()
+        if custom_prefix:
+            result = result.replace(f"{custom_prefix}-", "", 1)
+        return result
     
     def _build_login_content(self, event_data: Dict[str, Any]) -> str:
         """构建登录相关事件内容"""
@@ -910,6 +1175,295 @@ class MultiPlatformNotifier:
                 content += f"📁 {key}: {val}\n"
                 break
         return content or "（无额外详情）"
+
+    def _batch_summary_item_lines(self, event_type: str, ed: Dict[str, Any]) -> List[str]:
+        """多事件合并时，单条事件只展示关键字段（无图标，多行时每条一行）。"""
+        data_raw = ed.get("data")
+        data: Dict[str, Any] = data_raw if isinstance(data_raw, dict) else {}
+        et = str(event_type)
+
+        if et in ("LoginSucc", "LoginSucc2FA1", "LoginFail", "Logout"):
+            login_bits: List[str] = []
+            if ed.get("user") is not None:
+                login_bits.append(f"用户名: {ed.get('user', '')}")
+            if ed.get("IP"):
+                login_bits.append(f"IP地址: {ed.get('IP')}")
+            if ed.get("via"):
+                login_bits.append(f"认证: {ed.get('via')}")
+            return [" · ".join(login_bits)] if login_bits else [et]
+
+        if et in ("SSH_INVALID_USER", "SSH_AUTH_FAILED", "SSH_LOGIN_SUCCESS", "SSH_DISCONNECTED"):
+            parts = []
+            if ed.get("user") is not None:
+                parts.append(f"用户名: {ed.get('user', '')}")
+            if ed.get("IP"):
+                parts.append(f"IP地址: {ed.get('IP')}")
+            if ed.get("port"):
+                parts.append(f"端口: {ed.get('port')}")
+            if ed.get("reason"):
+                parts.append(f"原因: {ed.get('reason')}")
+            return [" · ".join(parts)] if parts else [et]
+
+        if et == "APP_CRASH":
+            name = data.get("DISPLAY_NAME") or data.get("APP_NAME")
+            return [f"应用名称: {name}"] if name else ["应用: （未知）"]
+
+        if et == "APP_UPDATE_FAILED":
+            name = data.get("DISPLAY_NAME") or data.get("APP_NAME")
+            return [f"应用名称: {name}"] if name else ["应用更新失败"]
+
+        if et in (
+            "APP_STARTED",
+            "APP_STOPPED",
+            "APP_UPDATED",
+            "APP_INSTALLED",
+            "APP_AUTO_STARTED",
+            "APP_UNINSTALLED",
+        ):
+            name = data.get("DISPLAY_NAME") or data.get("APP_NAME")
+            return [f"应用名称: {name}"] if name else [et]
+
+        if et in (
+            "APP_START_FAILED_LOCAL_APP_RUN_EXCEPTION",
+            "APP_AUTO_START_FAILED_DOCKER_NOT_AVAILABLE",
+        ):
+            name = data.get("DISPLAY_NAME") or data.get("APP_NAME")
+            return [f"应用名称: {name}"] if name else [et]
+
+        if et == "CPU_USAGE_ALARM":
+            th = data.get("THRESHOLD", ed.get("threshold", ""))
+            usage = ed.get("cpu_usage", data.get("USAGE", data.get("usage", "")))
+            cpu_bits: List[str] = []
+            if usage != "" and usage is not None:
+                cpu_bits.append(f"当前使用率: {usage}%")
+            if th != "" and th is not None:
+                cpu_bits.append(f"使用率阈值: {th}%")
+            return [" · ".join(cpu_bits)] if cpu_bits else ["CPU使用率告警"]
+
+        if et == "CPU_USAGE_RESTORED":
+            th = data.get("THRESHOLD", ed.get("threshold", ""))
+            usage = ed.get("cpu_usage", "")
+            cpu_bits2: List[str] = []
+            if usage != "" and usage is not None:
+                cpu_bits2.append(f"当前使用率: {usage}%")
+            if th != "" and th is not None:
+                cpu_bits2.append(f"阈值: {th}%")
+            return [" · ".join(cpu_bits2)] if cpu_bits2 else ["CPU使用率已恢复"]
+
+        if et == "MEMORY_USAGE_ALARM":
+            th = data.get("THRESHOLD", ed.get("threshold", ""))
+            usage = ed.get("memory_usage", data.get("USAGE", data.get("usage", "")))
+            mem_bits: List[str] = []
+            if usage != "" and usage is not None:
+                mem_bits.append(f"当前使用率: {usage}%")
+            if th != "" and th is not None:
+                mem_bits.append(f"使用率阈值: {th}%")
+            return [" · ".join(mem_bits)] if mem_bits else ["内存使用率告警"]
+
+        if et == "MEMORY_USAGE_RESTORED":
+            th = data.get("THRESHOLD", ed.get("threshold", ""))
+            usage = ed.get("memory_usage", "")
+            mem_bits2: List[str] = []
+            if usage != "" and usage is not None:
+                mem_bits2.append(f"当前使用率: {usage}%")
+            if th != "" and th is not None:
+                mem_bits2.append(f"阈值: {th}%")
+            return [" · ".join(mem_bits2)] if mem_bits2 else ["内存使用率已恢复"]
+
+        if et == "CPU_TEMPERATURE_ALARM":
+            th = data.get("THRESHOLD", ed.get("threshold", 0))
+            return [f"温度阈值: {th}°C"]
+
+        if et in ("DiskWakeup", "DiskSpindown"):
+            d = ed.get("disk", "")
+            if not d:
+                return ["磁盘事件"]
+            bits = [d]
+            if ed.get("model"):
+                bits.append(str(ed.get("model")))
+            if ed.get("serial"):
+                bits.append(str(ed.get("serial")))
+            return [f"磁盘: {' / '.join(bits)}"]
+
+        if et == "FoundDisk":
+            out: List[str] = []
+            if ed.get("name"):
+                out.append(f"设备名称: {ed.get('name')}")
+            if ed.get("model"):
+                out.append(f"型号: {ed.get('model')}")
+            return out or ["发现新硬盘"]
+
+        if et == "DISK_IO_ERR":
+            dev = data.get("DEV", data.get("dev", ""))
+            cnt = data.get("ERR_CNT", data.get("err_cnt", ""))
+            lines = []
+            if dev:
+                lines.append(f"设备: {dev}")
+            if cnt != "" and cnt is not None:
+                lines.append(f"错误次数: {cnt}")
+            return lines or ["磁盘IO错误"]
+
+        if et in ("UPS_ONBATT", "UPS_ONBATT_LOWBATT"):
+            ups_bits: List[str] = []
+            if ed.get("battery") is not None:
+                ups_bits.append(f"电量: {ed.get('battery')}%")
+            if ed.get("load") is not None:
+                ups_bits.append(f"负载: {ed.get('load')}%")
+            return [" · ".join(ups_bits)] if ups_bits else [et]
+
+        if et == "UPS_ONLINE":
+            if ed.get("battery") is not None:
+                return [f"电量: {ed.get('battery')}%"]
+            return [et]
+
+        if et in ("UPS_ENABLE", "UPS_DISABLE"):
+            un = data.get("USERNAME", "")
+            return [f"用户: {un}"] if un else [et]
+
+        if et in {"SHUTDOWN_VM", "STATUS_RUNNING_VM", "DESTROY_VM"} or ("VM" in et.upper()):
+            vm = data.get("VM_TITLE", data.get("vm_title", ""))
+            user = ed.get("user") or data.get("USER_NAME", "")
+            lines = []
+            if vm:
+                lines.append(f"虚拟机: {vm}")
+            if user:
+                lines.append(f"用户: {user}")
+            return lines or [et]
+
+        if et in {
+            "ARCHIVING_SUCCESS",
+            "DeleteFile",
+            "MovetoTrashbin",
+            "SHARE_EVENTID_DEL",
+            "SHARE_EVENTID_PUT",
+            "WEBDAV_ENABLED",
+            "WEBDAV_DISABLED",
+            "SAMBA_ENABLED",
+            "SAMBA_DISABLED",
+            "DLNA_ENABLED",
+            "DLNA_DISABLED",
+            "FTP_ENABLED",
+            "FTP_DISABLED",
+            "NFS_ENABLED",
+            "NFS_DISABLED",
+            "FW_ENABLE",
+            "FW_DISABLE",
+            "SECURITY_PORTCHANGED",
+        }:
+            user = ed.get("user") or data.get("USER_NAME", "")
+            if user:
+                return [f"用户: {user}"]
+            if ed.get("from"):
+                return [f"来源: {ed.get('from')}"]
+            for key in ("path", "PATH", "share_name", "SHARE_NAME", "name"):
+                v = ed.get(key) or data.get(key)
+                if v:
+                    return [f"{key}: {v}"]
+            return [et]
+
+        # 通用回退
+        bits: List[str] = []
+        if ed.get("user") or ed.get("IP"):
+            bits.append(f"{ed.get('user', '')}@{ed.get('IP', '')}".strip("@"))
+        dn = data.get("DISPLAY_NAME") or data.get("APP_NAME")
+        if dn:
+            bits.append(str(dn))
+        if ed.get("name"):
+            bits.append(str(ed.get("name")))
+        if bits:
+            return [" · ".join(b for b in bits if b)[:200]]
+        return [et]
+
+    def _build_poll_batch_summary_content(self, event_data: Dict[str, Any]) -> str:
+        """构建轮询批量汇总内容（按类型分组并展示每条差异数据）。"""
+        total = int(event_data.get('count') or 0)
+        by_type_raw = event_data.get('by_type')
+        by_type: Dict[str, Any] = by_type_raw if isinstance(by_type_raw, dict) else {}
+        items_raw = event_data.get('items')
+        items: List[Dict[str, Any]] = items_raw if isinstance(items_raw, list) else []
+        grouped_events_raw_in = event_data.get('grouped_events')
+        grouped_events_raw: Dict[str, Any] = grouped_events_raw_in if isinstance(grouped_events_raw_in, dict) else {}
+        grouped_events: Dict[str, List[Dict[str, Any]]] = {
+            str(k): v for k, v in grouped_events_raw.items() if isinstance(v, list)
+        }
+
+        lines: List[str] = []
+        current_len = 0
+        truncated = False
+        omitted_types = 0
+        omitted_items = 0
+
+        def _append(line: str) -> bool:
+            nonlocal current_len, truncated
+            addition = ("" if not lines else "\n") + line
+            if current_len + len(addition) > self.BATCH_MAX_CHARS:
+                truncated = True
+                return False
+            lines.append(line)
+            current_len += len(addition)
+            return True
+
+        # 优先展示按类型分组后的完整明细；无分组数据时回退到简版预览
+        if grouped_events:
+            sorted_types = sorted(
+                grouped_events.keys(),
+                key=lambda et: (-int(by_type.get(et, len(grouped_events.get(et, [])))), str(et)),
+            )
+            selected_types = sorted_types[: self.BATCH_MAX_TYPES]
+            omitted_types = max(0, len(sorted_types) - len(selected_types))
+            for ti, event_type in enumerate(selected_types):
+                evs = grouped_events.get(event_type) or []
+                title = self._with_title_prefix(self.EVENT_TITLES.get(str(event_type), self._fallback_event_title(str(event_type))))
+                title = self._strip_batch_inner_title_prefix(title)
+                title = self._strip_body_emojis(title).strip()
+                if not _append(f"【{title}】"):
+                    break
+                shown = evs[: self.BATCH_PER_TYPE_LIMIT]
+                for item in shown:
+                    ed_raw = item.get('event_data')
+                    ed = ed_raw if isinstance(ed_raw, dict) else {}
+                    try:
+                        key_lines = self._batch_summary_item_lines(str(event_type), ed)
+                    except Exception:
+                        brief = str(item.get('brief') or str(event_type))
+                        key_lines = [self._strip_body_emojis(f"解析失败: {brief}").strip() or str(event_type)]
+                    for kl in key_lines:
+                        if not _append("\t" + kl):
+                            break
+                if len(evs) > self.BATCH_PER_TYPE_LIMIT:
+                    left = len(evs) - self.BATCH_PER_TYPE_LIMIT
+                    omitted_items += left
+                    if not _append(f"… 该类型其余 {left} 条（可能包含异常数据）请去日志查看"):
+                        break
+                if ti < len(selected_types) - 1:
+                    if not _append(""):
+                        break
+            if omitted_types > 0:
+                _append(f"… 其余 {omitted_types} 类事件已省略（可能包含异常数据）请去日志查看")
+        elif items:
+            _append("事件预览:")
+            for idx, it in enumerate(items[:8], 1):
+                brief = str(it.get('brief') or it.get('event_type') or '（无摘要）')
+                ts = str(it.get('timestamp') or '')
+                line = f"\t{idx}. [{ts}] {brief}" if ts else f"\t{idx}. {brief}"
+                if not _append(line):
+                    break
+            if total > len(items):
+                omitted_items += total - len(items)
+                _append(f"  … 其余 {total - len(items)} 条请查看日志")
+        if truncated:
+            _append("… 内容已截断（可能包含异常数据）请去日志查看")
+
+        # 暴露渲染元数据，便于推送记录详情展示
+        event_data["batch_render_meta"] = {
+            "truncated": truncated,
+            "max_chars": self.BATCH_MAX_CHARS,
+            "max_types": self.BATCH_MAX_TYPES,
+            "per_type_limit": self.BATCH_PER_TYPE_LIMIT,
+            "omitted_types": omitted_types,
+            "omitted_items": omitted_items,
+        }
+        return "\n".join(lines)
 
     def _build_disk_io_err_content(self, event_data: Dict[str, Any]) -> str:
         """构建磁盘IO错误事件内容（data: DEV, SN, MODEL, ERR_CNT）"""
@@ -1007,6 +1561,8 @@ class MultiPlatformNotifier:
             return ""
         # 优先从 data 子段取，否则用顶层（飞牛格式：template, user, model, serial 在顶层）
         data = raw.get('data') if isinstance(raw.get('data'), dict) else raw
+        if not isinstance(data, dict):
+            return ""
         parts = []
         for key in ('disk', 'device', 'path', 'name', 'DEVICE', 'DISK', 'deviceName', 'dev'):
             if key in data and data[key]:
@@ -1158,6 +1714,18 @@ class MultiPlatformNotifier:
         content += f"✅ 使用率已恢复至阈值 {threshold}% 以下\n"
         return content
 
+    def _build_memory_usage_alarm_content(self, event_data: Dict[str, Any]) -> str:
+        """构建内存使用率告警内容（parameter: data.THRESHOLD）"""
+        data = event_data.get('data', {})
+        threshold = data.get('THRESHOLD', 0)
+        return f"📊 内存使用率阈值: {threshold}%\n"
+
+    def _build_memory_usage_restored_content(self, event_data: Dict[str, Any]) -> str:
+        """构建内存使用率恢复内容（parameter: data.THRESHOLD）"""
+        data = event_data.get('data', {})
+        threshold = data.get('THRESHOLD', 0)
+        return f"✅ 内存使用率已恢复至阈值 {threshold}% 以下\n"
+
     def _build_cpu_temperature_alarm_content(self, event_data: Dict[str, Any]) -> str:
         """构建 CPU 温度告警内容"""
         content = ""
@@ -1207,10 +1775,10 @@ class MultiPlatformNotifier:
         """构建系统事件消息内容"""
         content = f"{message}\n"
         
-        # 添加简化的时间信息
-        content += f"\n🕐 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        # 添加简化的时间信息（正文不保留时钟类符号）
+        content += f"\n{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         
-        return content
+        return self._strip_body_emojis(content)
     
     def _build_bark_message(self, event_type: str, event_data: Dict[str, Any], 
                            timestamp: str, raw_log: str) -> MultiPlatformMessage:
@@ -1218,7 +1786,7 @@ class MultiPlatformNotifier:
         message = self._build_message(event_type, event_data, timestamp, raw_log)
         return MultiPlatformMessage(title=message.title, content=message.content)
     
-    def send_system_notification(self, event_type: str, message: str, additional_info: Dict[str, Any] = None):
+    def send_system_notification(self, event_type: str, message: str, additional_info: Optional[Dict[str, Any]] = None):
         """
         发送系统事件通知
         
@@ -1276,6 +1844,10 @@ class MultiPlatformNotifier:
             ok, cr = self._send_to_pushplus(multi_msg)
             results.append(ok)
             self.logger.debug("PushPlus系统通知: %s", cr)
+        if self.magic_push_params:
+            ok, cr = self._send_to_magic_push(multi_msg)
+            results.append(ok)
+            self.logger.debug("魔法推送系统通知: %s", cr)
         success_count = sum(1 for r in results if r)
         fail_count = len(results) - success_count
         any_ok = bool(results and success_count > 0)
