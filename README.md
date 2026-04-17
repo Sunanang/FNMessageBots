@@ -178,6 +178,16 @@ PYTHONPATH=. LOGGER_DB_PATH=./logger_data.db3 WECHAT_WEBHOOK_URL=xxx python3 src
   </tr>
 </table>
 
+## Star History
+
+<a href="https://www.star-history.com/?repos=Sunanang%2FFNMessageBots&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=Sunanang/FNMessageBots&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=Sunanang/FNMessageBots&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=Sunanang/FNMessageBots&type=date&legend=top-left" />
+ </picture>
+</a>
+
 ## 免责声明
 
 - **非官方项目**：本仓库为独立开源作品，与飞牛 NAS、企业微信、钉钉、飞书、Bark、PushPlus 等主体**无隶属、赞助或背书关系**；各产品名称与商标归权利人所有。
