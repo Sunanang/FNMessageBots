@@ -57,7 +57,5 @@
   "pushplus_params": "",
   "user_display_map": {},
   "web_password_enabled": true,
-  "title_prefix": "飞牛NAS",
-  "web_password_salt": "503d4b7167b387d90f3742ecea83059f",
-  "web_password_hash": "e97f381a76f862f787dbf2a5b1741b4be1169071d5ad88fbb0f2d1f09fbb8a89"
+  "title_prefix": "飞牛NAS"
 }

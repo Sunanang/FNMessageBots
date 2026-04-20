@@ -1170,6 +1170,7 @@ class MultiPlatformNotifier:
             or ""
         )
         app_name = (event_data.get("app_name") or "").strip()
+        task_name = (event_data.get("task_name") or "").strip()
         title = (event_data.get("title") or event_data.get("name") or "").strip()
 
         action_map = {
@@ -1193,7 +1194,7 @@ class MultiPlatformNotifier:
             action = self._strip_body_emojis(fallback_title)
             action = action.replace("飞牛NAS-", "").replace("飞牛NAS", "").strip(" -")
 
-        subject = user or app_name or title
+        subject = user or app_name or task_name or title
         prefix = (self.title_prefix or "").strip()
         body = f"{subject}{action}" if subject else action
         if prefix:
