@@ -10,9 +10,16 @@ import hashlib
 import urllib.parse
 import threading
 import re
+import smtplib
+import ssl
+import sqlite3
+import os
 from typing import Dict, Any, List, Tuple, Optional
 from dataclasses import dataclass
 from datetime import datetime
+from email.message import EmailMessage
+from email.header import Header
+from email.utils import formataddr
 
 from .connection_pool import ConnectionPool
 
@@ -26,13 +33,22 @@ class MultiPlatformMessage:
     
     title: str = ""
     content: str = ""
+
+    def merged_plain_text(self, *, blank_line_between: bool = False) -> str:
+        """标题与正文合并为一段纯文本。正文为空时不追加分隔符，避免极简模式末尾多余空行。"""
+        title = self.title or ""
+        content_raw = self.content or ""
+        if not content_raw.strip():
+            return title
+        sep = "\n\n" if blank_line_between else "\n"
+        return f"{title}{sep}{content_raw}"
     
     def to_wechat_format(self) -> Dict[str, Any]:
         """转换为企业微信格式"""
         return {
             "msgtype": "text",
             "text": {
-                "content": f"{self.title}\n{self.content}"
+                "content": self.merged_plain_text()
             }
         }
     
@@ -41,7 +57,7 @@ class MultiPlatformMessage:
         return {
             "msgtype": "text",
             "text": {
-                "content": f"{self.title}\n{self.content}"
+                "content": self.merged_plain_text()
             }
         }
     
@@ -50,7 +66,7 @@ class MultiPlatformMessage:
         return {
             "msg_type": "text",
             "content": {
-                "text": f"{self.title}\n{self.content}"
+                "text": self.merged_plain_text()
             }
         }
 
@@ -84,6 +100,9 @@ class MultiPlatformNotifier:
         'LoginFail': '❌ 飞牛NAS-登录失败告警',
         'Logout': '👋 飞牛NAS-退出登录通知',
         'FoundDisk': '💾 飞牛NAS-发现新硬盘',
+        'InsertDisk': '💾 飞牛NAS-插入硬盘',
+        'EjectDisk': '🧷 飞牛NAS-弹出硬盘',
+        'StorageBroken': '⚠️ 飞牛NAS-存储空间损坏',
         'SSH_INVALID_USER': '⚠️ 飞牛NAS-SSH无效用户尝试',
         'SSH_AUTH_FAILED': '❌ 飞牛NAS-SSH认证失败',
         'SSH_LOGIN_SUCCESS': '🔐 飞牛NAS-SSH登录成功',
@@ -117,6 +136,8 @@ class MultiPlatformNotifier:
         'TEST_PUSH': '🧪 飞牛NAS-测试推送',
         'DND_SUMMARY': '📋 飞牛NAS-勿扰时段汇总',
         'POLL_BATCH_SUMMARY': '飞牛NAS-多事件合并通知',
+        'BACKUP_TASK_SUCCESS': '✅ 飞牛NAS-备份任务完成',
+        'BACKUP_TASK_FAILED': '❌ 飞牛NAS-备份任务失败',
         # 可选事件（默认不推送）
         'ARCHIVING_SUCCESS': '📦 飞牛NAS-归档成功',
         'DeleteFile': '🗑️ 飞牛NAS-文件删除',
@@ -151,6 +172,16 @@ class MultiPlatformNotifier:
         'SHUTDOWN_VM': '🖥️ 飞牛NAS-操作虚拟机关机',
         'STATUS_RUNNING_VM': '🖥️ 飞牛NAS-虚拟机已开机',
         'DESTROY_VM': '🗑️ 飞牛NAS-虚拟机已销毁',
+        # 影视库
+        'MEDIA_LOGIN_SUCC': '🎬 飞牛NAS-影视库登录成功',
+        'MEDIA_LOGOUT': '🎬 飞牛NAS-影视库退出登录',
+        'MEDIA_USER_CREATED': '👤 飞牛NAS-影视库创建用户',
+        'TRIM_RESOURCE_ADDED': '📥 飞牛NAS-影视资源入库',
+        'TRIM_SCRAPE_SUCCESS': '✅ 飞牛NAS-影视刮削完成',
+        'PHOTO_SHARE_CREATED': '📥 飞牛NAS-相册分享创建',
+        'PHOTO_SHARE_EXPIRED': '⏱️ 飞牛NAS-相册分享过期',
+        'PHOTO_DEVICE_REGISTERED': '📱 飞牛NAS-相册同步设备',
+        'FACE_RECOGNITION_UPDATED': '✅ 飞牛NAS-相册人脸识别',
     }
     
     # Bark事件标题映射 - 用于Bark推送，标题统一为"飞牛NAS通知"
@@ -160,6 +191,9 @@ class MultiPlatformNotifier:
         'LoginFail': '用户{user}登录失败，请检查是否有异常尝试。',
         'Logout': '用户{user}退出登录',
         'FoundDisk': '发现新硬盘{disk_info}',
+        'InsertDisk': '插入硬盘{name}',
+        'EjectDisk': '弹出硬盘{name}',
+        'StorageBroken': '存储空间损坏 volume={volume}',
         'SSH_INVALID_USER': '无效用户{user}尝试登录',
         'SSH_AUTH_FAILED': 'SSH认证失败{user_info}',
         'SSH_LOGIN_SUCCESS': 'SSH用户{user}登录成功',
@@ -192,6 +226,8 @@ class MultiPlatformNotifier:
         'TEST_PUSH': '测试推送',
         'DND_SUMMARY': '勿扰时段事件汇总',
         'POLL_BATCH_SUMMARY': '多事件合并通知',
+        'BACKUP_TASK_SUCCESS': '备份任务完成',
+        'BACKUP_TASK_FAILED': '备份任务失败',
         'ARCHIVING_SUCCESS': '归档成功',
         'DeleteFile': '文件删除',
         'MovetoTrashbin': '移到回收站',
@@ -225,79 +261,102 @@ class MultiPlatformNotifier:
         'SHUTDOWN_VM': '用户{user}关闭虚拟机{vm_title}',
         'STATUS_RUNNING_VM': '用户{user}开启虚拟机{vm_title}',
         'DESTROY_VM': '用户{user}销毁虚拟机{vm_title}',
+        'MEDIA_LOGIN_SUCC': '影视库登录 {user}',
+        'MEDIA_LOGOUT': '影视库退出 {user}',
+        'MEDIA_USER_CREATED': '影视库创建用户',
+        'TRIM_RESOURCE_ADDED': '影视资源入库',
+        'TRIM_SCRAPE_SUCCESS': '影视刮削完成',
+        'PHOTO_SHARE_CREATED': '相册分享创建',
+        'PHOTO_SHARE_EXPIRED': '相册分享过期',
+        'PHOTO_DEVICE_REGISTERED': '相册同步设备',
+        'FACE_RECOGNITION_UPDATED': '相册人脸识别',
     }
     
     # 事件备注
     EVENT_NOTES = {
-        'LoginSucc': '💡 系统检测到用户登录成功，请确认是否为本人操作。',
-        'LoginSucc2FA1': '⚠️ 用户已完成两步验证的第一步，等待二次验证。',
-        'LoginFail': '⚠️ 系统检测到登录失败，请检查是否有异常尝试。',
-        'Logout': '📝 用户已安全退出系统。',
-        'FoundDisk': '💾 检测到新存储设备接入系统。',
-        'SSH_INVALID_USER': '⚠️ 检测到无效用户登录尝试，请注意安全。',
-        'SSH_AUTH_FAILED': '⚠️ SSH认证失败，请确认是否为合法用户。',
-        'SSH_LOGIN_SUCCESS': '💡 SSH登录成功，请确认是否为本人操作。',
-        'SSH_DISCONNECTED': '📝 SSH连接已断开。',
-        'APP_CRASH': '❗ 应用程序异常退出，建议检查应用状态和日志。',
-        'APP_UPDATE_FAILED': '❗ 应用程序更新失败，建议检查应用状态和日志。',
-        'APP_START_FAILED_LOCAL_APP_RUN_EXCEPTION': '❗ 应用程序启动失败（本地运行异常），建议检查应用状态和日志。',
-        'APP_AUTO_START_FAILED_DOCKER_NOT_AVAILABLE': '❗ 应用程序自启动失败（Docker 不可用），请检查 Docker 服务。',
-        'CPU_USAGE_ALARM': '⚠️ CPU 使用率超过阈值，建议检查系统负载或关闭占用高的进程。',
-        'CPU_USAGE_RESTORED': '✅ CPU 使用率已恢复至阈值以下，负载正常。',
-        'MEMORY_USAGE_ALARM': '⚠️ 内存使用率超过阈值，建议检查占用内存的进程或服务。',
-        'MEMORY_USAGE_RESTORED': '✅ 内存使用率已恢复至阈值以下。',
-        'CPU_TEMPERATURE_ALARM': '⚠️ CPU 温度超过阈值，请检查散热与机箱通风。',
-        'UPS_ONBATT': '⚠️ UPS切换到电池供电模式，请注意电池电量。',
-        'UPS_ONBATT_LOWBATT': '⚠️ UPS切换到电池供电模式，低电量自动关机，请尽快恢复市电供应。',
-        'UPS_ONLINE': '✅ UPS切换到市电供电模式，电力供应恢复正常。',
-        'UPS_ENABLE': '🔌 系统已开启 UPS 支持。',
-        'UPS_DISABLE': '🔌 系统已关闭 UPS 支持。',
-        'DiskWakeup': '🌙 磁盘已被唤醒。',
-        'DiskSpindown': '🌙 磁盘已进入休眠状态。',
-        'APP_START': '🚀 飞牛NAS日志监控服务已启动，开始监控系统事件。',
-        'APP_STOP': '🛑 飞牛NAS日志监控服务已停止，暂停监控系统事件。',
-        'APP_STARTED': '📱 应用已成功启动。',
-        'APP_STOPPED': '🛑 应用已停止运行。',
-        'APP_UPDATED': '🔄 应用已更新到新版本。',
-        'APP_INSTALLED': '📦 新应用已安装。',
-        'APP_AUTO_STARTED': '▶️ 应用已随系统自启动。',
-        'APP_UNINSTALLED': '🗑️ 应用已卸载。',
-        'DISK_IO_ERR': '⚠️ 磁盘发生IO错误，请检查硬盘健康与连接。',
-        'TEST_PUSH': '🧪 Web 配置页发送的测试消息。',
+        'LoginSucc': '系统检测到用户登录成功，请确认是否为本人操作。',
+        'LoginSucc2FA1': '用户已完成两步验证的第一步，等待二次验证。',
+        'LoginFail': '系统检测到登录失败，请检查是否有异常尝试。',
+        'Logout': '用户已安全退出系统。',
+        'FoundDisk': '检测到新存储设备接入系统。',
+        'InsertDisk': '检测到存储设备插入。',
+        'EjectDisk': '检测到存储设备弹出。',
+        'StorageBroken': '检测到存储空间损坏，请尽快检查。',
+        'SSH_INVALID_USER': '检测到无效用户登录尝试，请注意安全。',
+        'SSH_AUTH_FAILED': 'SSH认证失败，请确认是否为合法用户。',
+        'SSH_LOGIN_SUCCESS': 'SSH登录成功，请确认是否为本人操作。',
+        'SSH_DISCONNECTED': 'SSH连接已断开。',
+        'APP_CRASH': '应用程序异常退出，建议检查应用状态和日志。',
+        'APP_UPDATE_FAILED': '应用程序更新失败，建议检查应用状态和日志。',
+        'APP_START_FAILED_LOCAL_APP_RUN_EXCEPTION': '应用程序启动失败（本地运行异常），建议检查应用状态和日志。',
+        'APP_AUTO_START_FAILED_DOCKER_NOT_AVAILABLE': '应用程序自启动失败（Docker 不可用），请检查 Docker 服务。',
+        'CPU_USAGE_ALARM': 'CPU 使用率超过阈值，建议检查系统负载或关闭占用高的进程。',
+        'CPU_USAGE_RESTORED': 'CPU 使用率已恢复至阈值以下，负载正常。',
+        'MEMORY_USAGE_ALARM': '内存使用率超过阈值，建议检查占用内存的进程或服务。',
+        'MEMORY_USAGE_RESTORED': '内存使用率已恢复至阈值以下。',
+        'CPU_TEMPERATURE_ALARM': 'CPU 温度超过阈值，请检查散热与机箱通风。',
+        'UPS_ONBATT': 'UPS切换到电池供电模式，请注意电池电量。',
+        'UPS_ONBATT_LOWBATT': 'UPS切换到电池供电模式，低电量自动关机，请尽快恢复市电供应。',
+        'UPS_ONLINE': 'UPS切换到市电供电模式，电力供应恢复正常。',
+        'UPS_ENABLE': '系统已开启 UPS 支持。',
+        'UPS_DISABLE': '系统已关闭 UPS 支持。',
+        'DiskWakeup': '磁盘已被唤醒。',
+        'DiskSpindown': '磁盘已进入休眠状态。',
+        'APP_START': '飞牛NAS日志监控服务已启动，开始监控系统事件。',
+        'APP_STOP': '飞牛NAS日志监控服务已停止，暂停监控系统事件。',
+        'APP_STARTED': '应用已成功启动。',
+        'APP_STOPPED': '应用已停止运行。',
+        'APP_UPDATED': '应用已更新到新版本。',
+        'APP_INSTALLED': '新应用已安装。',
+        'APP_AUTO_STARTED': '▶应用已随系统自启动。',
+        'APP_UNINSTALLED': '应用已卸载。',
+        'DISK_IO_ERR': '磁盘发生IO错误，请检查硬盘健康与连接。',
+        'TEST_PUSH': 'Web 配置页发送的测试消息。',
         'POLL_BATCH_SUMMARY': '',
-        'ARCHIVING_SUCCESS': '📦 系统完成归档任务。',
-        'DeleteFile': '🗑️ 文件已被删除。',
-        'MovetoTrashbin': '🗑️ 文件已移至回收站。',
-        'SHARE_EVENTID_DEL': '📤 共享已删除。',
-        'SHARE_EVENTID_PUT': '📤 共享已添加或更新。',
-        'WEBDAV_ENABLED': '🌐 WebDAV 服务已启用。',
-        'WEBDAV_DISABLED': '🛑 WebDAV 服务已关闭。',
-        'SAMBA_ENABLED': '📂 Samba 服务已启用。',
-        'SAMBA_DISABLED': '🛑 Samba 服务已关闭。',
-        'DLNA_ENABLED': '📺 DLNA 服务已启用。',
-        'DLNA_DISABLED': '🛑 DLNA 服务已关闭。',
-        'FTP_ENABLED': '📁 FTP 服务已启用。',
-        'FTP_DISABLED': '🛑 FTP 服务已关闭。',
-        'NFS_ENABLED': '📂 NFS 服务已启用。',
-        'NFS_DISABLED': '🛑 NFS 服务已关闭。',
-        'FW_ENABLE': '🔥 防火墙已开启。',
-        'FW_DISABLE': '🔥 防火墙已关闭。',
-        'SECURITY_PORTCHANGED': '🔒 安全或端口设置已变更。',
-        'CREATE_VM': '🖥️ 用户已创建虚拟机。',
-        'START_VM': '🖥️ 用户已操作虚拟机开机。',
-        'STATUS_SHUTOFF_VM': '🖥️ 虚拟机当前为关机状态。',
-        'STATUS_PAUSED_VM': '🖥️ 虚拟机当前为暂停状态。',
-        'PAUSE_VM': '🖥️ 用户已操作虚拟机暂停。',
-        'RESUME_VM': '🖥️ 用户已操作虚拟机恢复。',
-        'STATUS_RESUMED_VM': '🖥️ 虚拟机当前为恢复状态。',
-        'REBOOT_VM': '🖥️ 用户已操作虚拟机重启。',
-        'STATUS_REBOOTED_VM': '🖥️ 虚拟机已完成重启。',
-        'EDIT_VM': '🖥️ 用户已修改虚拟机配置。',
-        'OVA_EXPORT_VM': '🖥️ 虚拟机 OVA 导出成功。',
-        'DELETE_VM': '🗑️ 用户已删除虚拟机。',
-        'SHUTDOWN_VM': '🖥️ 用户已执行虚拟机关机操作。',
-        'STATUS_RUNNING_VM': '🖥️ 用户已执行虚拟机开机操作。',
-        'DESTROY_VM': '🗑️ 用户已销毁虚拟机，请确认是否为预期操作。',
+        'BACKUP_TASK_SUCCESS': '备份任务执行完成。',
+        'BACKUP_TASK_FAILED': '备份任务执行失败，请检查任务配置与网络状态。',
+        'ARCHIVING_SUCCESS': '系统完成归档任务。',
+        'DeleteFile': '文件已被删除。',
+        'MovetoTrashbin': '文件已移至回收站。',
+        'SHARE_EVENTID_DEL': '共享已删除。',
+        'SHARE_EVENTID_PUT': '共享已添加或更新。',
+        'WEBDAV_ENABLED': 'WebDAV 服务已启用。',
+        'WEBDAV_DISABLED': 'WebDAV 服务已关闭。',
+        'SAMBA_ENABLED': 'Samba 服务已启用。',
+        'SAMBA_DISABLED': 'Samba 服务已关闭。',
+        'DLNA_ENABLED': 'DLNA 服务已启用。',
+        'DLNA_DISABLED': 'DLNA 服务已关闭。',
+        'FTP_ENABLED': 'FTP 服务已启用。',
+        'FTP_DISABLED': 'FTP 服务已关闭。',
+        'NFS_ENABLED': 'NFS 服务已启用。',
+        'NFS_DISABLED': 'NFS 服务已关闭。',
+        'FW_ENABLE': '防火墙已开启。',
+        'FW_DISABLE': '防火墙已关闭。',
+        'SECURITY_PORTCHANGED': '安全或端口设置已变更。',
+        'CREATE_VM': '用户已创建虚拟机。',
+        'START_VM': '用户已操作虚拟机开机。',
+        'STATUS_SHUTOFF_VM': '虚拟机当前为关机状态。',
+        'STATUS_PAUSED_VM': '虚拟机当前为暂停状态。',
+        'PAUSE_VM': '用户已操作虚拟机暂停。',
+        'RESUME_VM': '用户已操作虚拟机恢复。',
+        'STATUS_RESUMED_VM': '虚拟机当前为恢复状态。',
+        'REBOOT_VM': '用户已操作虚拟机重启。',
+        'STATUS_REBOOTED_VM': '虚拟机已完成重启。',
+        'EDIT_VM': '用户已修改虚拟机配置。',
+        'OVA_EXPORT_VM': '虚拟机 OVA 导出成功。',
+        'DELETE_VM': '用户已删除虚拟机。',
+        'SHUTDOWN_VM': '用户已执行虚拟机关机操作。',
+        'STATUS_RUNNING_VM': '用户已执行虚拟机开机操作。',
+        'DESTROY_VM': '用户已销毁虚拟机，请确认是否为预期操作。',
+        'MEDIA_LOGIN_SUCC': '影视库用户登录成功。',
+        'MEDIA_LOGOUT': '影视库用户退出登录。',
+        'MEDIA_USER_CREATED': '影视库管理员创建用户成功。',
+        'TRIM_RESOURCE_ADDED': '影视库资源入库成功。',
+        'TRIM_SCRAPE_SUCCESS': '影视资源刮削完成。',
+        'PHOTO_SHARE_CREATED': '相册库新增了对外分享链接。',
+        'PHOTO_SHARE_EXPIRED': '该相册分享已超过有效期。',
+        'PHOTO_DEVICE_REGISTERED': '相册库已登记新的同步设备。',
+        'FACE_RECOGNITION_UPDATED': '相册人脸识别有新的任务记录。',
     }
     
     def __init__(self, 
@@ -307,7 +366,12 @@ class MultiPlatformNotifier:
                  bark_url: str = "",
                  pushplus_params: str = "",
                  magic_push_params: str = "",
+                 smtp_params: str = "",
                  title_prefix: str = "",
+                 minimal_push_enabled: bool = False,
+                 user_lookup_db_path: str = "",
+                 activity_user_lookup_db_path: str = "",
+                 logger_user_lookup_db_path: str = "",
                  dedup_window: int = 300,
                  pool_size: int = 10,
                  retries: int = 3,
@@ -322,6 +386,7 @@ class MultiPlatformNotifier:
             bark_url: Bark推送URL
             pushplus_params: PushPlus 参数（JSON 字符串，多个用 | 分隔）
             magic_push_params: 魔法推送（JSON 含 base_url、token、可选 title，多个用 | 分隔）
+            smtp_params: SMTP 邮件配置（JSON：server、port、username、password、to，可选 from）
             dedup_window: 去重时间窗口（秒）
             pool_size: 连接池大小
             retries: 重试次数
@@ -333,10 +398,19 @@ class MultiPlatformNotifier:
         self.bark_url = bark_url
         self.pushplus_params = pushplus_params or ""
         self.magic_push_params = magic_push_params or ""
+        self.smtp_params = smtp_params or ""
         if not isinstance(title_prefix, str):
             self.title_prefix = ""
         else:
             self.title_prefix = (title_prefix or "").strip()
+        self.minimal_push_enabled = bool(minimal_push_enabled)
+        self.user_lookup_db_path = (user_lookup_db_path or "").strip()
+        self.activity_user_lookup_db_path = (activity_user_lookup_db_path or "").strip()
+        self.logger_user_lookup_db_path = (logger_user_lookup_db_path or "").strip()
+        self._user_db_cache = {}
+        self._user_db_cache_loaded_at = 0.0
+        self._nas_uid_name_cache = {}
+        self._nas_uid_name_cache_loaded_at = 0.0
         self.dedup_window = dedup_window
         
         # 连接池
@@ -385,6 +459,8 @@ class MultiPlatformNotifier:
             platforms.append('PushPlus')
         if self.magic_push_params:
             platforms.append('魔法推送')
+        if self.smtp_params:
+            platforms.append('SMTP邮件')
 
         self.logger.info(f"多平台通知器初始化完成，支持平台: {', '.join(platforms) if platforms else '无'}, 去重窗口: {dedup_window}秒")
 
@@ -437,6 +513,7 @@ class MultiPlatformNotifier:
                     'bark': bool(self.bark_url),
                     'pushplus': bool(self.pushplus_params),
                     'magic_push': bool(self.magic_push_params),
+                    'smtp': bool(self.smtp_params),
                 }
             }
     
@@ -498,12 +575,9 @@ class MultiPlatformNotifier:
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
 
-        # 构建消息
-        title = self._with_title_prefix(
-            self.EVENT_TITLES.get(event_type, self._fallback_event_title(event_type))
-        )
-        content = self._build_content(event_type, merged_data, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), '')
-        message = MultiPlatformMessage(title=title, content=content)
+        # 与普通通知一致走 _build_message，才能应用极简推送等统一逻辑
+        ts = merged_data.get("timestamp") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        message = self._build_message(event_type, merged_data, ts, "")
 
         results: List[bool] = []
         channel_results: List[Dict[str, Any]] = []
@@ -523,23 +597,25 @@ class MultiPlatformNotifier:
             channel_results.append(cr)
             self.logger.debug("合并事件-飞书: %s", cr)
         if self.bark_url:
-            bark_message = self._build_bark_message(event_type, merged_data, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), '')
-            ok, cr = self._send_to_bark(bark_message)
+            ok, cr = self._send_to_bark(message)
             results.append(ok)
             channel_results.append(cr)
             self.logger.debug("合并事件-Bark: %s", cr)
         if self.pushplus_params:
-            pushplus_message = self._build_bark_message(event_type, merged_data, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), '')
-            ok, cr = self._send_to_pushplus(pushplus_message)
+            ok, cr = self._send_to_pushplus(message)
             results.append(ok)
             channel_results.append(cr)
             self.logger.debug("合并事件-PushPlus: %s", cr)
         if self.magic_push_params:
-            magic_message = self._build_bark_message(event_type, merged_data, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), '')
-            ok, cr = self._send_to_magic_push(magic_message)
+            ok, cr = self._send_to_magic_push(message)
             results.append(ok)
             channel_results.append(cr)
             self.logger.debug("合并事件-魔法推送: %s", cr)
+        if self.smtp_params:
+            ok, cr = self._send_to_smtp(message)
+            results.append(ok)
+            channel_results.append(cr)
+            self.logger.debug("合并事件-SMTP邮件: %s", cr)
         if results and any(results):
             self._record_send_result(True)
             self.logger.info(f"合并事件发送成功: {event_type}, 数量: {len(event_list)}")
@@ -621,6 +697,11 @@ class MultiPlatformNotifier:
             results.append(ok)
             channel_results.append(cr)
             self.logger.debug("魔法推送通知发送结果: %s", cr)
+        if self.smtp_params:
+            ok, cr = self._send_to_smtp(message)
+            results.append(ok)
+            channel_results.append(cr)
+            self.logger.debug("SMTP邮件通知发送结果: %s", cr)
         
         if results and any(results):  # 至少一个平台发送成功
             self.sent_events[event_fingerprint] = time.time()
@@ -749,7 +830,9 @@ class MultiPlatformNotifier:
             return False, {"channel": "Bark", "success": False, "response": None, "error": "未配置"}
         encoded_title = urllib.parse.quote(message.title, safe='')
         encoded_content = urllib.parse.quote(message.content, safe='')
-        encoded_title_and_content = urllib.parse.quote(message.title + '\n\n' + message.content, safe='')
+        encoded_title_and_content = urllib.parse.quote(
+            message.merged_plain_text(blank_line_between=True), safe=""
+        )
         results = []
         for raw_url in urls:
             if '{title}' in raw_url and '{content}' in raw_url:
@@ -779,7 +862,7 @@ class MultiPlatformNotifier:
                     final_content = message.content
                 else:
                     final_title = user_title or message.title
-                    final_content = message.title + '\n\n' + message.content
+                    final_content = message.merged_plain_text(blank_line_between=True)
                 payload['title'] = final_title
                 payload['content'] = final_content
                 results.append(self.connection_pool.post(PUSHPLUS_URL, payload))
@@ -832,6 +915,77 @@ class MultiPlatformNotifier:
                 results.append({"success": False, "response": None, "error": str(e)[:80]})
         any_ok = any(r.get("success") for r in results)
         return any_ok, self._channel_result("魔法推送", results)
+
+    def _send_to_smtp(self, message: MultiPlatformMessage) -> tuple:
+        """发送到 SMTP 邮件。返回 (是否有任一成功, 渠道结果 dict)。"""
+        param_list = self._iter_urls(self.smtp_params)
+        if not param_list:
+            return False, {"channel": "SMTP邮件", "success": False, "response": None, "error": "未配置"}
+        results = []
+        for param_str in param_list:
+            try:
+                cfg = json.loads(param_str)
+                if not isinstance(cfg, dict):
+                    results.append({"success": False, "response": None, "error": "参数须为 JSON 对象"})
+                    continue
+                server = (cfg.get("server") or "").strip()
+                username = (cfg.get("username") or "").strip()
+                password = cfg.get("password") or ""
+                to_raw = (cfg.get("to") or "").strip()
+                from_addr = (cfg.get("from") or username).strip()
+                if not server or not username or not password or not to_raw:
+                    results.append({"success": False, "response": None, "error": "缺少 server/username/password/to"})
+                    continue
+
+                recipients = [x.strip() for x in to_raw.split(",") if x.strip()]
+                if not recipients:
+                    results.append({"success": False, "response": None, "error": "收件人不能为空"})
+                    continue
+
+                try:
+                    port = int(cfg.get("port", 465))
+                except (TypeError, ValueError):
+                    results.append({"success": False, "response": None, "error": "端口必须是整数"})
+                    continue
+                em = EmailMessage()
+                em["Subject"] = (message.title or "").strip() or "系统通知"
+                if from_addr and "@" not in from_addr:
+                    # 用户填写昵称时，按 RFC 组装为“昵称 <登录邮箱>”。
+                    em["From"] = formataddr((str(Header(from_addr, "utf-8")), username))
+                else:
+                    em["From"] = from_addr or username
+                em["To"] = ", ".join(recipients)
+                body = (message.content or "").strip()
+                if not body and message.title:
+                    body = (message.title or "").strip()
+                em.set_content(body or "系统通知")
+
+                # 按端口自动判定加密方式：465 用 SMTP_SSL，其它端口走 STARTTLS。
+                if port == 465:
+                    with smtplib.SMTP_SSL(server, port, timeout=15, context=ssl.create_default_context()) as client:
+                        client.login(username, password)
+                        # 兼容多数服务商限制：信封发件人必须是登录账号。
+                        client.send_message(em, from_addr=username, to_addrs=recipients)
+                else:
+                    with smtplib.SMTP(server, port, timeout=15) as client:
+                        client.ehlo()
+                        client.starttls(context=ssl.create_default_context())
+                        client.ehlo()
+                        client.login(username, password)
+                        # 兼容多数服务商限制：信封发件人必须是登录账号。
+                        client.send_message(em, from_addr=username, to_addrs=recipients)
+
+                results.append({
+                    "success": True,
+                    "response": {"to": recipients, "port": port, "secure_mode": ("ssl" if port == 465 else "starttls")},
+                    "error": None
+                })
+            except json.JSONDecodeError:
+                results.append({"success": False, "response": None, "error": "参数 JSON 解析失败"})
+            except Exception as e:
+                results.append({"success": False, "response": None, "error": str(e)[:120]})
+        any_ok = any(r.get("success") for r in results)
+        return any_ok, self._channel_result("SMTP邮件", results)
     
     def _generate_fingerprint(self, event_type: str, event_data: Dict[str, Any]) -> str:
         """生成事件指纹（用于去重）"""
@@ -950,6 +1104,11 @@ class MultiPlatformNotifier:
     def _build_message(self, event_type: str, event_data: Dict[str, Any], 
                       timestamp: str, raw_log: str) -> MultiPlatformMessage:
         """构建多平台消息"""
+        # 轮询汇总类消息优先级高于极简：始终按完整文案推送
+        if self.minimal_push_enabled and event_type != "POLL_BATCH_SUMMARY":
+            one_line = self._build_minimal_one_line(event_type, event_data)
+            return MultiPlatformMessage(title=one_line, content="")
+
         title_event_type = event_type
         # 批量汇总若仅包含单一事件类型，则标题回退为该事件原始标题
         if event_type == 'POLL_BATCH_SUMMARY':
@@ -968,6 +1127,78 @@ class MultiPlatformNotifier:
         content = self._build_content(event_type, event_data, timestamp, raw_log)
         
         return MultiPlatformMessage(title=title, content=content)
+
+    def _build_minimal_one_line(self, event_type: str, event_data: Dict[str, Any]) -> str:
+        """极简推送：仅一行核心信息。"""
+        if event_type in ("DiskWakeup", "DiskSpindown"):
+            action = "磁盘唤醒" if event_type == "DiskWakeup" else "磁盘休眠"
+            merged = event_data.get("merged_disks")
+            if isinstance(merged, list) and merged:
+                names: List[str] = []
+                for item in merged:
+                    if not isinstance(item, dict):
+                        continue
+                    d = (item.get("disk") or "").strip()
+                    if d:
+                        names.append(d)
+                n = len(merged)
+                if names:
+                    head = "、".join(names[:4])
+                    if n > len(names) or n > 4:
+                        body = f"{head}{action}等共{n}块"
+                    elif n > 1:
+                        body = f"{head}{action}（{n}块）"
+                    else:
+                        body = f"{head}{action}"
+                else:
+                    body = f"{action}（{n}块）"
+                prefix = (self.title_prefix or "").strip()
+                if prefix:
+                    return f"{prefix}-{body}"
+                return body
+            disk = (event_data.get("disk") or "").strip()
+            body = f"{disk}{action}" if disk else action
+            prefix = (self.title_prefix or "").strip()
+            if prefix:
+                return f"{prefix}-{body}"
+            return body
+
+        user = self._display_user(
+            event_data.get("user")
+            or event_data.get("user_guid")
+            or event_data.get("uname")
+            or ""
+        )
+        app_name = (event_data.get("app_name") or "").strip()
+        title = (event_data.get("title") or event_data.get("name") or "").strip()
+
+        action_map = {
+            "LoginSucc": "登录成功",
+            "LoginSucc2FA1": "二次验证登录",
+            "LoginFail": "登录失败",
+            "Logout": "退出登录",
+            "MEDIA_LOGIN_SUCC": "影视库登录成功",
+            "MEDIA_LOGOUT": "影视库退出登录",
+            "MEDIA_USER_CREATED": "影视库创建用户",
+            "TRIM_RESOURCE_ADDED": "影视资源入库",
+            "TRIM_SCRAPE_SUCCESS": "影视刮削完成",
+            "APP_CRASH": "应用崩溃",
+            "APP_UPDATE_FAILED": "应用更新失败",
+            "BACKUP_TASK_SUCCESS": "备份任务完成",
+            "BACKUP_TASK_FAILED": "备份任务失败",
+        }
+        action = action_map.get(event_type)
+        if not action:
+            fallback_title = self.EVENT_TITLES.get(event_type, event_type)
+            action = self._strip_body_emojis(fallback_title)
+            action = action.replace("飞牛NAS-", "").replace("飞牛NAS", "").strip(" -")
+
+        subject = user or app_name or title
+        prefix = (self.title_prefix or "").strip()
+        body = f"{subject}{action}" if subject else action
+        if prefix:
+            return f"{prefix}-{body}"
+        return body
     
     def _build_content(
         self,
@@ -1004,8 +1235,10 @@ class MultiPlatformNotifier:
             detail = self._build_login_content(event_data)
         elif event_type in ['SSH_INVALID_USER', 'SSH_AUTH_FAILED', 'SSH_LOGIN_SUCCESS', 'SSH_DISCONNECTED']:
             detail = self._build_ssh_content(event_type, event_data)
-        elif event_type == 'FoundDisk':
+        elif event_type in ('FoundDisk', 'InsertDisk', 'EjectDisk'):
             detail = self._build_disk_content(event_data)
+        elif event_type == 'StorageBroken':
+            detail = self._build_storage_broken_content(event_data)
         elif event_type == 'APP_CRASH':
             detail = self._build_app_crash_content(event_data)
         elif event_type in ('APP_STARTED', 'APP_STOPPED', 'APP_UPDATED', 'APP_INSTALLED', 'APP_AUTO_STARTED', 'APP_UNINSTALLED'):
@@ -1048,6 +1281,8 @@ class MultiPlatformNotifier:
                 detail = self._build_disk_spindown_content(event_data)
         elif event_type == 'DISK_IO_ERR':
             detail = self._build_disk_io_err_content(event_data)
+        elif event_type in {'BACKUP_TASK_SUCCESS', 'BACKUP_TASK_FAILED'}:
+            detail = self._build_backup_task_content(event_data)
         elif event_type in {'SHUTDOWN_VM', 'STATUS_RUNNING_VM', 'DESTROY_VM'} or ("VM" in str(event_type).upper()):
             detail = self._build_vm_content(event_data)
         elif event_type in {
@@ -1057,6 +1292,17 @@ class MultiPlatformNotifier:
             'FW_ENABLE', 'FW_DISABLE', 'SECURITY_PORTCHANGED',
         }:
             detail = self._build_simple_content(event_data)
+        elif event_type in ('MEDIA_LOGIN_SUCC', 'MEDIA_LOGOUT'):
+            detail = self._build_media_login_content(event_data)
+        elif event_type in ('MEDIA_USER_CREATED', 'TRIM_RESOURCE_ADDED', 'TRIM_SCRAPE_SUCCESS'):
+            detail = self._build_trim_library_content(event_type, event_data)
+        elif event_type in (
+            'PHOTO_SHARE_CREATED',
+            'PHOTO_SHARE_EXPIRED',
+            'PHOTO_DEVICE_REGISTERED',
+            'FACE_RECOGNITION_UPDATED',
+        ):
+            detail = self._build_photo_album_content(event_type, event_data)
 
         if detail:
             fragments.append(detail.rstrip('\n'))
@@ -1111,8 +1357,8 @@ class MultiPlatformNotifier:
     def _build_login_content(self, event_data: Dict[str, Any]) -> str:
         """构建登录相关事件内容"""
         content = ""
-        
-        user = event_data.get('user', '')
+
+        user = self._display_user(event_data.get('user', ''))
         if user:
             content += f"👤 用户名: {user}\n"
         else:
@@ -1125,9 +1371,152 @@ class MultiPlatformNotifier:
             content += "📍 IP地址: \n"
         
         via = event_data.get('via', '')
-        content += f"🔑 认证方式: {via}\n"
+        if via:
+            content += f"🔑 认证方式: {via}\n"
         
         return content
+
+    def _build_media_login_content(self, event_data: Dict[str, Any]) -> str:
+        """影视库登录/退出内容（简洁版，减少图标）。"""
+        lines: List[str] = []
+        user = self._display_user(event_data.get('user', ''))
+        ip = event_data.get('IP', '')
+        via = event_data.get('via', '')
+        lines.append(f"用户名: {user}")
+        lines.append(f"IP地址: {ip}")
+        if via:
+            lines.append(f"认证方式: {via}")
+        return "\n".join(lines)
+
+    def _display_user(self, user_value: Any) -> str:
+        """将 user_guid 等标识转换为可读用户名（命中映射时）。"""
+        raw = str(user_value or "").strip()
+        if not raw:
+            return ""
+        # 从 trimmedia.db 的 user(guid, username) 自动映射
+        db_name = self._lookup_username_from_db(raw)
+        if db_name:
+            return db_name
+        return raw
+
+    def _lookup_username_from_db(self, guid: str) -> str:
+        """从媒体相关数据库自动读取 guid 对应可读用户名（带短时缓存）。"""
+        if not guid:
+            return ""
+        db_paths = []
+        if self.user_lookup_db_path and os.path.exists(self.user_lookup_db_path):
+            db_paths.append(self.user_lookup_db_path)
+        if self.activity_user_lookup_db_path and os.path.exists(self.activity_user_lookup_db_path):
+            db_paths.append(self.activity_user_lookup_db_path)
+        if not db_paths:
+            return ""
+        now = time.time()
+        # 60 秒缓存，避免每条推送都查库
+        if now - self._user_db_cache_loaded_at > 60:
+            try:
+                mapping = {}
+                guid_cols = ["guid", "user_guid"]
+                name_cols = ["username", "nickname", "name", "account", "user_name"]
+
+                for db_path in db_paths:
+                    conn = sqlite3.connect(
+                        f"file:{db_path}?mode=ro&immutable=1",
+                        uri=True,
+                        timeout=3.0,
+                    )
+                    try:
+                        tables = []
+                        for (tname,) in conn.execute("SELECT name FROM sqlite_master WHERE type='table'"):
+                            tn = str(tname or "").strip()
+                            if tn and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", tn):
+                                tables.append(tn)
+
+                        for table in tables:
+                            cols = [
+                                str(r[1] or "").strip()
+                                for r in conn.execute(f"PRAGMA table_info('{table}')").fetchall()
+                                if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(r[1] or "").strip())
+                            ]
+                            guid_col = next((c for c in guid_cols if c in cols), "")
+                            name_col = next((c for c in name_cols if c in cols), "")
+                            if not guid_col or not name_col:
+                                continue
+                            cur = conn.execute(
+                                f'SELECT "{guid_col}", "{name_col}" FROM "{table}" '
+                                f'WHERE "{guid_col}" IS NOT NULL AND "{name_col}" IS NOT NULL'
+                            )
+                            for g, u in cur.fetchall():
+                                sg = str(g or "").strip()
+                                su = str(u or "").strip()
+                                if sg and su and sg not in mapping:
+                                    mapping[sg] = su
+                    finally:
+                        conn.close()
+
+                self._user_db_cache = mapping
+                self._user_db_cache_loaded_at = now
+            except Exception:
+                return ""
+        return self._user_db_cache.get(guid, "")
+
+    def _lookup_nas_uid_name_from_logger_db(self, nas_uid: Any) -> str:
+        """从 logger_data.db3 的 log(uid, uname) 自动映射 NAS UID -> 昵称。"""
+        try:
+            uid = int(nas_uid) if nas_uid is not None and str(nas_uid).strip() != "" else None
+        except (TypeError, ValueError):
+            uid = None
+        if uid is None or not self.logger_user_lookup_db_path:
+            return ""
+        if not os.path.exists(self.logger_user_lookup_db_path):
+            return ""
+        now = time.time()
+        if now - self._nas_uid_name_cache_loaded_at > 60:
+            try:
+                conn = sqlite3.connect(
+                    f"file:{self.logger_user_lookup_db_path}?mode=ro&immutable=1",
+                    uri=True,
+                    timeout=3.0,
+                )
+                cur = conn.execute(
+                    "SELECT uid, uname FROM log WHERE uid IS NOT NULL AND uname IS NOT NULL "
+                    "AND TRIM(uname) != '' ORDER BY id DESC LIMIT 20000"
+                )
+                mapping = {}
+                for u, n in cur.fetchall():
+                    su = str(u or "").strip()
+                    sn = str(n or "").strip()
+                    if su and sn and su not in mapping:
+                        mapping[su] = sn
+                conn.close()
+                self._nas_uid_name_cache = mapping
+                self._nas_uid_name_cache_loaded_at = now
+            except Exception:
+                return ""
+        return self._nas_uid_name_cache.get(str(uid), "")
+
+    def _album_nickname_from_map(self, nas_uid: Any, _photo_user_id: Any) -> str:
+        """相册所有者/设备所属用户：自动从 logger_data.db3 反查用户名称。"""
+        try:
+            nuid = int(nas_uid) if nas_uid is not None and str(nas_uid).strip() != "" else None
+        except (TypeError, ValueError):
+            nuid = None
+        # 自动从 logger_data.db3 反查 UID 的最近用户名
+        auto_name = self._lookup_nas_uid_name_from_logger_db(nuid)
+        if auto_name:
+            return auto_name
+        return ""
+
+    def _append_album_owner_display_line(self, lines: List[str], event_data: Dict[str, Any]) -> None:
+        """优先输出自动匹配到的用户名称；否则输出 UID/id 兜底信息。"""
+        nick = self._album_nickname_from_map(
+            event_data.get("owner_nas_uid"), event_data.get("owner_photo_user_id")
+        )
+        if nick:
+            lines.append(f"用户: {nick}")
+            return
+        fb = (event_data.get("owner_label") or "").strip()
+        if fb:
+            lines.append(f"用户: {fb}")
     
     def _build_disk_content(self, event_data: Dict[str, Any]) -> str:
         """构建硬盘发现事件内容"""
@@ -1143,6 +1532,23 @@ class MultiPlatformNotifier:
             content += f"🔢 序列号: {serial}\n"
         
         return content
+
+    def _build_storage_broken_content(self, event_data: Dict[str, Any]) -> str:
+        """存储空间损坏事件内容。"""
+        content = ""
+        vol = event_data.get('volume') or event_data.get('VOL') or event_data.get('vol')
+        if vol not in (None, ""):
+            content += f"📦 存储卷: {vol}\n"
+        name = event_data.get('name', '')
+        if name:
+            content += f"📛 设备名称: {name}\n"
+        model = event_data.get('model', '')
+        if model:
+            content += f"🔧 硬盘型号: {model}\n"
+        serial = event_data.get('serial', '')
+        if serial:
+            content += f"🔢 序列号: {serial}\n"
+        return content or "（无额外详情）"
 
     def _build_vm_content(self, event_data: Dict[str, Any]) -> str:
         """虚拟机事件内容：展示 VM_TITLE、USER_NAME 等（parameter 中 data）。"""
@@ -1163,7 +1569,7 @@ class MultiPlatformNotifier:
         """可选事件通用内容：展示操作用户、来源等（parameter 中 data.USER_NAME、from 等）。"""
         content = ""
         data = event_data.get('data', {}) or {}
-        user = event_data.get('user') or data.get('USER_NAME', data.get('user', ''))
+        user = self._display_user(event_data.get('user') or data.get('USER_NAME', data.get('user', '')))
         if user:
             content += f"👤 操作用户: {user}\n"
         from_src = event_data.get('from', '')
@@ -1176,6 +1582,209 @@ class MultiPlatformNotifier:
                 break
         return content or "（无额外详情）"
 
+    def _build_trim_library_content(self, event_type: str, event_data: Dict[str, Any]) -> str:
+        """影视库事件正文：仅保留用户可读信息。"""
+        lines: List[str] = []
+        data_raw = event_data.get("data")
+        data: Dict[str, Any] = data_raw if isinstance(data_raw, dict) else {}
+        title = (event_data.get("title") or data.get("title") or "").strip()
+        item_type = (event_data.get("item_type") or data.get("item_type") or "").strip()
+        season_number = event_data.get("season_number") if event_data.get("season_number") is not None else data.get("season_number")
+        episode_number = event_data.get("episode_number") if event_data.get("episode_number") is not None else data.get("episode_number")
+        path = (event_data.get("path") or data.get("path") or "").strip()
+        app_name = (event_data.get("app_name") or data.get("app_name") or "").strip()
+        user = self._display_user((event_data.get("user") or data.get("USER_NAME") or data.get("user") or "").strip())
+        ip = (event_data.get("IP") or data.get("ip") or "").strip()
+        runtime = event_data.get("runtime")
+        if runtime in (None, ""):
+            runtime = data.get("runtime")
+        release_date = (event_data.get("release_date") or data.get("release_date") or "").strip()
+        overview = (event_data.get("overview") or data.get("overview") or "").strip()
+
+        # # 标题行：若上游 message 含技术内容则忽略，改为更友好的动作描述
+        # if event_type == "TRIM_RESOURCE_ADDED":
+        #     lines.append("影视库资源入库")
+        # elif event_type == "TRIM_SCRAPE_SUCCESS":
+        #     lines.append("影视库刮削成功")
+        # elif event_type == "MEDIA_USER_CREATED":
+        #     lines.append("影视库创建用户")
+
+        if title:
+            lines.append(f"资源名称: {title}")
+        if item_type:
+            type_map = {
+                "Episode": "单集",
+                "Season": "季",
+                "TV": "剧集",
+                "Movie": "电影",
+            }
+            lines.append(f"资源类型: {type_map.get(item_type, item_type)}")
+        if event_type in ("TRIM_SCRAPE_SUCCESS", "TRIM_RESOURCE_ADDED"):
+            if season_number not in (None, "", 0) and episode_number not in (None, "", 0):
+                lines.append(f"集: 第{season_number}季{episode_number}集")
+            elif episode_number not in (None, "", 0):
+                lines.append(f"集: 第{episode_number}集")
+            elif season_number not in (None, "", 0):
+                lines.append(f"季: 第{season_number}季")
+        else:
+            if season_number not in (None, "", 0):
+                lines.append(f"季: {season_number}")
+            if episode_number not in (None, "", 0):
+                lines.append(f"集: {episode_number}")
+        if event_type == "TRIM_SCRAPE_SUCCESS":
+            try:
+                rt = int(runtime or 0)
+            except (TypeError, ValueError):
+                rt = 0
+            if rt > 0:
+                lines.append(f"影片时长: {rt}分钟")
+            if release_date:
+                lines.append(f"上映时间: {release_date}")
+            if overview:
+                lines.append(f"影片介绍: {overview[:120]}{'...' if len(overview) > 120 else ''}")
+        if path:
+            filename = path.rsplit("/", 1)[-1] if "/" in path else path
+            lines.append(f"文件: {filename}")
+        if app_name and event_type in ("MEDIA_LOGIN_SUCC", "MEDIA_LOGOUT", "MEDIA_USER_CREATED"):
+            lines.append(f"应用: {app_name}")
+        if user:
+            if event_type == "MEDIA_USER_CREATED":
+                lines.append(f"操作人: {user}")
+            else:
+                lines.append(f"用户: {user}")
+        if ip:
+            lines.append(f"IP: {ip}")
+
+        if event_type == "MEDIA_USER_CREATED":
+            # 创建用户仅展示常见可读字段，不暴露原始技术字段
+            new_user = (
+                data.get("NEW_USER")
+                or data.get("new_user")
+                or data.get("username")
+                or data.get("USER_NAME")
+                or ""
+            )
+            role = data.get("ROLE") or data.get("role") or ""
+            email = data.get("EMAIL") or data.get("email") or ""
+            if str(new_user).strip():
+                lines.append(f"新建用户: {self._display_user(new_user)}")
+            if str(role).strip():
+                lines.append(f"角色: {role}")
+            if str(email).strip():
+                lines.append(f"邮箱: {email}")
+        return "\n".join(lines) if lines else "（无额外详情）"
+
+    def _build_photo_album_content(self, event_type: str, event_data: Dict[str, Any]) -> str:
+        """相册 photo.db 事件正文：与影视库一致，仅字段行（总述与收尾见标题 / EVENT_NOTES）。"""
+        lines: List[str] = []
+        if event_type == "PHOTO_SHARE_CREATED":
+            if event_data.get("share_name"):
+                lines.append(f"分享名: {event_data['share_name']}")
+            if event_data.get("share_id"):
+                lines.append(f"分享ID: {event_data['share_id']}")
+            self._append_album_owner_display_line(lines, event_data)
+            if event_data.get("valid_to_str"):
+                lines.append(f"过期时间: {event_data['valid_to_str']}")
+        elif event_type == "PHOTO_SHARE_EXPIRED":
+            if event_data.get("share_name"):
+                lines.append(f"分享名: {event_data['share_name']}")
+            if event_data.get("share_id"):
+                lines.append(f"分享ID: {event_data['share_id']}")
+            if event_data.get("expired_at_str"):
+                lines.append(f"过期时间: {event_data['expired_at_str']}")
+            self._append_album_owner_display_line(lines, event_data)
+        elif event_type == "PHOTO_DEVICE_REGISTERED":
+            if event_data.get("device_display"):
+                lines.append(f"设备名称: {event_data['device_display']}")
+            if event_data.get("device_id"):
+                lines.append(f"设备ID: {event_data['device_id']}")
+            self._append_album_owner_display_line(lines, event_data)
+        elif event_type == "FACE_RECOGNITION_UPDATED":
+            if event_data.get("record_count") not in (None, "", 0):
+                lines.append(f"本轮识别记录: {event_data['record_count']}")
+            if event_data.get("photo_id") is not None:
+                lines.append(f"照片: {event_data['photo_id']}")
+            if event_data.get("user_photo_id") is not None:
+                lines.append(f"条目: {event_data['user_photo_id']}")
+            if not lines and event_data.get("task_log_id") is not None:
+                lines.append(f"识别记录: {event_data['task_log_id']}")
+        return "\n".join(lines) if lines else "（无额外详情）"
+
+    def _build_backup_task_content(self, event_data: Dict[str, Any]) -> str:
+        """构建备份任务事件内容。"""
+        def _fmt_ts(v: Any) -> str:
+            try:
+                iv = int(v)
+            except (TypeError, ValueError):
+                return ""
+            if iv > 10_000_000_000:
+                iv = int(iv / 1000)
+            try:
+                return datetime.fromtimestamp(iv).strftime("%Y-%m-%d %H:%M:%S")
+            except (OSError, ValueError):
+                return ""
+
+        def _fmt_size(v: Any) -> str:
+            try:
+                n = float(v)
+            except (TypeError, ValueError):
+                return str(v) if v not in (None, "") else ""
+            units = ["B", "KB", "MB", "GB", "TB"]
+            i = 0
+            while n >= 1024 and i < len(units) - 1:
+                n /= 1024
+                i += 1
+            return f"{n:.2f} {units[i]}" if i > 0 else f"{int(n)} {units[i]}"
+
+        task_name = str(event_data.get("task_name") or "")
+        operation_id = event_data.get("operation_id")
+        storage_name = str(event_data.get("storage_name") or "")
+        storage_addr = str(event_data.get("storage_address") or "")
+        target_path = str(event_data.get("target_path") or "")
+        source_paths = str(event_data.get("source_paths") or "")
+        start_time = _fmt_ts(event_data.get("start_time"))
+        end_time = _fmt_ts(event_data.get("finished_time"))
+        files_count = event_data.get("files_count")
+        completed_count = event_data.get("completed_count")
+        total_size = _fmt_size(event_data.get("total_size"))
+        completed_size = _fmt_size(event_data.get("completed_size"))
+        actual_time = event_data.get("actual_time")
+        status = event_data.get("status")
+        error_code = event_data.get("error_code")
+        error_message = str(event_data.get("error_message") or "")
+
+        lines: List[str] = []
+        if task_name:
+            lines.append(f"任务名称: {task_name}")
+        if operation_id not in (None, ""):
+            lines.append(f"执行ID: {operation_id}")
+        if storage_name or storage_addr:
+            where = storage_name
+            if storage_addr:
+                where = f"{where} ({storage_addr})" if where else storage_addr
+            lines.append(f"存储位置: {where}")
+        if target_path:
+            lines.append(f"备份路径: {target_path}")
+        if source_paths:
+            lines.append(f"源路径: {source_paths}")
+        if start_time:
+            lines.append(f"开始时间: {start_time}")
+        if end_time:
+            lines.append(f"结束时间: {end_time}")
+        if files_count not in (None, "") or completed_count not in (None, ""):
+            lines.append(f"处理文件: {completed_count or 0} / {files_count or 0}")
+        if total_size or completed_size:
+            lines.append(f"处理大小: {completed_size or '0 B'} / {total_size or '0 B'}")
+        if actual_time not in (None, ""):
+            lines.append(f"耗时: {actual_time} 秒")
+        if status not in (None, ""):
+            lines.append(f"状态码: {status}")
+        if error_code not in (None, "") and int(error_code or 0) != 0:
+            lines.append(f"错误码: {error_code}")
+        if error_message:
+            lines.append(f"错误信息: {error_message[:300]}")
+        return "\n".join(lines) if lines else "（无额外详情）"
+
     def _batch_summary_item_lines(self, event_type: str, ed: Dict[str, Any]) -> List[str]:
         """多事件合并时，单条事件只展示关键字段（无图标，多行时每条一行）。"""
         data_raw = ed.get("data")
@@ -1185,7 +1794,7 @@ class MultiPlatformNotifier:
         if et in ("LoginSucc", "LoginSucc2FA1", "LoginFail", "Logout"):
             login_bits: List[str] = []
             if ed.get("user") is not None:
-                login_bits.append(f"用户名: {ed.get('user', '')}")
+                login_bits.append(f"用户名: {self._display_user(ed.get('user', ''))}")
             if ed.get("IP"):
                 login_bits.append(f"IP地址: {ed.get('IP')}")
             if ed.get("via"):
@@ -1195,7 +1804,7 @@ class MultiPlatformNotifier:
         if et in ("SSH_INVALID_USER", "SSH_AUTH_FAILED", "SSH_LOGIN_SUCCESS", "SSH_DISCONNECTED"):
             parts = []
             if ed.get("user") is not None:
-                parts.append(f"用户名: {ed.get('user', '')}")
+                parts.append(f"用户名: {self._display_user(ed.get('user', ''))}")
             if ed.get("IP"):
                 parts.append(f"IP地址: {ed.get('IP')}")
             if ed.get("port"):
@@ -1302,6 +1911,18 @@ class MultiPlatformNotifier:
             if cnt != "" and cnt is not None:
                 lines.append(f"错误次数: {cnt}")
             return lines or ["磁盘IO错误"]
+
+        if et in ("BACKUP_TASK_SUCCESS", "BACKUP_TASK_FAILED"):
+            backup_lines: List[str] = []
+            if ed.get("task_name"):
+                backup_lines.append(f"任务: {ed.get('task_name')}")
+            if ed.get("operation_id") is not None:
+                backup_lines.append(f"执行ID: {ed.get('operation_id')}")
+            if ed.get("completed_count") is not None or ed.get("files_count") is not None:
+                backup_lines.append(f"文件: {ed.get('completed_count', 0)}/{ed.get('files_count', 0)}")
+            if int(ed.get("error_code") or 0) != 0:
+                backup_lines.append(f"错误码: {ed.get('error_code')}")
+            return [" · ".join(backup_lines)] if backup_lines else [et]
 
         if et in ("UPS_ONBATT", "UPS_ONBATT_LOWBATT"):
             ups_bits: List[str] = []
@@ -1779,6 +2400,23 @@ class MultiPlatformNotifier:
         content += f"\n{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         
         return self._strip_body_emojis(content)
+
+    def _build_minimal_system_one_line(self, event_type: str, message: str) -> str:
+        """极简模式下系统通知一行文案。"""
+        prefix = (self.title_prefix or "").strip()
+        action_map = {
+            "APP_START": "监控启动",
+            "APP_STOP": "监控停止",
+            "APP_ERROR": "监控异常",
+            "DND_SUMMARY": "勿扰汇总",
+            "TEST_PUSH": "测试推送",
+        }
+        action = action_map.get(event_type, event_type)
+        msg = (message or "").strip().replace("\n", " ")
+        body = f"{action} {msg}".strip()
+        if prefix:
+            return f"{prefix}-{body}"
+        return body
     
     def _build_bark_message(self, event_type: str, event_data: Dict[str, Any], 
                            timestamp: str, raw_log: str) -> MultiPlatformMessage:
@@ -1817,11 +2455,16 @@ class MultiPlatformNotifier:
             return {"success": False, "success_count": 0, "fail_count": 0}
         
         # 构建消息
-        title = self._with_title_prefix(
-            self.EVENT_TITLES.get(event_type, self._fallback_event_title(event_type))
-        )
-        content = self._build_system_content(event_type, event_data, message)
-        multi_msg = MultiPlatformMessage(title=title, content=content)
+        # 勿扰汇总始终走完整模式，不受极简开关影响
+        if self.minimal_push_enabled and event_type != "DND_SUMMARY":
+            one_line = self._build_minimal_system_one_line(event_type, message)
+            multi_msg = MultiPlatformMessage(title=one_line, content="")
+        else:
+            title = self._with_title_prefix(
+                self.EVENT_TITLES.get(event_type, self._fallback_event_title(event_type))
+            )
+            content = self._build_system_content(event_type, event_data, message)
+            multi_msg = MultiPlatformMessage(title=title, content=content)
         
         results = []
         if self.wechat_webhook_url:
@@ -1848,6 +2491,10 @@ class MultiPlatformNotifier:
             ok, cr = self._send_to_magic_push(multi_msg)
             results.append(ok)
             self.logger.debug("魔法推送系统通知: %s", cr)
+        if self.smtp_params:
+            ok, cr = self._send_to_smtp(multi_msg)
+            results.append(ok)
+            self.logger.debug("SMTP邮件系统通知: %s", cr)
         success_count = sum(1 for r in results if r)
         fail_count = len(results) - success_count
         any_ok = bool(results and success_count > 0)

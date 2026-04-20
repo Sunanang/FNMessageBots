@@ -9,6 +9,9 @@ services:
       - ./data/logs:/app/data/logs:rw
       - ./data/cursor:/app/data/cursor:rw
       - /usr/trim/var/eventlogger_service:/usr/trim/var/eventlogger_service:ro
+      - /usr/trim/var/backup_service:/usr/trim/var/backup_service:ro
+      - /usr/local/apps/@appdata/trim.media/database:/usr/local/apps/@appdata/trim.media/database:ro
+      - /usr/local/apps/@appdata/trim.photos/db:/usr/local/apps/@appdata/trim.photos/db:ro
       - ./config:/app/config:rw
     environment:
       - TZ=Asia/Shanghai

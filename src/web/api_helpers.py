@@ -18,6 +18,7 @@ def build_notifier_from_raw(raw: dict) -> MultiPlatformNotifier:
         bark_url=raw.get("bark_url", ""),
         pushplus_params=raw.get("pushplus_params", ""),
         magic_push_params=raw.get("magic_push_params", "") or "",
+        smtp_params=raw.get("smtp_params", "") or "",
         title_prefix=title_prefix_from_dict(raw),
         dedup_window=int(raw.get("dedup_window", 300)),
         pool_size=int(raw.get("http_pool_size", 10)),

@@ -4,6 +4,7 @@
   "feishu_webhook_url": "",
   "bark_url": "",
   "magic_push_params": "",
+  "smtp_params": "",
   "monitor_events": [
     "LoginSucc",
     "LoginSucc2FA1",
@@ -34,6 +35,18 @@
   "dedup_window": 300,
   "cursor_dir": "./data/cursor",
   "logger_db_path": "/usr/trim/var/eventlogger_service/logger_data.db3",
+  "backup_db_path": "/usr/trim/var/backup_service/basic_backup.db3",
+  "media_lib_logger_enabled": false,
+  "media_lib_service_patterns": [
+    "mediadb",
+    "trimmedia"
+  ],
+  "media_lib_app_name_patterns": [
+    "影视"
+  ],
+  "trim_media_db_path": "/usr/local/apps/@appdata/trim.media/database/trimmedia.db",
+  "trim_activity_db_path": "/usr/local/apps/@appdata/trim.media/database/trimactivity.db",
+  "photo_db_path": "/usr/local/apps/@appdata/trim.photos/db/photo.db",
   "logger_poll_interval": 5,
   "poll_batch_summary_enabled": false,
   "max_log_age": 7,
@@ -42,6 +55,9 @@
   "dnd_start_time": "22:00",
   "dnd_end_time": "07:00",
   "pushplus_params": "",
+  "user_display_map": {},
   "web_password_enabled": true,
-  "title_prefix": "飞牛NAS"
+  "title_prefix": "飞牛NAS",
+  "web_password_salt": "503d4b7167b387d90f3742ecea83059f",
+  "web_password_hash": "e97f381a76f862f787dbf2a5b1741b4be1169071d5ad88fbb0f2d1f09fbb8a89"
 }

@@ -42,6 +42,9 @@ class EventProcessor:
             'LoginFail': self._handle_login_fail,
             'Logout': self._handle_logout,
             'FoundDisk': self._handle_found_disk,
+            'InsertDisk': lambda ed, e: self._handle_simple_notification('InsertDisk', ed, e),
+            'EjectDisk': lambda ed, e: self._handle_simple_notification('EjectDisk', ed, e),
+            'StorageBroken': lambda ed, e: self._handle_simple_notification('StorageBroken', ed, e),
             'SSH_INVALID_USER': self._handle_ssh_invalid_user,
             'SSH_AUTH_FAILED': self._handle_ssh_auth_failed,
             'SSH_LOGIN_SUCCESS': self._handle_ssh_login_success,
@@ -70,6 +73,8 @@ class EventProcessor:
             'APP_AUTO_STARTED': lambda ed, e: self._handle_app_lifecycle('APP_AUTO_STARTED', ed, e),
             'APP_UNINSTALLED': lambda ed, e: self._handle_app_lifecycle('APP_UNINSTALLED', ed, e),
             'DISK_IO_ERR': self._handle_disk_io_err,
+            'BACKUP_TASK_SUCCESS': self._handle_backup_task_success,
+            'BACKUP_TASK_FAILED': self._handle_backup_task_failed,
             # 可选事件（默认不推送，需用户勾选）
             'ARCHIVING_SUCCESS': lambda ed, e: self._handle_simple_notification('ARCHIVING_SUCCESS', ed, e),
             'DeleteFile': lambda ed, e: self._handle_simple_notification('DeleteFile', ed, e),
@@ -93,6 +98,16 @@ class EventProcessor:
             'SHUTDOWN_VM': lambda ed, e: self._handle_simple_notification('SHUTDOWN_VM', ed, e),
             'STATUS_RUNNING_VM': lambda ed, e: self._handle_simple_notification('STATUS_RUNNING_VM', ed, e),
             'DESTROY_VM': lambda ed, e: self._handle_simple_notification('DESTROY_VM', ed, e),
+            # 影视库（logger 过滤 / trimmedia / trimactivity）
+            'MEDIA_LOGIN_SUCC': self._handle_media_login_success,
+            'MEDIA_LOGOUT': self._handle_media_logout,
+            'MEDIA_USER_CREATED': lambda ed, e: self._handle_simple_notification('MEDIA_USER_CREATED', ed, e),
+            'TRIM_RESOURCE_ADDED': lambda ed, e: self._handle_trim_library_db('TRIM_RESOURCE_ADDED', ed, e),
+            'TRIM_SCRAPE_SUCCESS': lambda ed, e: self._handle_trim_library_db('TRIM_SCRAPE_SUCCESS', ed, e),
+            'PHOTO_SHARE_CREATED': lambda ed, e: self._handle_simple_notification('PHOTO_SHARE_CREATED', ed, e),
+            'PHOTO_SHARE_EXPIRED': lambda ed, e: self._handle_simple_notification('PHOTO_SHARE_EXPIRED', ed, e),
+            'PHOTO_DEVICE_REGISTERED': lambda ed, e: self._handle_simple_notification('PHOTO_DEVICE_REGISTERED', ed, e),
+            'FACE_RECOGNITION_UPDATED': lambda ed, e: self._handle_simple_notification('FACE_RECOGNITION_UPDATED', ed, e),
         }
         
         # 磁盘事件合并缓存
@@ -124,7 +139,17 @@ class EventProcessor:
         if event_data.get('name'):
             parts.append(str(event_data.get('name')))
         if event_data.get('message'):
-            parts.append(str(event_data.get('message'))[:40])
+            parts.append(str(event_data.get('message'))[:80])
+        if event_data.get('title') and event_type.startswith('TRIM_'):
+            parts.append(str(event_data.get('title'))[:60])
+        if event_data.get('share_name') and (
+            event_type.startswith('PHOTO_') or event_type == 'FACE_RECOGNITION_UPDATED'
+        ):
+            parts.append(str(event_data.get('share_name'))[:60])
+        if event_data.get('device_display') and event_type == 'PHOTO_DEVICE_REGISTERED':
+            parts.append(str(event_data.get('device_display'))[:60])
+        if event_type == 'FACE_RECOGNITION_UPDATED' and event_data.get('task_log_id') is not None:
+            parts.append(f"人脸任务#{event_data.get('task_log_id')}")
         if not parts:
             parts.append(event_type)
         return " | ".join([str(p).strip() for p in parts if p])[:120]
@@ -279,6 +304,40 @@ class EventProcessor:
             return lambda ed, e, _et=event_type: self._handle_simple_notification(_et, ed, e)
         return None
     
+    def _handle_media_login_success(self, event_data: Dict[str, Any], entry: JournalEntry):
+        """影视库登录成功（logger 过滤或 trimactivity）。"""
+        user = event_data.get('user', '')
+        ip = event_data.get('IP', '')
+        self.logger.info(f"影视库登录成功: {user}@{ip}")
+        raw_log = getattr(entry, 'raw_data', '{}')
+        timestamp = getattr(entry, 'timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        self.notifier.send_notification(
+            event_type='MEDIA_LOGIN_SUCC',
+            event_data=event_data,
+            raw_log=raw_log,
+            timestamp=timestamp
+        )
+        self._store_notification_log(
+            'MEDIA_LOGIN_SUCC', event_data, raw_log, entry, source='db'
+        )
+
+    def _handle_media_logout(self, event_data: Dict[str, Any], entry: JournalEntry):
+        """影视库退出登录。"""
+        user = event_data.get('user', '')
+        ip = event_data.get('IP', '')
+        self.logger.info(f"影视库退出登录: {user}@{ip}")
+        raw_log = getattr(entry, 'raw_data', '{}')
+        timestamp = getattr(entry, 'timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        self.notifier.send_notification(
+            event_type='MEDIA_LOGOUT',
+            event_data=event_data,
+            raw_log=raw_log,
+            timestamp=timestamp
+        )
+        self._store_notification_log(
+            'MEDIA_LOGOUT', event_data, raw_log, entry, source='db'
+        )
+
     def _handle_login_success(self, event_data: Dict[str, Any], entry: JournalEntry):
         """处理登录成功事件"""
         user = event_data.get('user', '')
@@ -555,6 +614,18 @@ class EventProcessor:
         )
         self._store_notification_log('DISK_IO_ERR', event_data, raw_log, entry, source='db')
 
+    def _handle_trim_library_db(self, event_type: str, event_data: Dict[str, Any], entry: JournalEntry):
+        """trimmedia.db / trimactivity.db 轮询产生的影视库事件。"""
+        raw_log = getattr(entry, 'raw_data', '{}')
+        timestamp = getattr(entry, 'timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        self.notifier.send_notification(
+            event_type=event_type,
+            event_data=event_data,
+            raw_log=raw_log,
+            timestamp=timestamp
+        )
+        self._store_notification_log(event_type, event_data, raw_log, entry, source='trim_media_db')
+
     def _handle_simple_notification(self, event_type: str, event_data: Dict[str, Any], entry: JournalEntry):
         """可选事件的通用处理：解析 parameter 后直接推送，无额外逻辑。"""
         timestamp = getattr(entry, 'timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
@@ -566,6 +637,37 @@ class EventProcessor:
             timestamp=timestamp
         )
         self._store_notification_log(event_type, event_data, raw_log, entry, source='db')
+
+    def _handle_backup_task_success(self, event_data: Dict[str, Any], entry: JournalEntry):
+        """处理备份任务成功事件。"""
+        task_name = event_data.get('task_name', '未知任务')
+        op_id = event_data.get('operation_id', '')
+        self.logger.info(f"备份任务成功: {task_name} (operation_id={op_id})")
+        raw_log = getattr(entry, 'raw_data', '{}')
+        timestamp = getattr(entry, 'timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        self.notifier.send_notification(
+            event_type='BACKUP_TASK_SUCCESS',
+            event_data=event_data,
+            raw_log=raw_log,
+            timestamp=timestamp
+        )
+        self._store_notification_log('BACKUP_TASK_SUCCESS', event_data, raw_log, entry, source='backup_db')
+
+    def _handle_backup_task_failed(self, event_data: Dict[str, Any], entry: JournalEntry):
+        """处理备份任务失败事件。"""
+        task_name = event_data.get('task_name', '未知任务')
+        op_id = event_data.get('operation_id', '')
+        err_code = event_data.get('error_code', '')
+        self.logger.warning(f"备份任务失败: {task_name} (operation_id={op_id}, error_code={err_code})")
+        raw_log = getattr(entry, 'raw_data', '{}')
+        timestamp = getattr(entry, 'timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        self.notifier.send_notification(
+            event_type='BACKUP_TASK_FAILED',
+            event_data=event_data,
+            raw_log=raw_log,
+            timestamp=timestamp
+        )
+        self._store_notification_log('BACKUP_TASK_FAILED', event_data, raw_log, entry, source='backup_db')
 
     def _handle_cpu_usage_alarm(self, event_data: Dict[str, Any], entry: JournalEntry):
         """处理 CPU 使用率告警（parameter 含 data.THRESHOLD，如 {"from":"trim.resource-manager","eventId":"CPU_USAGE_ALARM","data":{"THRESHOLD":90},"datetime":...}）"""

@@ -637,6 +637,18 @@ SUPPORT_PAGE_TEMPLATE = """<!DOCTYPE html>
         我热爱用技术把复杂的事情变简单。FnMessageBot（日志推送） 面向飞牛 NAS 用户，把日志里的关键事件推到微信、钉钉、飞书、Bark 与 PushPlus 等平台，希望能在你身边默默当好一只「消息守门员」。
         如果这个小工具为你省过时间、少踩过坑，欢迎通过下方二维码随缘打赏——金额随意，心意最重，也欢迎到 GitHub 点个 Star 传播给更多需要的人。
       </p>
+      <h2 style="margin-top: 16px;"><span class="emoji" aria-hidden="true">📮</span>联系方式</h2>
+      <p style="margin-bottom: 0;">
+        1. GitHub 联系：
+        <a href="https://github.com/Sunanang/FNMessageBots/issues/3" target="_blank" rel="noopener noreferrer">
+          查看 Issue #3 二维码加群
+        </a><br />
+        2. 邮箱联系：<a href="mailto:1334630986@qq.com">1334630986@qq.com</a><br />
+        3. 用户群：查看论坛 FnMessageBots 帖子的置顶评论
+        <a href="https://club.fnnas.com/forum.php?mod=viewthread&tid=57252" target="_blank" rel="noopener noreferrer">
+          点击前往
+        </a>
+      </p>
     </section>
 
     <section>
@@ -680,6 +692,256 @@ SUPPORT_PAGE_TEMPLATE = """<!DOCTYPE html>
       </div>
     </div>
   </div>
+</body>
+</html>"""
+
+
+FAQ_PAGE_TEMPLATE = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  {% if favicon_url %}
+  <link rel="icon" href="{{ favicon_url }}" />
+  {% endif %}
+  <title>常见问题 - FnMessageBot</title>
+  <style>
+    * { box-sizing: border-box; }
+    :root {
+      color-scheme: light;
+      --faq-bg: #eef3ff;
+      --faq-bg-accent: #e0e7ff;
+      --faq-card: #ffffff;
+      --faq-panel: #f9fafb;
+      --faq-panel-border: #e5e7eb;
+      --faq-text: #1f2933;
+      --faq-muted: #6b7280;
+      --faq-faint: #9ca3af;
+      --faq-accent: #2563eb;
+      --faq-border: rgba(148, 163, 184, 0.35);
+      --faq-shadow: 0 14px 36px rgba(15, 23, 42, 0.08);
+      --faq-shadow-card: 0 8px 28px rgba(15, 23, 42, 0.06);
+    }
+    html[data-theme="dark"] {
+      color-scheme: dark;
+      --faq-bg: #111827;
+      --faq-bg-accent: #1f2937;
+      --faq-card: rgba(17, 24, 39, 0.92);
+      --faq-panel: rgba(17, 24, 39, 0.92);
+      --faq-panel-border: rgba(75, 85, 99, 0.55);
+      --faq-text: #f3f4f6;
+      --faq-muted: #9ca3af;
+      --faq-faint: #6b7280;
+      --faq-accent: #60a5fa;
+      --faq-border: rgba(75, 85, 99, 0.55);
+      --faq-shadow: 0 18px 40px rgba(0, 0, 0, 0.35);
+      --faq-shadow-card: 0 12px 32px rgba(0, 0, 0, 0.25);
+    }
+    body {
+      margin: 0;
+      background: var(--faq-bg);
+      color: var(--faq-text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", "PingFang SC", sans-serif;
+      line-height: 1.65;
+    }
+    a { color: var(--faq-accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .page {
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      padding: 24px 16px 32px;
+      background: linear-gradient(180deg, var(--faq-bg-accent) 0%, var(--faq-bg) 180px);
+    }
+    .card {
+      width: 100%;
+      max-width: 960px;
+      background: var(--faq-card);
+      border-radius: 18px;
+      border: 1px solid var(--faq-border);
+      box-shadow: var(--faq-shadow);
+      overflow: hidden;
+    }
+    .faq-back-bar {
+      padding: 18px 24px 0;
+      display: flex;
+      justify-content: flex-start;
+    }
+    .faq-wrap {
+      padding: 18px 24px 28px;
+    }
+    .hero h1 {
+      margin: 0;
+      font-size: 28px;
+      letter-spacing: 0.04em;
+    }
+    .hero p {
+      margin: 8px 0 0;
+      color: var(--faq-muted);
+      font-size: 14px;
+    }
+    .faq-list {
+      margin-top: 18px;
+      display: grid;
+      gap: 12px;
+    }
+    .faq-item {
+      background: var(--faq-panel);
+      border: 1px solid var(--faq-panel-border);
+      border-radius: 12px;
+      padding: 14px 14px 12px;
+      box-shadow: var(--faq-shadow-card);
+    }
+    .faq-item h2 {
+      margin: 0 0 8px;
+      font-size: 16px;
+      line-height: 1.4;
+    }
+    .faq-item p {
+      margin: 0;
+      color: var(--faq-text);
+      font-size: 14px;
+      white-space: pre-line;
+    }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 13px;
+      background: rgba(148, 163, 184, 0.18);
+      padding: 1px 4px;
+      border-radius: 4px;
+    }
+    .btn {
+      min-width: 96px;
+      border-radius: 999px;
+      padding: 8px 20px;
+      border: none;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      text-decoration: none;
+      transition: background-color .15s, transform .05s;
+      font-family: inherit;
+    }
+    .btn-ghost {
+      background: #fff;
+      color: #111827;
+      border: 1px solid #d1d5db;
+    }
+    .btn-ghost:hover { background: #f3f4f6; }
+    html[data-theme="dark"] .btn-ghost {
+      background: #111827;
+      color: #e5e7eb;
+      border-color: #4b5563;
+    }
+    html[data-theme="dark"] .btn-ghost:hover { background: #1f2937; }
+    .page-footer {
+      margin-top: 20px;
+      padding-top: 14px;
+      border-top: 1px solid var(--faq-border);
+      text-align: center;
+      color: var(--faq-faint);
+      font-size: 12px;
+    }
+    @media (max-width: 640px) {
+      .faq-back-bar { padding: 16px 16px 0; }
+      .faq-wrap { padding: 16px 16px 24px; }
+      .hero h1 { font-size: 24px; }
+      .btn { min-width: 0; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="card">
+      <div class="faq-back-bar">
+        <a class="btn btn-ghost" href="/">返回配置页</a>
+      </div>
+      <div class="faq-wrap">
+        <header class="hero">
+          <h1>常见问题</h1>
+        </header>
+
+        <section class="faq-list">
+          <article class="faq-item">
+            <h2>1. 渠道说明</h2>
+            <p>查看：<a href="https://github.com/Sunanang/FNMessageBots/blob/main/docs/notification-channels.md" target="_blank" rel="noopener noreferrer">notification-channels.md</a></p>
+          </article>
+
+          <article class="faq-item">
+            <h2>2. 忘记密码</h2>
+            <p>编辑配置文件 <code>config/config.json</code>，删除 <code>web_password_salt</code> 和 <code>web_password_hash</code>。</p>
+          </article>
+
+          <article class="faq-item">
+            <h2>3. 无法安装</h2>
+            <p>目前存在部分用户在应用市场无法安装，提示 python 异常或 pip 异常。这个问题受系统环境影响，暂时无法完全规避。
+可尝试：
+一：直接使用 Docker 版本，通常可稳定安装运行。
+二：切换系统下载源，并开启科学网络，多尝试几次，大概率可下载 python 成功。</p>
+          </article>
+
+          <article class="faq-item">
+            <h2>4. Docker 名称和应用市场名称</h2>
+            <p>飞牛应用市场名称：<code>日志推送</code>
+Docker 镜像名称：<code>fn-message-bots</code>
+说明：Docker 镜像通常会先发布（修复与功能更新更快），稳定后再提审飞牛应用市场，所以应用市场版本一般会比 Docker 晚约一周。</p>
+          </article>
+
+          <article class="faq-item">
+            <h2>5. 排查问题优先看日志</h2>
+            <p>排查问题建议先确认飞牛日志是否与推送内容一致；若不一致，再定位为项目侧问题。
+如果你希望新增推送格式，请尽量附上数据库记录格式和日志截图，便于快速支持。</p>
+          </article>
+
+          <article class="faq-item">
+            <h2>6. 关于备份库 / 影视 / 照片事件说明</h2>
+            <p>备份库 / 影视 / 照片事件默认不勾选，需要时请手动开启。
+它们对应不同数据库，只有勾选对应推送事件时，项目才会轮询对应数据库；未勾选则不会轮询。</p>
+          </article>
+
+          <article class="faq-item">
+            <h2>7. 联系作者</h2>
+            <p>前往 <a href="/support">支持作者</a> 页面查看联系方式与支持信息。</p>
+          </article>
+
+          <article class="faq-item">
+            <h2>8. 端口说明</h2>
+            <p>Docker 版默认端口：<code>18080</code>（可自行修改）
+应用市场版默认端口：<code>18230</code>（不可修改）</p>
+          </article>
+
+          <article class="faq-item">
+            <h2>9. 测试推送没问题，但是无法推送日志消息</h2>
+            <p>这个问题大概率是数据库存在异常。Docker 版可先查看运行日志，是否提示：<code>数据库查询失败：database disk image is malformed</code>。
+如果出现这个提示，基本可以判定是数据库挂载失败；再检查日志显示是否正常，大概率是日志数据库的问题。
+修复命令（仅供参考，建议通过 SSH 执行）：
+<code>sudo -i</code>
+<code>systemctl stop eventlogger_service</code>
+<code>rm /usr/trim/var/eventlogger_service/logger_data.db3</code>
+<code>chown -R trim:trim /usr/trim/var/eventlogger_service/</code>
+<code>systemctl start eventlogger_service</code>
+<code>systemctl status eventlogger_service</code></p>
+          </article>
+        </section>
+
+        <footer class="page-footer">
+          © 2024 Sunanang · FnMessageBot · MIT License terms apply.
+        </footer>
+      </div>
+    </div>
+  </div>
+  <script>
+    (function () {
+      var key = "fnmb_theme";
+      var mode = localStorage.getItem(key);
+      var resolved = (mode === "dark") ? "dark" : "light";
+      document.documentElement.setAttribute("data-theme", resolved);
+    })();
+  </script>
 </body>
 </html>"""
 

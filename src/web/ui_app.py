@@ -3,6 +3,8 @@ import os
 import re
 import secrets
 import socket
+import sqlite3
+import stat
 import sys
 import threading
 from pathlib import Path
@@ -45,7 +47,7 @@ from web.push_history_service import get_stats as get_push_history_stats
 from web.push_history_service import list_records as list_push_history_records
 from web.session_service import create_session as _create_session
 from web.session_service import touch_session as _touch_session
-from web.ui_templates import HISTORY_PAGE_TEMPLATE, SUPPORT_PAGE_TEMPLATE
+from web.ui_templates import FAQ_PAGE_TEMPLATE, HISTORY_PAGE_TEMPLATE, SUPPORT_PAGE_TEMPLATE
 
 # 配置页密码：会话空闲超时（秒），超时后需重新输入密码
 SESSION_IDLE_SECONDS = 300
@@ -74,6 +76,106 @@ def _load_raw_config() -> dict:
 
 def _save_raw_config(data: dict) -> None:
     _save_raw_config_to_file(CONFIG_FILE, data)
+
+def _mode_str(mode: int) -> str:
+    return stat.filemode(mode)
+
+
+def _check_db_access_issue(db_path: str, probe_sql: str = "SELECT 1") -> str:
+    """检查数据库可读性并返回可读提示；无问题时返回空字符串。"""
+    path = (db_path or "").strip()
+    if not path:
+        return ""
+
+    p = Path(path)
+    chain = [Path("/")]
+    for item in p.parts[1:-1]:
+        chain.append(chain[-1] / item)
+
+    for d in chain:
+        try:
+            st = d.stat()
+            can_enter = os.access(d, os.X_OK)
+            can_read = os.access(d, os.R_OK)
+            if not can_enter or not can_read:
+                return (
+                    f"{path}: 目录 `{d}` 权限不足（{_mode_str(st.st_mode)}）。"
+                    f" 建议 `chmod 755 '{d}'`，或 `chown/chmod 750` 给服务用户。"
+                )
+        except FileNotFoundError:
+            return f"{path}: 目录不存在 `{d}`。"
+        except PermissionError:
+            return f"{path}: 当前进程无权限访问目录 `{d}`。"
+        except Exception as e:
+            return f"{path}: 目录检查失败 `{d}`（{e}）。"
+
+    try:
+        st = p.stat()
+        if not os.access(p, os.R_OK):
+            return (
+                f"{path}: 文件不可读（{_mode_str(st.st_mode)}）。"
+                f" 建议 `chmod 644 '{p}'`，或 `chown/chmod 640` 给服务用户。"
+            )
+    except FileNotFoundError:
+        return f"{path}: 数据库文件不存在 `{p}`。"
+    except PermissionError:
+        return f"{path}: 当前进程无权限访问数据库文件 `{p}`。"
+    except Exception as e:
+        return f"{path}: 文件检查失败 `{p}`（{e}）。"
+
+    try:
+        conn = sqlite3.connect(
+            f"file:{path}?mode=ro&immutable=1",
+            uri=True,
+            timeout=2.0,
+        )
+        conn.execute(probe_sql).fetchone()
+        conn.close()
+    except Exception as e:
+        return f"{path}: 路径权限看起来正常，但数据库探测失败（{e}）。"
+    return ""
+
+
+def _collect_external_db_access_warnings(raw_cfg: dict, events: list[str]) -> list[str]:
+    """按已选择事件收集外部数据库权限/可读性告警。"""
+    monitor_events = set(events or [])
+    warnings: list[str] = []
+
+    backup_events = {"BACKUP_TASK_SUCCESS", "BACKUP_TASK_FAILED"}
+    trimmedia_events = {"TRIM_RESOURCE_ADDED", "TRIM_SCRAPE_SUCCESS"}
+    trimactivity_events = {"MEDIA_LOGIN_SUCC", "MEDIA_LOGOUT"}
+    photo_events = {"PHOTO_SHARE_CREATED", "PHOTO_SHARE_EXPIRED", "PHOTO_DEVICE_REGISTERED", "FACE_RECOGNITION_UPDATED"}
+
+    if monitor_events & backup_events:
+        issue = _check_db_access_issue(
+            (raw_cfg.get("backup_db_path") or "").strip(),
+            "SELECT id FROM operations ORDER BY id DESC LIMIT 1",
+        )
+        if issue:
+            warnings.append(f"备份库: {issue}")
+    if monitor_events & trimmedia_events:
+        issue = _check_db_access_issue(
+            (raw_cfg.get("trim_media_db_path") or "").strip(),
+            "SELECT guid FROM item LIMIT 1",
+        )
+        if issue:
+            warnings.append(f"trimmedia 库: {issue}")
+    if monitor_events & trimactivity_events:
+        issue = _check_db_access_issue(
+            (raw_cfg.get("trim_activity_db_path") or "").strip(),
+            "SELECT token FROM user_token LIMIT 1",
+        )
+        if issue:
+            warnings.append(f"trimactivity 库: {issue}")
+    if monitor_events & photo_events:
+        issue = _check_db_access_issue(
+            (raw_cfg.get("photo_db_path") or "").strip(),
+            "SELECT id FROM share_link LIMIT 1",
+        )
+        if issue:
+            warnings.append(f"相册库: {issue}")
+
+    return warnings
 
 
 def create_app(on_config_saved=None) -> Flask:
@@ -106,8 +208,16 @@ def create_app(on_config_saved=None) -> Flask:
     notes = MultiPlatformNotifier.EVENT_NOTES
     raw_cfg = _load_raw_config()
     logger_db_path = (raw_cfg.get("logger_db_path") or "/usr/trim/var/eventlogger_service/logger_data.db3").strip()
+    backup_db_path = (raw_cfg.get("backup_db_path") or "/usr/trim/var/backup_service/basic_backup.db3").strip()
+    trim_media_db_path = (raw_cfg.get("trim_media_db_path") or "").strip()
+    trim_activity_db_path = (raw_cfg.get("trim_activity_db_path") or "").strip()
+    photo_db_path = (raw_cfg.get("photo_db_path") or "").strip()
     events_by_category, valid_event_ids, discovered_vm_event_ids = build_events_for_ui(
         logger_db_path=logger_db_path,
+        backup_db_path=backup_db_path,
+        trim_media_db_path=trim_media_db_path,
+        trim_activity_db_path=trim_activity_db_path,
+        photo_db_path=photo_db_path,
         titles=titles,
         notes=notes,
     )
@@ -119,6 +229,7 @@ def create_app(on_config_saved=None) -> Flask:
         {"id": "bark", "name": "Bark"},
         {"id": "pushplus", "name": "PushPlus"},
         {"id": "magic_push", "name": "魔法推送"},
+        {"id": "smtp", "name": "SMTP邮件"},
     ]
 
     PROTECTED_PATHS = {"/", "/history", "/api/config", "/api/save-config", "/api/test", "/api/push-stats"}
@@ -133,6 +244,12 @@ def create_app(on_config_saved=None) -> Flask:
             return None
         # 捐赠页与收款码：与配置页同一套密码与空闲超时（SESSION_IDLE_SECONDS，默认 300s）
         if request.path == "/support" and request.method == "GET":
+            if not _has_password_set() or not _is_password_verification_enabled():
+                return None
+            if not _is_authenticated():
+                return redirect("/")
+            return None
+        if request.path == "/faq" and request.method == "GET":
             if not _has_password_set() or not _is_password_verification_enabled():
                 return None
             if not _is_authenticated():
@@ -265,6 +382,7 @@ def create_app(on_config_saved=None) -> Flask:
             ("bark", "bark_url"),
             ("pushplus", "pushplus_params"),
             ("magic_push", "magic_push_params"),
+            ("smtp", "smtp_params"),
         ]:
             for url in _split_urls(raw.get(key, "")):
                 # 过滤掉模板中的 ${WECHAT_WEBHOOK_URL} 这类占位符
@@ -275,24 +393,23 @@ def create_app(on_config_saved=None) -> Flask:
         data = {
             "title": "FnMessageBot",
             "subtitle": "飞牛日志消息推送机器人",
-            "version": "2.1.2",
+            "version": "2.2.0",
             "events_by_category": events_by_category,
             "selected_events": monitor_events,
             "channels": channels,
             "title_prefix": _title_prefix_from_dict(raw),
             "log_retention_days": int(raw.get("log_retention_days", raw.get("max_log_age", 7))),
             "logger_poll_interval": int(raw.get("logger_poll_interval", 3)),
-            "logger_db_path": raw.get(
-                "logger_db_path", "/usr/trim/var/eventlogger_service/logger_data.db3"
-            ),
             "dnd_enabled": bool(raw.get("dnd_enabled", False)),
             "dnd_start_time": (raw.get("dnd_start_time") or "22:00").strip(),
             "dnd_end_time": (raw.get("dnd_end_time") or "07:00").strip(),
             "web_password_enabled": bool(raw.get("web_password_enabled", True)),
             "poll_batch_summary_enabled": bool(raw.get("poll_batch_summary_enabled", False)),
+            "minimal_push_enabled": bool(raw.get("minimal_push_enabled", False)),
             "channel_options": CHANNEL_OPTIONS,
         }
-        return jsonify({"ok": True, "data": data})
+        db_access_warnings = _collect_external_db_access_warnings(raw, monitor_events)
+        return jsonify({"ok": True, "data": data, "warnings": db_access_warnings})
 
     @app.post("/api/save-config")
     def save_config():
@@ -304,12 +421,12 @@ def create_app(on_config_saved=None) -> Flask:
         channels = payload.get("channels") or []
         log_retention_days = payload.get("log_retention_days", 7)
         logger_poll_interval = payload.get("logger_poll_interval", 3)
-        logger_db_path = (payload.get("logger_db_path") or "").strip()
         dnd_enabled = bool(payload.get("dnd_enabled", False))
         dnd_start_time = (payload.get("dnd_start_time") or "22:00").strip()
         dnd_end_time = (payload.get("dnd_end_time") or "07:00").strip()
         web_password_enabled = bool(payload.get("web_password_enabled", True))
         poll_batch_summary_enabled = bool(payload.get("poll_batch_summary_enabled", False))
+        minimal_push_enabled = bool(payload.get("minimal_push_enabled", False))
         title_prefix = _title_prefix_from_dict(payload)
         if title_prefix and len(title_prefix) > 20:
             return jsonify({"ok": False, "message": "标题前缀过长（最多 20 个字符）。"}), 400
@@ -336,7 +453,7 @@ def create_app(on_config_saved=None) -> Flask:
         for ch in channels:
             ch_type = ch.get("type")
             url = (ch.get("url") or "").strip()
-            if ch_type not in {"wechat", "dingtalk", "feishu", "bark", "pushplus", "magic_push"}:
+            if ch_type not in {"wechat", "dingtalk", "feishu", "bark", "pushplus", "magic_push", "smtp"}:
                 return jsonify({"ok": False, "message": "存在未知的推送渠道类型。"}), 400
             if not url:
                 return jsonify({"ok": False, "message": "推送渠道地址不能为空。"}), 400
@@ -360,6 +477,23 @@ def create_app(on_config_saved=None) -> Flask:
                         return jsonify({"ok": False, "message": "魔法推送基础 URL 须为 http(s) 地址。"}), 400
                 except json.JSONDecodeError as e:
                     return jsonify({"ok": False, "message": f"魔法推送配置不是合法 JSON：{e}"}), 400
+            elif ch_type == "smtp":
+                try:
+                    obj = json.loads(url)
+                    if not isinstance(obj, dict):
+                        return jsonify({"ok": False, "message": "SMTP 配置须为 JSON 对象。"}), 400
+                    server = (obj.get("server") or "").strip()
+                    username = (obj.get("username") or "").strip()
+                    password = obj.get("password") or ""
+                    to_raw = (obj.get("to") or "").strip()
+                    if not server or not username or not password or not to_raw:
+                        return jsonify({"ok": False, "message": "SMTP 须填写服务器、用户名、密码和收件人地址。"}), 400
+                    try:
+                        int(obj.get("port", 465))
+                    except (TypeError, ValueError):
+                        return jsonify({"ok": False, "message": "SMTP 端口必须是整数。"}), 400
+                except json.JSONDecodeError as e:
+                    return jsonify({"ok": False, "message": f"SMTP 配置不是合法 JSON：{e}"}), 400
             elif not url.startswith("http"):
                 return (
                     jsonify({"ok": False, "message": f"推送地址格式不正确：{url}"}),
@@ -380,8 +514,6 @@ def create_app(on_config_saved=None) -> Flask:
             return jsonify({"ok": False, "message": "日志缓存天数必须大于 0。"}), 400
         if logger_poll_interval <= 0:
             return jsonify({"ok": False, "message": "数据库轮询时间必须大于 0 秒。"}), 400
-        if not logger_db_path:
-            return jsonify({"ok": False, "message": "数据库地址不能为空。"}), 400
 
         # 归并渠道为每种类型一个以 '|' 分隔的字符串，兼容现有配置结构
         wechat_urls = []
@@ -390,6 +522,7 @@ def create_app(on_config_saved=None) -> Flask:
         bark_urls = []
         pushplus_urls = []
         magic_push_urls = []
+        smtp_urls = []
         for ch in channels:
             ch_type = ch.get("type")
             url = (ch.get("url") or "").strip()
@@ -405,6 +538,8 @@ def create_app(on_config_saved=None) -> Flask:
                 pushplus_urls.append(url)
             elif ch_type == "magic_push":
                 magic_push_urls.append(url)
+            elif ch_type == "smtp":
+                smtp_urls.append(url)
 
         raw = _load_raw_config()
         raw.update(
@@ -415,15 +550,16 @@ def create_app(on_config_saved=None) -> Flask:
                 "bark_url": _join_urls(bark_urls),
                 "pushplus_params": _join_urls(pushplus_urls),
                 "magic_push_params": _join_urls(magic_push_urls),
+                "smtp_params": _join_urls(smtp_urls),
                 "monitor_events": events,
                 "log_retention_days": log_retention_days,
                 "logger_poll_interval": logger_poll_interval,
-                "logger_db_path": logger_db_path,
                 "dnd_enabled": dnd_enabled,
                 "dnd_start_time": dnd_start_time,
                 "dnd_end_time": dnd_end_time,
                 "web_password_enabled": web_password_enabled,
                 "poll_batch_summary_enabled": poll_batch_summary_enabled,
+                "minimal_push_enabled": minimal_push_enabled,
                 "title_prefix": title_prefix,
             }
         )
@@ -433,13 +569,23 @@ def create_app(on_config_saved=None) -> Flask:
         except Exception as e:
             return jsonify({"ok": False, "message": f"配置写入失败（{e}），请检查 config 目录是否可写。"}), 500
 
+        db_access_warnings = _collect_external_db_access_warnings(raw, events)
+
         if callable(on_config_saved):
             try:
                 on_config_saved()
             except Exception as e:
-                return jsonify({"ok": True, "message": f"配置已保存，但热加载失败（{e}），请重启容器后生效。"}), 200
+                return jsonify({
+                    "ok": True,
+                    "message": f"配置已保存，但热加载失败（{e}），请重启容器后生效。",
+                    "warnings": db_access_warnings,
+                }), 200
 
-        return jsonify({"ok": True, "message": "配置已保存，监控已热加载生效，无需重启容器。"})
+        return jsonify({
+            "ok": True,
+            "message": "配置已保存，监控已热加载生效，无需重启容器。",
+            "warnings": db_access_warnings,
+        })
 
     @app.post("/api/test")
     def test_push():
@@ -457,7 +603,7 @@ def create_app(on_config_saved=None) -> Flask:
                 content,
                 {
                     "hostname": socket.gethostname(),
-                    "version": "2.1.2",
+                    "version": "2.2.0",
                 },
             )
             ok = out.get("success", False) if isinstance(out, dict) else bool(out)
@@ -550,6 +696,11 @@ def create_app(on_config_saved=None) -> Flask:
             wechat_src=wechat_src,
             ali_src=ali_src,
         )
+
+    @app.get("/faq")
+    def faq_page():
+        """常见问题页。"""
+        return render_template_string(FAQ_PAGE_TEMPLATE, favicon_url=favicon_url)
 
     @app.get("/")
     def index():
@@ -968,6 +1119,28 @@ def create_app(on_config_saved=None) -> Flask:
       background: #fee2e2;
       color: #b91c1c;
     }
+    .warning-panel {
+      margin-top: 10px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid #fecaca;
+      background: #fef2f2;
+      color: #991b1b;
+      font-size: 12px;
+      line-height: 1.6;
+      display: none;
+    }
+    .warning-panel.show {
+      display: block;
+    }
+    .warning-panel-title {
+      font-weight: 700;
+      margin-bottom: 4px;
+    }
+    .warning-panel-item {
+      word-break: break-word;
+      margin: 2px 0;
+    }
     .toast-container {
       position: fixed;
       top: 20px;
@@ -1261,10 +1434,7 @@ def create_app(on_config_saved=None) -> Flask:
     <div class="card">
       <div class="header">
         <div class="theme-switcher">
-          <div class="theme-buttons" role="group" aria-label="主题模式">
-            <button type="button" class="theme-btn" data-theme-mode="light" title="浅色模式" aria-label="浅色模式">☀</button>
-            <button type="button" class="theme-btn" data-theme-mode="dark" title="深色模式" aria-label="深色模式">🌙</button>
-          </div>
+          <button type="button" class="theme-btn" id="theme-toggle-btn" title="切换到深色模式" aria-label="切换到深色模式">🌙</button>
         </div>
         <div class="header-brand">
           {% if icon_url %}
@@ -1273,7 +1443,7 @@ def create_app(on_config_saved=None) -> Flask:
           <div class="header-title" id="app-title">FnMessageBot</div>
         </div>
         <div class="header-sub" id="app-subtitle">飞牛日志消息推送机器人</div>
-        <div class="header-ver" id="app-version">2.1.2</div>
+        <div class="header-ver" id="app-version">2.2.0</div>
       </div>
 
       <div class="section stats-section">
@@ -1324,7 +1494,7 @@ def create_app(on_config_saved=None) -> Flask:
             <thead>
             <tr>
               <th style="width: 120px;">渠道类型</th>
-              <th>推送地址（Webhook / Bark URL）或 PushPlus 参数（JSON）</th>
+              <th>推送地址</th>
               <th style="width: 64px; text-align: right;">操作</th>
             </tr>
             </thead>
@@ -1341,14 +1511,14 @@ def create_app(on_config_saved=None) -> Flask:
 
       <div class="section">
         <div class="section-title">
-          <span>系统设置 <small>影响日志缓存与数据库轮询行为</small></span>
+          <span>系统设置 <small>影响日志缓存与轮询行为</small></span>
         </div>
         <div>
           <div class="field-label" style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
             <input type="checkbox" id="input-web-password-enabled" />
             <span>开启密码验证</span>
           </div>
-          <div class="field-helper">默认开启。关闭后无需输入密码即可访问配置页，本地密码仍保留，可随时重新开启。</div>
+          <div class="field-helper">关闭后无需输入密码即可访问配置页，本地密码仍保留，可随时重新开启。</div>
         </div>
         <div class="system-grid" style="margin-top: 16px; padding-top: 16px; border-top: 1px solid #e5e7eb;">
           <div>
@@ -1362,6 +1532,11 @@ def create_app(on_config_saved=None) -> Flask:
             <div class="field-helper">轮询日志数据库的间隔时间，过小会增加磁盘 IO。</div>
           </div>
           <div>
+            <div class="field-label">事件标题前缀</div>
+            <input id="input-title-prefix" type="text" placeholder="飞牛NAS" />
+            <div class="field-helper">默认「飞牛NAS」，内容为空则无前缀。</div>
+          </div>
+          <div>
             <div class="field-label" style="display: flex; align-items: center; gap: 8px;">
               <input type="checkbox" id="input-poll-batch-summary" />
               <span>轮询汇总模式</span>
@@ -1369,14 +1544,11 @@ def create_app(on_config_saved=None) -> Flask:
             <div class="field-helper">开启后短时间内的多条事件合并为一条推送。若关闭，短时间内频繁推送可能触发渠道限流。</div>
           </div>
           <div>
-            <div class="field-label">数据库地址</div>
-            <input id="input-db-path" type="text" />
-            <div class="field-helper">默认设置，不确定就不要修改！否则可能导致无法正常运行！</div>
-          </div>
-          <div>
-            <div class="field-label">事件标题前缀</div>
-            <input id="input-title-prefix" type="text" placeholder="飞牛NAS" />
-            <div class="field-helper">默认「飞牛NAS」，内容为空则无前缀。</div>
+            <div class="field-label" style="display: flex; align-items: center; gap: 8px;">
+              <input type="checkbox" id="input-minimal-push-enabled" />
+              <span>极简推送</span>
+            </div>
+            <div class="field-helper">开启后推送消息将压缩为一行显示，仅展示关键信息</div>
           </div>
         </div>
         <div class="dnd-section" style="margin-top: 16px; padding-top: 16px; border-top: 1px solid #e5e7eb;">
@@ -1403,6 +1575,7 @@ def create_app(on_config_saved=None) -> Flask:
       <div class="footer-actions">
         <button class="btn btn-primary" id="save-btn" type="button">保存配置</button>
       </div>
+      <div id="warning-panel" class="warning-panel"></div>
 
       <div class="section test-section">
         <div class="section-title">
@@ -1422,6 +1595,8 @@ def create_app(on_config_saved=None) -> Flask:
         </a>
         <span class="footer-sep" aria-hidden="true">·</span>
         <a class="footer-link" href="/support">支持作者</a>
+        <span class="footer-sep" aria-hidden="true">·</span>
+        <a class="footer-link" href="/faq">常见问题</a>
       </div>
       <p class="license-footer">© 2024 Sunanang · FnMessageBot · MIT License terms apply.</p>
     </div>
@@ -1430,7 +1605,7 @@ def create_app(on_config_saved=None) -> Flask:
 
   <script>
     const THEME_STORAGE_KEY = "fnmb_theme";
-    const themeButtons = Array.from(document.querySelectorAll(".theme-btn[data-theme-mode]"));
+    const themeToggleBtn = document.getElementById("theme-toggle-btn");
 
     function getStoredThemeMode() {
       const mode = localStorage.getItem(THEME_STORAGE_KEY);
@@ -1444,21 +1619,29 @@ def create_app(on_config_saved=None) -> Flask:
     function applyTheme(mode) {
       const resolved = resolveTheme(mode);
       document.documentElement.setAttribute("data-theme", resolved);
-      themeButtons.forEach(function(btn) {
-        btn.classList.toggle("active", btn.getAttribute("data-theme-mode") === mode);
-      });
+      if (!themeToggleBtn) return;
+      if (resolved === "dark") {
+        themeToggleBtn.textContent = "☀";
+        themeToggleBtn.title = "切换到浅色模式";
+        themeToggleBtn.setAttribute("aria-label", "切换到浅色模式");
+      } else {
+        themeToggleBtn.textContent = "🌙";
+        themeToggleBtn.title = "切换到深色模式";
+        themeToggleBtn.setAttribute("aria-label", "切换到深色模式");
+      }
     }
 
     function initTheme() {
       const mode = getStoredThemeMode();
       applyTheme(mode);
-      themeButtons.forEach(function(btn) {
-        btn.addEventListener("click", function() {
-          const nextMode = btn.getAttribute("data-theme-mode") || "light";
+      if (themeToggleBtn) {
+        themeToggleBtn.addEventListener("click", function() {
+          const current = resolveTheme(getStoredThemeMode());
+          const nextMode = current === "dark" ? "light" : "dark";
           localStorage.setItem(THEME_STORAGE_KEY, nextMode);
           applyTheme(nextMode);
         });
-      });
+      }
     }
 
     const eventsContainer = document.getElementById("events-container");
@@ -1467,6 +1650,7 @@ def create_app(on_config_saved=None) -> Flask:
     const saveBtn = document.getElementById("save-btn");
     const testBtn = document.getElementById("test-btn");
     const statusBar = document.getElementById("status-bar");
+    const warningPanel = document.getElementById("warning-panel");
 
     let channelOptions = [];
     const fetchOpts = { credentials: "include" };
@@ -1573,7 +1757,44 @@ def create_app(on_config_saved=None) -> Flask:
       }, 3200);
     }
 
+    function renderPersistentWarnings(warnings) {
+      const list = Array.isArray(warnings) ? warnings.filter(Boolean) : [];
+      if (!list.length) {
+        warningPanel.classList.remove("show");
+        warningPanel.innerHTML = "";
+        return;
+      }
+      warningPanel.classList.add("show");
+      const lines = list.map(function(item) {
+        return '<div class="warning-panel-item">- ' + item + "</div>";
+      }).join("");
+      warningPanel.innerHTML =
+        '<div class="warning-panel-title">数据库路径权限告警（保存后检测）</div>' + lines;
+    }
+
     const PUSHPLUS_PLACEHOLDER = '{"token":"你的token","title":"{title}","content":"消息内容","template":"html","channel":"wechat"}';
+
+    function serializeSmtpFromInputs(wrap) {
+      if (!wrap) return "";
+      const server = (wrap.querySelector(".smtp-server") && wrap.querySelector(".smtp-server").value || "").trim();
+      const portRaw = (wrap.querySelector(".smtp-port") && wrap.querySelector(".smtp-port").value || "").trim();
+      const username = (wrap.querySelector(".smtp-username") && wrap.querySelector(".smtp-username").value || "").trim();
+      const password = (wrap.querySelector(".smtp-password") && wrap.querySelector(".smtp-password").value || "").trim();
+      const fromAddr = (wrap.querySelector(".smtp-from") && wrap.querySelector(".smtp-from").value || "").trim();
+      const toAddr = (wrap.querySelector(".smtp-to") && wrap.querySelector(".smtp-to").value || "").trim();
+      if (!server || !portRaw || !username || !password || !toAddr) return "";
+      const parsedPort = Number.parseInt(portRaw, 10);
+      if (!Number.isInteger(parsedPort) || parsedPort <= 0) return "";
+      const o = {
+        server: server,
+        port: parsedPort,
+        username: username,
+        password: password,
+        to: toAddr,
+      };
+      if (fromAddr) o.from = fromAddr;
+      return JSON.stringify(o);
+    }
 
     function serializeMagicPushFromInputs(wrap) {
       if (!wrap) return "";
@@ -1612,6 +1833,10 @@ def create_app(on_config_saved=None) -> Flask:
         if (rowChannelType === "magic_push") {
           const wrap = tdUrl.querySelector(".magic-push-fields");
           return serializeMagicPushFromInputs(wrap);
+        }
+        if (rowChannelType === "smtp") {
+          const wrap = tdUrl.querySelector(".smtp-fields");
+          return serializeSmtpFromInputs(wrap);
         }
         const inp = tdUrl.querySelector("input.channel-url-input");
         return inp ? inp.value.trim() : "";
@@ -1672,6 +1897,64 @@ def create_app(on_config_saved=None) -> Flask:
           wrap.appendChild(inTok);
           wrap.appendChild(inTitle);
           tdUrl.appendChild(wrap);
+        } else if (type === "smtp") {
+          let server = "", port = "", username = "", password = "", fromAddr = "", toAddr = "";
+          if (val) {
+            try {
+              const o = JSON.parse(val);
+              if (o && typeof o === "object") {
+                server = (o.server || "").trim();
+                port = String(o.port || "").trim();
+                username = (o.username || "").trim();
+                password = (o.password || "").trim();
+                fromAddr = (o.from || "").trim();
+                toAddr = (o.to || "").trim();
+              }
+            } catch (e) { /* ignore */ }
+          }
+          const wrap = document.createElement("div");
+          wrap.className = "smtp-fields";
+          wrap.style.display = "grid";
+          wrap.style.gridTemplateColumns = "repeat(3, minmax(160px, 1fr))";
+          wrap.style.gap = "8px";
+          const inServer = document.createElement("input");
+          inServer.type = "text";
+          inServer.className = "smtp-server";
+          inServer.placeholder = "SMTP服务器（如 smtp.qq.com）";
+          inServer.value = server;
+          const inPort = document.createElement("input");
+          inPort.type = "number";
+          inPort.className = "smtp-port";
+          inPort.placeholder = "端口（465/587）";
+          inPort.value = port;
+          const inUser = document.createElement("input");
+          inUser.type = "text";
+          inUser.className = "smtp-username";
+          inUser.placeholder = "用户名（邮箱）";
+          inUser.value = username;
+          const inPass = document.createElement("input");
+          inPass.type = "password";
+          inPass.className = "smtp-password";
+          inPass.placeholder = "密码/授权码";
+          inPass.autocomplete = "new-password";
+          inPass.value = password;
+          const inFrom = document.createElement("input");
+          inFrom.type = "text";
+          inFrom.className = "smtp-from";
+          inFrom.placeholder = "发件人（可选，默认同用户名）";
+          inFrom.value = fromAddr;
+          const inTo = document.createElement("input");
+          inTo.type = "text";
+          inTo.className = "smtp-to";
+          inTo.placeholder = "收件人（多个用英文逗号）";
+          inTo.value = toAddr;
+          wrap.appendChild(inServer);
+          wrap.appendChild(inPort);
+          wrap.appendChild(inUser);
+          wrap.appendChild(inPass);
+          wrap.appendChild(inFrom);
+          wrap.appendChild(inTo);
+          tdUrl.appendChild(wrap);
         } else {
           const inp = document.createElement("input");
           inp.type = "text";
@@ -1718,6 +2001,7 @@ def create_app(on_config_saved=None) -> Flask:
           setStatus(false, json.message || "加载配置失败");
           return;
         }
+        renderPersistentWarnings(json.warnings || []);
         const data = json.data;
         document.getElementById("app-title").textContent = data.title || "FnMessageBot";
         document.getElementById("app-subtitle").textContent = data.subtitle || "";
@@ -1822,7 +2106,7 @@ def create_app(on_config_saved=None) -> Flask:
         document.getElementById("input-log-days").value = data.log_retention_days || 7;
         document.getElementById("input-poll-interval").value = data.logger_poll_interval || 5;
         document.getElementById("input-poll-batch-summary").checked = !!data.poll_batch_summary_enabled;
-        document.getElementById("input-db-path").value = data.logger_db_path || "";
+        document.getElementById("input-minimal-push-enabled").checked = !!data.minimal_push_enabled;
         document.getElementById("input-title-prefix").value =
           typeof data.title_prefix === "string" ? data.title_prefix : "飞牛NAS";
         const dndEnabled = !!data.dnd_enabled;
@@ -1886,6 +2170,10 @@ def create_app(on_config_saved=None) -> Flask:
           const wrap = tr.querySelector(".magic-push-fields");
           url = serializeMagicPushFromInputs(wrap);
           if (!url) return;
+        } else if (type === "smtp") {
+          const wrap = tr.querySelector(".smtp-fields");
+          url = serializeSmtpFromInputs(wrap);
+          if (!url) return;
         } else {
           const inp = tr.querySelector("input.channel-url-input");
           const ta = tr.querySelector("textarea");
@@ -1902,10 +2190,10 @@ def create_app(on_config_saved=None) -> Flask:
         channels,
         log_retention_days: document.getElementById("input-log-days").value,
         logger_poll_interval: document.getElementById("input-poll-interval").value,
-        logger_db_path: document.getElementById("input-db-path").value,
         title_prefix: (document.getElementById("input-title-prefix").value || "").trim(),
         web_password_enabled: document.getElementById("input-web-password-enabled").checked,
         poll_batch_summary_enabled: document.getElementById("input-poll-batch-summary").checked,
+        minimal_push_enabled: document.getElementById("input-minimal-push-enabled").checked,
         dnd_enabled: document.getElementById("input-dnd-enabled").checked,
         dnd_start_time: document.getElementById("input-dnd-start").value || "22:00",
         dnd_end_time: document.getElementById("input-dnd-end").value || "07:00",
@@ -1921,6 +2209,10 @@ def create_app(on_config_saved=None) -> Flask:
         const json = await res.json();
         if (res.ok && json.ok) {
           showToast(true, json.message || "配置已保存");
+          if (Array.isArray(json.warnings) && json.warnings.length) {
+            json.warnings.forEach(w => showToast(false, "权限告警：" + w));
+          }
+          renderPersistentWarnings(json.warnings || []);
           testBtn.disabled = false;
           loadConfig();
         } else {

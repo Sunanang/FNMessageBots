@@ -13,7 +13,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
-from typing import Callable, Dict, List, Optional, Any
+from typing import Callable, Dict, List, Optional, Any, Sequence
 
 # 推送时间显示偏移（秒）。若 NAS 存库的 logtime 比 UTC 少 8 小时，设 LOGTIME_DISPLAY_OFFSET_SECONDS=28800
 _LOGTIME_OFFSET_SECONDS = int(os.environ.get("LOGTIME_DISPLAY_OFFSET_SECONDS", "28800"))
@@ -29,6 +29,9 @@ DB_EVENT_ID_TO_PROJECT: Dict[str, str] = {
     "LoginFail": "LoginFail",
     "Logout": "Logout",
     "FoundDisk": "FoundDisk",
+    "InsertDisk": "InsertDisk",
+    "EjectDisk": "EjectDisk",
+    "StorageBroken": "StorageBroken",
     "APP_CRASH": "APP_CRASH",
     "SshdLoginSucc": "SSH_LOGIN_SUCCESS",
     "SshdLoginAuthFail": "SSH_AUTH_FAILED",
@@ -76,6 +79,12 @@ DB_EVENT_ID_TO_PROJECT: Dict[str, str] = {
     "SHUTDOWN_VM": "SHUTDOWN_VM",
     "STATUS_RUNNING_VM": "STATUS_RUNNING_VM",
     "DESTROY_VM": "DESTROY_VM",
+    # 影视库 / 用户（eventId 以 NAS 实际为准，可再扩展）
+    "USER_CREATE": "MEDIA_USER_CREATED",
+    "CreateUser": "MEDIA_USER_CREATED",
+    "AddUserSucc": "MEDIA_USER_CREATED",
+    "USER_ADD_SUCCESS": "MEDIA_USER_CREATED",
+    "MEDIA_USER_CREATE": "MEDIA_USER_CREATED",
 }
 
 def _logtime_to_datetime(logtime: int) -> str:
@@ -137,11 +146,15 @@ class DBLogPoller:
         cursor_dir: str,
         poll_interval: int = 5,
         monitor_events: Optional[List[str]] = None,
+        media_lib_logger_enabled: bool = False,
+        media_lib_service_patterns: Optional[Sequence[str]] = None,
     ):
         self.db_path = db_path
         self.cursor_dir = Path(cursor_dir)
         self.poll_interval = max(1, poll_interval)
         self.monitor_events = set(monitor_events or [])
+        self.media_lib_logger_enabled = bool(media_lib_logger_enabled)
+        self.media_lib_service_patterns = [str(p).strip() for p in (media_lib_service_patterns or []) if str(p).strip()]
         self.event_handlers: Dict[str, Callable] = {}
         self.batch_handler: Optional[Callable[[List[Dict[str, Any]]], None]] = None
         self.running = False
@@ -168,6 +181,8 @@ class DBLogPoller:
         monitor_events: Optional[List[str]] = None,
         poll_interval: Optional[int] = None,
         db_path: Optional[str] = None,
+        media_lib_logger_enabled: Optional[bool] = None,
+        media_lib_service_patterns: Optional[Sequence[str]] = None,
     ) -> None:
         """热加载时更新监控事件、轮询间隔、数据库路径。"""
         if monitor_events is not None:
@@ -176,7 +191,25 @@ class DBLogPoller:
             self.poll_interval = max(1, poll_interval)
         if db_path is not None:
             self.db_path = db_path
+        if media_lib_logger_enabled is not None:
+            self.media_lib_logger_enabled = bool(media_lib_logger_enabled)
+        if media_lib_service_patterns is not None:
+            self.media_lib_service_patterns = [str(p).strip() for p in media_lib_service_patterns if str(p).strip()]
         self.logger.info("DBLogPoller 配置已更新: events=%s, interval=%s, db=%s", len(self.monitor_events), self.poll_interval, self.db_path)
+
+    def _apply_media_library_filter(self, row: Dict[str, Any], project_type: str) -> str:
+        """将全局登录/登出映射为影视库专用事件（需 serviceId/parameter 匹配模式）。"""
+        if not self.media_lib_logger_enabled or not self.media_lib_service_patterns:
+            return project_type
+        hay = f"{row.get('serviceId') or ''}\t{row.get('category') or ''}\t{row.get('parameter') or ''}"
+        hl = hay.lower()
+        if not any(p.lower() in hl for p in self.media_lib_service_patterns):
+            return project_type
+        if project_type == "LoginSucc":
+            return "MEDIA_LOGIN_SUCC"
+        if project_type == "Logout":
+            return "MEDIA_LOGOUT"
+        return project_type
 
     def _read_last_id(self) -> int:
         try:
@@ -234,6 +267,7 @@ class DBLogPoller:
             uname_raw = (row.get("uname") or "").strip()
             if db_event_id == "SshdLoginAuthFail" and uname_raw.lower() == "invalid":
                 project_type = "SSH_INVALID_USER"
+            project_type = self._apply_media_library_filter(row, project_type)
             if self.monitor_events and project_type not in self.monitor_events:
                 continue
             handler = self.event_handlers.get(project_type)

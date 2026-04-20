@@ -23,13 +23,16 @@ class Config:
     bark_url: str = ""  # Bark推送URL
     pushplus_params: str = ""  # PushPlus 推送参数（JSON 字符串，多个用 | 分隔）
     magic_push_params: str = ""  # 魔法推送（JSON：base_url、token、可选 title，多个用 | 分隔）
+    smtp_params: str = ""  # SMTP 邮件参数（JSON：server、port、username、password、from、to；多个用 | 分隔）
     
     # 通知标题配置；默认「飞牛NAS」。仅在配置中显式写入空字符串时，推送标题不包含此前缀。
     title_prefix: str = field(default=TITLE_PREFIX_DEFAULT)
+    # 极简推送：开启后所有渠道仅推送一行关键信息（默认关闭）
+    minimal_push_enabled: bool = False
 
     # 监控配置
     monitor_events: List[str] = field(default_factory=lambda: [
-        "LoginSucc", "LoginSucc2FA1", "LoginFail", "Logout", "FoundDisk", "APP_CRASH",
+        "LoginSucc", "LoginSucc2FA1", "LoginFail", "Logout", "FoundDisk", "InsertDisk", "EjectDisk", "StorageBroken", "APP_CRASH",
         "APP_UPDATE_FAILED", "APP_START_FAILED_LOCAL_APP_RUN_EXCEPTION",
         "APP_AUTO_START_FAILED_DOCKER_NOT_AVAILABLE",         "CPU_USAGE_ALARM",
         "CPU_USAGE_RESTORED",
@@ -40,7 +43,8 @@ class Config:
         "DiskWakeup", "DiskSpindown",
         "SSH_INVALID_USER", "SSH_AUTH_FAILED",
         "SSH_LOGIN_SUCCESS", "SSH_DISCONNECTED",
-        "DISK_IO_ERR"
+        "DISK_IO_ERR",
+        "BACKUP_TASK_SUCCESS", "BACKUP_TASK_FAILED",
     ])
     
     # 日志配置
@@ -57,6 +61,14 @@ class Config:
     # 系统路径配置
     cursor_dir: str = "./data/cursor"  # 数据库轮询游标等
     logger_db_path: str = "/usr/trim/var/eventlogger_service/logger_data.db3"
+    backup_db_path: str = "/usr/trim/var/backup_service/basic_backup.db3"
+    # 影视库：logger 中按 serviceId/parameter 匹配；trimmedia / trimactivity 路径为空则不启用对应轮询
+    media_lib_logger_enabled: bool = False
+    media_lib_service_patterns: List[str] = field(default_factory=lambda: ["mediadb", "trimmedia"])
+    media_lib_app_name_patterns: List[str] = field(default_factory=lambda: ["影视"])
+    trim_media_db_path: str = ""
+    trim_activity_db_path: str = ""
+    photo_db_path: str = ""  # 相册 photo.db，空则不轮询相册事件
     logger_poll_interval: int = 5  # 秒，轮询间隔
 
     # 轮询汇总模式：开启后同一轮查询到的多条事件合并为一条通知；关闭则逐条推送（易触发渠道限流）
@@ -149,8 +161,12 @@ class Config:
             self.pushplus_params = data["pushplus_params"]
         if "magic_push_params" in data and isinstance(data["magic_push_params"], str):
             self.magic_push_params = data["magic_push_params"]
+        if "smtp_params" in data and isinstance(data["smtp_params"], str):
+            self.smtp_params = data["smtp_params"]
         if "title_prefix" in data and isinstance(data["title_prefix"], str):
             self.title_prefix = (data["title_prefix"] or "").strip()
+        if "minimal_push_enabled" in data:
+            self.minimal_push_enabled = bool(data["minimal_push_enabled"])
         if "log_retention_days" in data and data["log_retention_days"] is not None:
             try:
                 self.log_retention_days = int(data["log_retention_days"])
@@ -163,6 +179,8 @@ class Config:
                 pass
         if "logger_db_path" in data and isinstance(data["logger_db_path"], str):
             self.logger_db_path = data["logger_db_path"].strip()
+        if "backup_db_path" in data and isinstance(data["backup_db_path"], str):
+            self.backup_db_path = data["backup_db_path"].strip()
         if "dnd_enabled" in data:
             self.dnd_enabled = bool(data["dnd_enabled"])
         if "dnd_start_time" in data and isinstance(data["dnd_start_time"], str):
@@ -171,6 +189,18 @@ class Config:
             self.dnd_end_time = data["dnd_end_time"].strip()
         if "poll_batch_summary_enabled" in data:
             self.poll_batch_summary_enabled = bool(data["poll_batch_summary_enabled"])
+        if "media_lib_logger_enabled" in data:
+            self.media_lib_logger_enabled = bool(data["media_lib_logger_enabled"])
+        if "media_lib_service_patterns" in data and isinstance(data["media_lib_service_patterns"], list):
+            self.media_lib_service_patterns = [str(x).strip() for x in data["media_lib_service_patterns"] if str(x).strip()]
+        if "media_lib_app_name_patterns" in data and isinstance(data["media_lib_app_name_patterns"], list):
+            self.media_lib_app_name_patterns = [str(x).strip() for x in data["media_lib_app_name_patterns"] if str(x).strip()]
+        if "trim_media_db_path" in data and isinstance(data["trim_media_db_path"], str):
+            self.trim_media_db_path = data["trim_media_db_path"].strip()
+        if "trim_activity_db_path" in data and isinstance(data["trim_activity_db_path"], str):
+            self.trim_activity_db_path = data["trim_activity_db_path"].strip()
+        if "photo_db_path" in data and isinstance(data["photo_db_path"], str):
+            self.photo_db_path = data["photo_db_path"].strip()
         return True
 
     def _load_from_env(self):
@@ -197,6 +227,12 @@ class Config:
         if bark_url := os.getenv('BARK_URL'):
             self.bark_url = bark_url
             self._env_set_keys.add('bark_url')
+        if minimal_push_enabled := os.getenv('MINIMAL_PUSH_ENABLED'):
+            self.minimal_push_enabled = minimal_push_enabled.lower() in ['1', 'true', 'yes', 'on']
+            self._env_set_keys.add('minimal_push_enabled')
+        if smtp_params := os.getenv('SMTP_PARAMS'):
+            self.smtp_params = smtp_params
+            self._env_set_keys.add('smtp_params')
 
         # 监控事件
         if events := os.getenv('MONITOR_EVENTS'):
@@ -230,9 +266,25 @@ class Config:
         if db_path := os.getenv('LOGGER_DB_PATH'):
             self.logger_db_path = db_path
             self._env_set_keys.add('logger_db_path')
+        if backup_db_path := os.getenv('BACKUP_DB_PATH'):
+            self.backup_db_path = backup_db_path
+            self._env_set_keys.add('backup_db_path')
         if poll_interval := os.getenv('LOGGER_POLL_INTERVAL'):
             self.logger_poll_interval = int(poll_interval)
             self._env_set_keys.add('logger_poll_interval')
+
+        if os.getenv('MEDIA_LIB_LOGGER_ENABLED', '').strip().lower() in ('1', 'true', 'yes', 'on'):
+            self.media_lib_logger_enabled = True
+            self._env_set_keys.add('media_lib_logger_enabled')
+        if trim_m := os.getenv('TRIM_MEDIA_DB_PATH'):
+            self.trim_media_db_path = trim_m.strip()
+            self._env_set_keys.add('trim_media_db_path')
+        if trim_a := os.getenv('TRIM_ACTIVITY_DB_PATH'):
+            self.trim_activity_db_path = trim_a.strip()
+            self._env_set_keys.add('trim_activity_db_path')
+        if photo_p := os.getenv('PHOTO_DB_PATH'):
+            self.photo_db_path = photo_p.strip()
+            self._env_set_keys.add('photo_db_path')
 
         # 高级配置
         if max_age := os.getenv('MAX_LOG_AGE'):
@@ -299,11 +351,30 @@ class Config:
                 except json.JSONDecodeError as e:
                     raise ValueError(f"魔法推送参数不是合法 JSON: {e}")
 
+        if self.smtp_params:
+            for part in (p.strip() for p in self.smtp_params.split("|") if p.strip()):
+                try:
+                    obj = json.loads(part)
+                    if not isinstance(obj, dict):
+                        raise ValueError("SMTP 参数必须为 JSON 对象")
+                    server = (obj.get("server") or "").strip()
+                    username = (obj.get("username") or "").strip()
+                    password = obj.get("password") or ""
+                    to_raw = (obj.get("to") or "").strip()
+                    if not server or not username or not password or not to_raw:
+                        raise ValueError("SMTP 参数须包含 server、username、password、to")
+                    try:
+                        int(obj.get("port", 465))
+                    except (TypeError, ValueError):
+                        raise ValueError("SMTP port 必须为整数")
+                except json.JSONDecodeError as e:
+                    raise ValueError(f"SMTP 参数不是合法 JSON: {e}")
+
         if not self.monitor_events:
             raise ValueError("必须配置至少一个监控事件")
         
         # 验证事件类型（含数据库 log 表 eventId 对应的项目类型）
-        valid_events = {"LoginSucc", "LoginSucc2FA1", "LoginFail", "Logout", "FoundDisk", "APP_CRASH",
+        valid_events = {"LoginSucc", "LoginSucc2FA1", "LoginFail", "Logout", "FoundDisk", "InsertDisk", "EjectDisk", "StorageBroken", "APP_CRASH",
                         "APP_UPDATE_FAILED", "APP_START_FAILED_LOCAL_APP_RUN_EXCEPTION",
                         "APP_AUTO_START_FAILED_DOCKER_NOT_AVAILABLE", "CPU_USAGE_ALARM",
                         "CPU_USAGE_RESTORED",
@@ -319,7 +390,12 @@ class Config:
                         "WEBDAV_ENABLED", "WEBDAV_DISABLED", "SAMBA_ENABLED", "SAMBA_DISABLED",
                         "DLNA_ENABLED", "DLNA_DISABLED", "FTP_ENABLED", "FTP_DISABLED", "NFS_ENABLED", "NFS_DISABLED",
                         "FW_ENABLE", "FW_DISABLE", "SECURITY_PORTCHANGED",
-                        "SHUTDOWN_VM", "STATUS_RUNNING_VM", "STATUS_REBOOTED_VM", "DESTROY_VM"}
+                        "SHUTDOWN_VM", "STATUS_RUNNING_VM", "STATUS_REBOOTED_VM", "DESTROY_VM",
+                        "BACKUP_TASK_SUCCESS", "BACKUP_TASK_FAILED",
+                        "MEDIA_LOGIN_SUCC", "MEDIA_LOGOUT", "MEDIA_USER_CREATED",
+                        "TRIM_RESOURCE_ADDED", "TRIM_SCRAPE_SUCCESS",
+                        "PHOTO_SHARE_CREATED", "PHOTO_SHARE_EXPIRED", "PHOTO_DEVICE_REGISTERED",
+                        "FACE_RECOGNITION_UPDATED"}
         # 过滤掉已移除或未知的事件类型，避免旧配置导致启动失败
         self.monitor_events = [
             e for e in self.monitor_events

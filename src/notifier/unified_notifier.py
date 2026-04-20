@@ -8,11 +8,12 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Set, Tuple
 from zoneinfo import ZoneInfo
 
 from config import TITLE_PREFIX_DEFAULT
@@ -63,6 +64,17 @@ class NotificationResult:
 
 class UnifiedNotifier:
     """统一通知器，支持多平台推送"""
+    # 轻量缓冲仅覆盖“不在 logger_data.db3 log 表里”的事件，避免与 DB 汇总重复计数。
+    DND_LIGHT_BUFFER_EVENT_TYPES: Set[str] = {
+        "BACKUP_TASK_SUCCESS",
+        "BACKUP_TASK_FAILED",
+        "TRIM_RESOURCE_ADDED",
+        "TRIM_SCRAPE_SUCCESS",
+        "PHOTO_SHARE_CREATED",
+        "PHOTO_SHARE_EXPIRED",
+        "PHOTO_DEVICE_REGISTERED",
+        "FACE_RECOGNITION_UPDATED",
+    }
     
     def __init__(self, config):
         """
@@ -75,6 +87,11 @@ class UnifiedNotifier:
         self.logger = logging.getLogger(__name__)
         # 记录最近一次已发送的勿扰汇总时段结束时间（ISO 字符串），避免重复发送
         self._last_dnd_summary_end: str = ""
+        self._last_dnd_enabled = bool(getattr(config, "dnd_enabled", False))
+        self._last_dnd_start_time = str(getattr(config, "dnd_start_time", "22:00") or "22:00")
+        self._last_dnd_end_time = str(getattr(config, "dnd_end_time", "07:00") or "07:00")
+        self._dnd_light_buffer_counts: Dict[str, int] = {}
+        self._dnd_light_buffer_lock = threading.Lock()
         self._load_last_dnd_summary_end()
 
         # 根据配置初始化多平台通知器
@@ -85,7 +102,12 @@ class UnifiedNotifier:
             bark_url=config.bark_url,
             pushplus_params=config.pushplus_params,
             magic_push_params=getattr(config, "magic_push_params", "") or "",
+            smtp_params=getattr(config, "smtp_params", "") or "",
             title_prefix=getattr(config, "title_prefix", TITLE_PREFIX_DEFAULT),
+            minimal_push_enabled=bool(getattr(config, "minimal_push_enabled", False)),
+            user_lookup_db_path=getattr(config, "trim_media_db_path", "") or "",
+            activity_user_lookup_db_path=getattr(config, "trim_activity_db_path", "") or "",
+            logger_user_lookup_db_path=getattr(config, "logger_db_path", "") or "",
             dedup_window=config.dedup_window,
             pool_size=config.http_pool_size,
             retries=config.http_retry_count,
@@ -103,7 +125,12 @@ class UnifiedNotifier:
             bark_url=self.config.bark_url,
             pushplus_params=self.config.pushplus_params,
             magic_push_params=getattr(self.config, "magic_push_params", "") or "",
+            smtp_params=getattr(self.config, "smtp_params", "") or "",
             title_prefix=getattr(self.config, "title_prefix", TITLE_PREFIX_DEFAULT),
+            minimal_push_enabled=bool(getattr(self.config, "minimal_push_enabled", False)),
+            user_lookup_db_path=getattr(self.config, "trim_media_db_path", "") or "",
+            activity_user_lookup_db_path=getattr(self.config, "trim_activity_db_path", "") or "",
+            logger_user_lookup_db_path=getattr(self.config, "logger_db_path", "") or "",
             dedup_window=self.config.dedup_window,
             pool_size=self.config.http_pool_size,
             retries=self.config.http_retry_count,
@@ -116,6 +143,35 @@ class UnifiedNotifier:
                 self.logger.warning("关闭旧通知器失败: %s", e)
         self.logger.info("多平台通知器已热加载配置")
         self._load_last_dnd_summary_end()
+        self._handle_dnd_config_transition_after_reload()
+
+    def _handle_dnd_config_transition_after_reload(self) -> None:
+        """
+        处理勿扰配置变更的边界行为：
+        - 从关闭切到开启时，不应立刻补发“历史已结束时段”的汇总；
+        - 开启状态下修改时段时，同样不补发旧时段汇总。
+        """
+        curr_enabled = bool(getattr(self.config, "dnd_enabled", False))
+        curr_start = str(getattr(self.config, "dnd_start_time", "22:00") or "22:00")
+        curr_end = str(getattr(self.config, "dnd_end_time", "07:00") or "07:00")
+
+        enabled_just_now = (not self._last_dnd_enabled) and curr_enabled
+        disabled_just_now = self._last_dnd_enabled and (not curr_enabled)
+        window_changed_while_enabled = self._last_dnd_enabled and curr_enabled and (
+            curr_start != self._last_dnd_start_time or curr_end != self._last_dnd_end_time
+        )
+        if disabled_just_now:
+            self._clear_dnd_light_buffer("关闭勿扰")
+            self.logger.info("勿扰配置变更：已关闭勿扰，本轮及后续将不再进行勿扰汇总检查")
+        if enabled_just_now or window_changed_while_enabled:
+            start_dt, end_dt = self._calc_latest_dnd_period()
+            if end_dt is not None:
+                self._save_last_dnd_summary_end(end_dt.isoformat())
+                self.logger.info("勿扰配置变更：已对齐勿扰汇总游标至 %s，避免立即补发历史汇总", end_dt.isoformat())
+
+        self._last_dnd_enabled = curr_enabled
+        self._last_dnd_start_time = curr_start
+        self._last_dnd_end_time = curr_end
 
     def _dnd_summary_cursor_file(self) -> Optional[Path]:
         """勿扰汇总游标文件路径（持久化最近汇总结束点，避免重启后重复推送）。"""
@@ -264,8 +320,29 @@ class UnifiedNotifier:
         self.logger.info("勿扰结束，发送汇总消息（共 %s 条事件）", sum(by_type.values()))
         return "\n".join(lines)
 
+    def _buffer_event_for_dnd_if_needed(self, event_type: str) -> None:
+        """勿扰时段内轻量缓存非主日志库事件计数。"""
+        if event_type not in self.DND_LIGHT_BUFFER_EVENT_TYPES:
+            return
+        with self._dnd_light_buffer_lock:
+            self._dnd_light_buffer_counts[event_type] = int(self._dnd_light_buffer_counts.get(event_type, 0)) + 1
+
+    def _snapshot_and_clear_dnd_light_buffer(self) -> Dict[str, int]:
+        """获取并清空轻量缓冲。"""
+        with self._dnd_light_buffer_lock:
+            snap = dict(self._dnd_light_buffer_counts)
+            self._dnd_light_buffer_counts.clear()
+        return snap
+
+    def _clear_dnd_light_buffer(self, reason: str) -> None:
+        with self._dnd_light_buffer_lock:
+            had_items = bool(self._dnd_light_buffer_counts)
+            self._dnd_light_buffer_counts.clear()
+        if had_items:
+            self.logger.info("勿扰轻量缓冲已清空（原因：%s）", reason)
+
     def flush_dnd_buffer_if_needed(self) -> None:
-        """勿扰结束后按数据库时间窗汇总（不依赖内存缓存），同一时段仅发送一次。"""
+        """勿扰结束后汇总推送（主日志库 + 轻量缓冲），同一时段仅发送一次。"""
         start_dt, end_dt = self._calc_latest_dnd_period()
         if start_dt is None or end_dt is None:
             return
@@ -273,6 +350,9 @@ class UnifiedNotifier:
         if end_key == self._last_dnd_summary_end:
             return
         by_type = self._query_dnd_events_summary(start_dt, end_dt)
+        buffered_by_type = self._snapshot_and_clear_dnd_light_buffer()
+        for et, cnt in buffered_by_type.items():
+            by_type[et] = int(by_type.get(et, 0)) + int(cnt)
         if not by_type:
             self._save_last_dnd_summary_end(end_key)
             self.logger.info("勿扰结束：数据库查询到 0 条监控事件，跳过汇总推送")
@@ -317,7 +397,8 @@ class UnifiedNotifier:
             通知发送结果
         """
         if self._in_dnd_window():
-            # 勿扰时段内不再缓存事件；结束后按数据库时间窗汇总。
+            # 勿扰时段内：logger_data.db3 事件靠 DB 汇总，非主日志库事件走轻量缓冲。
+            self._buffer_event_for_dnd_if_needed(str(event_type))
             return NotificationResult(
                 success=True,
                 method="dnd_skipped",
@@ -393,6 +474,8 @@ class UnifiedNotifier:
             active_platforms.append('pushplus')
         if getattr(self.config, "magic_push_params", ""):
             active_platforms.append('magic_push')
+        if getattr(self.config, "smtp_params", ""):
+            active_platforms.append('smtp')
         
         if len(active_platforms) == 0:
             method = 'none'
@@ -452,6 +535,8 @@ class UnifiedNotifier:
             active_platforms.append('pushplus')
         if getattr(self.config, "magic_push_params", ""):
             active_platforms.append('magic_push')
+        if getattr(self.config, "smtp_params", ""):
+            active_platforms.append('smtp')
         
         if len(active_platforms) == 0:
             method = 'none'
@@ -503,6 +588,7 @@ class UnifiedNotifier:
                 'bark': False,
                 'pushplus': False,
                 'magic_push': False,
+                'smtp': False,
             }
         }
     

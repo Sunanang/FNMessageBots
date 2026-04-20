@@ -13,7 +13,7 @@ WORKDIR /app
 
 # 仅保留健康检查所需的 pgrep（procps）
 RUN set -ex && \
-    apt-get update && \
+    apt-get -o Acquire::Retries=5 update && \
     apt-get install -y --no-install-recommends procps \
     && rm -rf /var/lib/apt/lists/*
 
