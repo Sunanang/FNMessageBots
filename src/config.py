@@ -12,6 +12,24 @@ from pathlib import Path
 TITLE_PREFIX_DEFAULT = "飞牛NAS"
 
 
+def _as_bool(value: Any, default: bool = False) -> bool:
+    """稳健布尔解析：兼容 bool/数字/字符串（如 'true'/'false'）。"""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+        return default
+    return bool(value)
+
+
 @dataclass
 class Config:
     """应用配置"""
@@ -166,7 +184,7 @@ class Config:
         if "title_prefix" in data and isinstance(data["title_prefix"], str):
             self.title_prefix = (data["title_prefix"] or "").strip()
         if "minimal_push_enabled" in data:
-            self.minimal_push_enabled = bool(data["minimal_push_enabled"])
+            self.minimal_push_enabled = _as_bool(data["minimal_push_enabled"], False)
         if "log_retention_days" in data and data["log_retention_days"] is not None:
             try:
                 self.log_retention_days = int(data["log_retention_days"])
@@ -182,15 +200,15 @@ class Config:
         if "backup_db_path" in data and isinstance(data["backup_db_path"], str):
             self.backup_db_path = data["backup_db_path"].strip()
         if "dnd_enabled" in data:
-            self.dnd_enabled = bool(data["dnd_enabled"])
+            self.dnd_enabled = _as_bool(data["dnd_enabled"], False)
         if "dnd_start_time" in data and isinstance(data["dnd_start_time"], str):
             self.dnd_start_time = data["dnd_start_time"].strip()
         if "dnd_end_time" in data and isinstance(data["dnd_end_time"], str):
             self.dnd_end_time = data["dnd_end_time"].strip()
         if "poll_batch_summary_enabled" in data:
-            self.poll_batch_summary_enabled = bool(data["poll_batch_summary_enabled"])
+            self.poll_batch_summary_enabled = _as_bool(data["poll_batch_summary_enabled"], False)
         if "media_lib_logger_enabled" in data:
-            self.media_lib_logger_enabled = bool(data["media_lib_logger_enabled"])
+            self.media_lib_logger_enabled = _as_bool(data["media_lib_logger_enabled"], False)
         if "media_lib_service_patterns" in data and isinstance(data["media_lib_service_patterns"], list):
             self.media_lib_service_patterns = [str(x).strip() for x in data["media_lib_service_patterns"] if str(x).strip()]
         if "media_lib_app_name_patterns" in data and isinstance(data["media_lib_app_name_patterns"], list):
@@ -247,20 +265,32 @@ class Config:
 
         # HTTP配置
         if pool_size := os.getenv('HTTP_POOL_SIZE'):
-            self.http_pool_size = int(pool_size)
-            self._env_set_keys.add('http_pool_size')
+            try:
+                self.http_pool_size = int(pool_size)
+                self._env_set_keys.add('http_pool_size')
+            except (TypeError, ValueError):
+                print(f"警告: HTTP_POOL_SIZE 不是整数，已忽略: {pool_size}")
 
         if retry_count := os.getenv('HTTP_RETRY_COUNT'):
-            self.http_retry_count = int(retry_count)
-            self._env_set_keys.add('http_retry_count')
+            try:
+                self.http_retry_count = int(retry_count)
+                self._env_set_keys.add('http_retry_count')
+            except (TypeError, ValueError):
+                print(f"警告: HTTP_RETRY_COUNT 不是整数，已忽略: {retry_count}")
 
         if timeout := os.getenv('HTTP_TIMEOUT'):
-            self.http_timeout = int(timeout)
-            self._env_set_keys.add('http_timeout')
+            try:
+                self.http_timeout = int(timeout)
+                self._env_set_keys.add('http_timeout')
+            except (TypeError, ValueError):
+                print(f"警告: HTTP_TIMEOUT 不是整数，已忽略: {timeout}")
 
         if dedup_window := os.getenv('DEDUP_WINDOW'):
-            self.dedup_window = int(dedup_window)
-            self._env_set_keys.add('dedup_window')
+            try:
+                self.dedup_window = int(dedup_window)
+                self._env_set_keys.add('dedup_window')
+            except (TypeError, ValueError):
+                print(f"警告: DEDUP_WINDOW 不是整数，已忽略: {dedup_window}")
 
         # 数据库日志监控
         if db_path := os.getenv('LOGGER_DB_PATH'):
@@ -270,8 +300,11 @@ class Config:
             self.backup_db_path = backup_db_path
             self._env_set_keys.add('backup_db_path')
         if poll_interval := os.getenv('LOGGER_POLL_INTERVAL'):
-            self.logger_poll_interval = int(poll_interval)
-            self._env_set_keys.add('logger_poll_interval')
+            try:
+                self.logger_poll_interval = int(poll_interval)
+                self._env_set_keys.add('logger_poll_interval')
+            except (TypeError, ValueError):
+                print(f"警告: LOGGER_POLL_INTERVAL 不是整数，已忽略: {poll_interval}")
 
         if os.getenv('MEDIA_LIB_LOGGER_ENABLED', '').strip().lower() in ('1', 'true', 'yes', 'on'):
             self.media_lib_logger_enabled = True
@@ -288,28 +321,43 @@ class Config:
 
         # 高级配置
         if max_age := os.getenv('MAX_LOG_AGE'):
-            self.max_log_age = int(max_age)
-            self._env_set_keys.add('max_log_age')
+            try:
+                self.max_log_age = int(max_age)
+                self._env_set_keys.add('max_log_age')
+            except (TypeError, ValueError):
+                print(f"警告: MAX_LOG_AGE 不是整数，已忽略: {max_age}")
 
         if log_retention := os.getenv('LOG_RETENTION_DAYS'):
-            self.log_retention_days = int(log_retention)
-            self._env_set_keys.add('log_retention_days')
+            try:
+                self.log_retention_days = int(log_retention)
+                self._env_set_keys.add('log_retention_days')
+            except (TypeError, ValueError):
+                print(f"警告: LOG_RETENTION_DAYS 不是整数，已忽略: {log_retention}")
 
         if notify_restart_enabled := os.getenv('NOTIFY_RESTART_ENABLED'):
             self.notification_restart_enabled = notify_restart_enabled.lower() in ['1', 'true', 'yes', 'on']
             self._env_set_keys.add('notification_restart_enabled')
 
         if notify_restart_failures := os.getenv('NOTIFY_RESTART_CONSECUTIVE'):
-            self.notification_restart_consecutive_failures = int(notify_restart_failures)
-            self._env_set_keys.add('notification_restart_consecutive_failures')
+            try:
+                self.notification_restart_consecutive_failures = int(notify_restart_failures)
+                self._env_set_keys.add('notification_restart_consecutive_failures')
+            except (TypeError, ValueError):
+                print(f"警告: NOTIFY_RESTART_CONSECUTIVE 不是整数，已忽略: {notify_restart_failures}")
 
         if notify_restart_window := os.getenv('NOTIFY_RESTART_WINDOW'):
-            self.notification_restart_window = int(notify_restart_window)
-            self._env_set_keys.add('notification_restart_window')
+            try:
+                self.notification_restart_window = int(notify_restart_window)
+                self._env_set_keys.add('notification_restart_window')
+            except (TypeError, ValueError):
+                print(f"警告: NOTIFY_RESTART_WINDOW 不是整数，已忽略: {notify_restart_window}")
 
         if notify_restart_cooldown := os.getenv('NOTIFY_RESTART_COOLDOWN'):
-            self.notification_restart_cooldown = int(notify_restart_cooldown)
-            self._env_set_keys.add('notification_restart_cooldown')
+            try:
+                self.notification_restart_cooldown = int(notify_restart_cooldown)
+                self._env_set_keys.add('notification_restart_cooldown')
+            except (TypeError, ValueError):
+                print(f"警告: NOTIFY_RESTART_COOLDOWN 不是整数，已忽略: {notify_restart_cooldown}")
 
     
     def _validate(self):

@@ -53,6 +53,24 @@ from web.ui_templates import FAQ_PAGE_TEMPLATE, HISTORY_PAGE_TEMPLATE, SUPPORT_P
 SESSION_IDLE_SECONDS = 300
 AUTH_COOKIE_NAME = "fnmb_session"
 
+
+def _as_bool(value, default: bool = False) -> bool:
+    """稳健布尔解析：兼容 bool/数字/字符串（如 'true'/'false'）。"""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+        return default
+    return bool(value)
+
 def _has_password_set() -> bool:
     return _has_password_set_fn(_load_raw_config)
 
@@ -400,12 +418,12 @@ def create_app(on_config_saved=None) -> Flask:
             "title_prefix": _title_prefix_from_dict(raw),
             "log_retention_days": int(raw.get("log_retention_days", raw.get("max_log_age", 7))),
             "logger_poll_interval": int(raw.get("logger_poll_interval", 3)),
-            "dnd_enabled": bool(raw.get("dnd_enabled", False)),
+            "dnd_enabled": _as_bool(raw.get("dnd_enabled", False), False),
             "dnd_start_time": (raw.get("dnd_start_time") or "22:00").strip(),
             "dnd_end_time": (raw.get("dnd_end_time") or "07:00").strip(),
-            "web_password_enabled": bool(raw.get("web_password_enabled", True)),
-            "poll_batch_summary_enabled": bool(raw.get("poll_batch_summary_enabled", False)),
-            "minimal_push_enabled": bool(raw.get("minimal_push_enabled", False)),
+            "web_password_enabled": _as_bool(raw.get("web_password_enabled", True), True),
+            "poll_batch_summary_enabled": _as_bool(raw.get("poll_batch_summary_enabled", False), False),
+            "minimal_push_enabled": _as_bool(raw.get("minimal_push_enabled", False), False),
             "channel_options": CHANNEL_OPTIONS,
         }
         db_access_warnings = _collect_external_db_access_warnings(raw, monitor_events)
@@ -421,12 +439,12 @@ def create_app(on_config_saved=None) -> Flask:
         channels = payload.get("channels") or []
         log_retention_days = payload.get("log_retention_days", 7)
         logger_poll_interval = payload.get("logger_poll_interval", 3)
-        dnd_enabled = bool(payload.get("dnd_enabled", False))
+        dnd_enabled = _as_bool(payload.get("dnd_enabled", False), False)
         dnd_start_time = (payload.get("dnd_start_time") or "22:00").strip()
         dnd_end_time = (payload.get("dnd_end_time") or "07:00").strip()
-        web_password_enabled = bool(payload.get("web_password_enabled", True))
-        poll_batch_summary_enabled = bool(payload.get("poll_batch_summary_enabled", False))
-        minimal_push_enabled = bool(payload.get("minimal_push_enabled", False))
+        web_password_enabled = _as_bool(payload.get("web_password_enabled", True), True)
+        poll_batch_summary_enabled = _as_bool(payload.get("poll_batch_summary_enabled", False), False)
+        minimal_push_enabled = _as_bool(payload.get("minimal_push_enabled", False), False)
         title_prefix = _title_prefix_from_dict(payload)
         if title_prefix and len(title_prefix) > 20:
             return jsonify({"ok": False, "message": "标题前缀过长（最多 20 个字符）。"}), 400
@@ -2291,4 +2309,3 @@ if __name__ == "__main__":
     port = int(os.getenv("UI_PORT", "18080"))
     print(f"配置 UI: http://127.0.0.1:{port}")
     app.run(host="0.0.0.0", port=port, debug=True)
-

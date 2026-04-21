@@ -810,6 +810,19 @@ FAQ_PAGE_TEMPLATE = """<!DOCTYPE html>
       padding: 1px 4px;
       border-radius: 4px;
     }
+    pre.faq-pre {
+      margin: 8px 0 0;
+      padding: 10px 12px;
+      overflow-x: auto;
+      font-size: 12px;
+      line-height: 1.5;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      background: rgba(148, 163, 184, 0.18);
+      border-radius: 8px;
+      border: 1px solid var(--faq-panel-border);
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
     .btn {
       min-width: 96px;
       border-radius: 999px;
@@ -925,6 +938,20 @@ Docker 镜像名称：<code>fn-message-bots</code>
 <code>chown -R trim:trim /usr/trim/var/eventlogger_service/</code>
 <code>systemctl start eventlogger_service</code>
 <code>systemctl status eventlogger_service</code></p>
+          </article>
+
+          <article class="faq-item">
+            <h2>10. 挂载影视库 / 相册提示权限问题</h2>
+            <p><strong>Docker 版：</strong>请在编排文件（如 <code>docker-compose.yml</code>）中自行添加卷挂载，使容器能访问宿主上的影视 / 相册数据路径；权限与 UID/GID、挂载只读等均在您本机配置中处理。
+<strong>应用市场版：</strong>若读取影视 / 相册相关数据库时报权限不足，可在 SSH（root）下按需执行下列命令。<strong>请自行评估放宽目录权限、数据库文件权限以及 ACL 带来的安全风险</strong>（例如更多用户可进入目录或读取数据库文件）；系统需支持 <code>setfacl</code>（ACL），否则请先安装/启用相关功能。
+
+<pre class="faq-pre">sudo chmod 755 /usr/local/apps/@appdata/trim.media/database /usr/local/apps/@appdata/trim.photos/db
+sudo chmod 644 /usr/local/apps/@appdata/trim.media/database/*.db* /usr/local/apps/@appdata/trim.photos/db/*.db* 2>/dev/null
+
+sudo setfacl -m u:FnMessageBot:rx /usr/local/apps/@appdata/trim.media/database
+sudo setfacl -m u:FnMessageBot:r /usr/local/apps/@appdata/trim.media/database/trimmedia.db
+sudo setfacl -m u:FnMessageBot:r /usr/local/apps/@appdata/trim.media/database/trimactivity.db</pre>
+若相册侧仍有权限错误，可对 <code>trim.photos/db</code> 下实际使用的 <code>.db</code> 文件按同样方式为 <code>FnMessageBot</code> 增加只读 ACL（示例：<code>sudo setfacl -m u:FnMessageBot:r &lt;文件路径&gt;</code>）。</p>
           </article>
         </section>
 

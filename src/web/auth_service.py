@@ -11,6 +11,23 @@ from typing import Callable, Optional, Tuple
 PBKDF2_ITERATIONS = 100000
 
 
+def _as_bool(value, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+        return default
+    return bool(value)
+
+
 def hash_password(password: str, salt: bytes) -> str:
     """PBKDF2-HMAC-SHA256，返回 hex。"""
     h = hashlib.pbkdf2_hmac(
@@ -51,5 +68,4 @@ def has_password_set(load_raw_config: Callable[[], dict]) -> bool:
 def is_password_verification_enabled(load_raw_config: Callable[[], dict]) -> bool:
     """是否开启密码验证（默认 True）。"""
     raw = load_raw_config()
-    return bool(raw.get("web_password_enabled", True))
-
+    return _as_bool(raw.get("web_password_enabled", True), True)
