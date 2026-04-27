@@ -138,6 +138,9 @@ class MultiPlatformNotifier:
         'POLL_BATCH_SUMMARY': '飞牛NAS-多事件合并通知',
         'BACKUP_TASK_SUCCESS': '✅ 飞牛NAS-备份任务完成',
         'BACKUP_TASK_FAILED': '❌ 飞牛NAS-备份任务失败',
+        'SCHEDULER_TASK_SUCCESS': '✅ 飞牛NAS-任务计划执行成功',
+        'SCHEDULER_TASK_FAILED': '❌ 飞牛NAS-任务计划执行失败',
+        'SCHEDULER_TASK_CONDITION_FAILED': '⚠️ 飞牛NAS-任务计划条件不满足',
         # 可选事件（默认不推送）
         'ARCHIVING_SUCCESS': '📦 飞牛NAS-归档成功',
         'DeleteFile': '🗑️ 飞牛NAS-文件删除',
@@ -228,6 +231,9 @@ class MultiPlatformNotifier:
         'POLL_BATCH_SUMMARY': '多事件合并通知',
         'BACKUP_TASK_SUCCESS': '备份任务完成',
         'BACKUP_TASK_FAILED': '备份任务失败',
+        'SCHEDULER_TASK_SUCCESS': '任务计划执行成功',
+        'SCHEDULER_TASK_FAILED': '任务计划执行失败',
+        'SCHEDULER_TASK_CONDITION_FAILED': '任务计划条件不满足',
         'ARCHIVING_SUCCESS': '归档成功',
         'DeleteFile': '文件删除',
         'MovetoTrashbin': '移到回收站',
@@ -315,6 +321,9 @@ class MultiPlatformNotifier:
         'POLL_BATCH_SUMMARY': '',
         'BACKUP_TASK_SUCCESS': '备份任务执行完成。',
         'BACKUP_TASK_FAILED': '备份任务执行失败，请检查任务配置与网络状态。',
+        'SCHEDULER_TASK_SUCCESS': '任务计划执行完成。',
+        'SCHEDULER_TASK_FAILED': '任务计划执行失败，请检查脚本与执行日志。',
+        'SCHEDULER_TASK_CONDITION_FAILED': '任务计划触发条件不满足，任务未执行。',
         'ARCHIVING_SUCCESS': '系统完成归档任务。',
         'DeleteFile': '文件已被删除。',
         'MovetoTrashbin': '文件已移至回收站。',
@@ -1187,6 +1196,9 @@ class MultiPlatformNotifier:
             "APP_UPDATE_FAILED": "应用更新失败",
             "BACKUP_TASK_SUCCESS": "备份任务完成",
             "BACKUP_TASK_FAILED": "备份任务失败",
+            "SCHEDULER_TASK_SUCCESS": "任务计划完成",
+            "SCHEDULER_TASK_FAILED": "任务计划失败",
+            "SCHEDULER_TASK_CONDITION_FAILED": "任务计划条件不满足",
         }
         action = action_map.get(event_type)
         if not action:
@@ -1284,6 +1296,8 @@ class MultiPlatformNotifier:
             detail = self._build_disk_io_err_content(event_data)
         elif event_type in {'BACKUP_TASK_SUCCESS', 'BACKUP_TASK_FAILED'}:
             detail = self._build_backup_task_content(event_data)
+        elif event_type in {'SCHEDULER_TASK_SUCCESS', 'SCHEDULER_TASK_FAILED', 'SCHEDULER_TASK_CONDITION_FAILED'}:
+            detail = self._build_scheduler_task_content(event_data)
         elif event_type in {'SHUTDOWN_VM', 'STATUS_RUNNING_VM', 'DESTROY_VM'} or ("VM" in str(event_type).upper()):
             detail = self._build_vm_content(event_data)
         elif event_type in {
@@ -1821,6 +1835,40 @@ class MultiPlatformNotifier:
             lines.append(f"错误信息: {error_message[:300]}")
         return "\n".join(lines) if lines else "（无额外详情）"
 
+    def _build_scheduler_task_content(self, event_data: Dict[str, Any]) -> str:
+        """构建 fn-scheduler 任务执行结果内容。"""
+        task_name = str(event_data.get("task_name") or "")
+        result_id = event_data.get("result_id")
+        account = str(event_data.get("account") or "")
+        trigger_label = str(event_data.get("trigger_reason_label") or event_data.get("trigger_reason") or "")
+        schedule_expr = str(event_data.get("schedule_expression") or "")
+        started_at = str(event_data.get("started_at") or "")
+        finished_at = str(event_data.get("finished_at") or "")
+        duration = str(event_data.get("duration") or "")
+        log_preview = str(event_data.get("log_preview") or "")
+        status = str(event_data.get("status") or "")
+
+        lines: List[str] = []
+        if task_name:
+            lines.append(f"任务名称: {task_name}")
+        if result_id not in (None, ""):
+            lines.append(f"执行ID: {result_id}")
+        if account:
+            lines.append(f"执行账户: {account}")
+        if trigger_label:
+            lines.append(f"触发方式: {trigger_label}")
+        if schedule_expr:
+            lines.append(f"计划表达式: {schedule_expr}")
+        if started_at:
+            lines.append(f"开始时间: {started_at}")
+        if finished_at:
+            lines.append(f"结束时间: {finished_at}")
+        if duration:
+            lines.append(f"耗时: {duration}")
+        if log_preview and status != "success":
+            lines.append(f"执行日志:\n{log_preview}")
+        return "\n".join(lines) if lines else "（无额外详情）"
+
     def _batch_summary_item_lines(self, event_type: str, ed: Dict[str, Any]) -> List[str]:
         """多事件合并时，单条事件只展示关键字段（无图标，多行时每条一行）。"""
         data_raw = ed.get("data")
@@ -1959,6 +2007,16 @@ class MultiPlatformNotifier:
             if int(ed.get("error_code") or 0) != 0:
                 backup_lines.append(f"错误码: {ed.get('error_code')}")
             return [" · ".join(backup_lines)] if backup_lines else [et]
+
+        if et in ("SCHEDULER_TASK_SUCCESS", "SCHEDULER_TASK_FAILED", "SCHEDULER_TASK_CONDITION_FAILED"):
+            sched_lines: List[str] = []
+            if ed.get("task_name"):
+                sched_lines.append(f"任务: {ed.get('task_name')}")
+            if ed.get("trigger_reason_label"):
+                sched_lines.append(str(ed.get("trigger_reason_label")))
+            if ed.get("duration"):
+                sched_lines.append(f"耗时: {ed.get('duration')}")
+            return [" · ".join(sched_lines)] if sched_lines else [et]
 
         if et in ("UPS_ONBATT", "UPS_ONBATT_LOWBATT"):
             ups_bits: List[str] = []

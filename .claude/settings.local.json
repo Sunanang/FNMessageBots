@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(where python *)",
-      "Bash(where python3 *)"
+      "Bash(where python3 *)",
+      "Read(//d/Embedded/fn-scheduler/**)"
     ]
   }
 }

@@ -75,6 +75,9 @@ class EventProcessor:
             'DISK_IO_ERR': self._handle_disk_io_err,
             'BACKUP_TASK_SUCCESS': self._handle_backup_task_success,
             'BACKUP_TASK_FAILED': self._handle_backup_task_failed,
+            'SCHEDULER_TASK_SUCCESS': self._handle_scheduler_task_success,
+            'SCHEDULER_TASK_FAILED': self._handle_scheduler_task_failed,
+            'SCHEDULER_TASK_CONDITION_FAILED': self._handle_scheduler_task_condition_failed,
             # 可选事件（默认不推送，需用户勾选）
             'ARCHIVING_SUCCESS': lambda ed, e: self._handle_simple_notification('ARCHIVING_SUCCESS', ed, e),
             'DeleteFile': lambda ed, e: self._handle_simple_notification('DeleteFile', ed, e),
@@ -668,6 +671,48 @@ class EventProcessor:
             timestamp=timestamp
         )
         self._store_notification_log('BACKUP_TASK_FAILED', event_data, raw_log, entry, source='backup_db')
+
+    def _handle_scheduler_task_success(self, event_data: Dict[str, Any], entry: JournalEntry):
+        """处理 fn-scheduler 任务执行成功事件。"""
+        task_name = event_data.get('task_name', '未知任务')
+        self.logger.info(f"任务计划执行成功: {task_name} (result_id={event_data.get('result_id')})")
+        raw_log = getattr(entry, 'raw_data', '{}')
+        timestamp = getattr(entry, 'timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        self.notifier.send_notification(
+            event_type='SCHEDULER_TASK_SUCCESS',
+            event_data=event_data,
+            raw_log=raw_log,
+            timestamp=timestamp
+        )
+        self._store_notification_log('SCHEDULER_TASK_SUCCESS', event_data, raw_log, entry, source='scheduler_db')
+
+    def _handle_scheduler_task_failed(self, event_data: Dict[str, Any], entry: JournalEntry):
+        """处理 fn-scheduler 任务执行失败事件。"""
+        task_name = event_data.get('task_name', '未知任务')
+        self.logger.warning(f"任务计划执行失败: {task_name} (result_id={event_data.get('result_id')})")
+        raw_log = getattr(entry, 'raw_data', '{}')
+        timestamp = getattr(entry, 'timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        self.notifier.send_notification(
+            event_type='SCHEDULER_TASK_FAILED',
+            event_data=event_data,
+            raw_log=raw_log,
+            timestamp=timestamp
+        )
+        self._store_notification_log('SCHEDULER_TASK_FAILED', event_data, raw_log, entry, source='scheduler_db')
+
+    def _handle_scheduler_task_condition_failed(self, event_data: Dict[str, Any], entry: JournalEntry):
+        """处理 fn-scheduler 任务条件不满足事件。"""
+        task_name = event_data.get('task_name', '未知任务')
+        self.logger.info(f"任务计划条件不满足: {task_name} (result_id={event_data.get('result_id')})")
+        raw_log = getattr(entry, 'raw_data', '{}')
+        timestamp = getattr(entry, 'timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        self.notifier.send_notification(
+            event_type='SCHEDULER_TASK_CONDITION_FAILED',
+            event_data=event_data,
+            raw_log=raw_log,
+            timestamp=timestamp
+        )
+        self._store_notification_log('SCHEDULER_TASK_CONDITION_FAILED', event_data, raw_log, entry, source='scheduler_db')
 
     def _handle_cpu_usage_alarm(self, event_data: Dict[str, Any], entry: JournalEntry):
         """处理 CPU 使用率告警（parameter 含 data.THRESHOLD，如 {"from":"trim.resource-manager","eventId":"CPU_USAGE_ALARM","data":{"THRESHOLD":90},"datetime":...}）"""

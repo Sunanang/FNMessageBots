@@ -12,6 +12,8 @@ services:
       - /usr/trim/var/backup_service:/usr/trim/var/backup_service:ro
       - /usr/local/apps/@appdata/trim.media/database:/usr/local/apps/@appdata/trim.media/database:ro
       - /usr/local/apps/@appdata/trim.photos/db:/usr/local/apps/@appdata/trim.photos/db:ro
+      # fn-scheduler 任务计划数据库（路径以实际安装为准，挂载后在 Web 配置页设置 scheduler_db_path）
+      # - /usr/local/packages/fn-scheduler/var:/usr/local/packages/fn-scheduler/var:ro
       - ./config:/app/config:rw
     environment:
       - TZ=Asia/Shanghai
