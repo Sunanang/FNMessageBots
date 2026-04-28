@@ -193,6 +193,15 @@ def _collect_external_db_access_warnings(raw_cfg: dict, events: list[str]) -> li
         if issue:
             warnings.append(f"相册库: {issue}")
 
+    scheduler_events = {"SCHEDULER_TASK_SUCCESS", "SCHEDULER_TASK_FAILED", "SCHEDULER_TASK_CONDITION_FAILED"}
+    if monitor_events & scheduler_events:
+        issue = _check_db_access_issue(
+            (raw_cfg.get("scheduler_db_path") or "/var/apps/fn-scheduler/var/scheduler.db").strip(),
+            "SELECT id FROM task_results LIMIT 1",
+        )
+        if issue:
+            warnings.append(f"任务计划库: {issue}")
+
     return warnings
 
 
@@ -230,12 +239,14 @@ def create_app(on_config_saved=None) -> Flask:
     trim_media_db_path = (raw_cfg.get("trim_media_db_path") or "").strip()
     trim_activity_db_path = (raw_cfg.get("trim_activity_db_path") or "").strip()
     photo_db_path = (raw_cfg.get("photo_db_path") or "").strip()
+    scheduler_db_path = (raw_cfg.get("scheduler_db_path") or "/var/apps/fn-scheduler/var/scheduler.db").strip()
     events_by_category, valid_event_ids, discovered_vm_event_ids = build_events_for_ui(
         logger_db_path=logger_db_path,
         backup_db_path=backup_db_path,
         trim_media_db_path=trim_media_db_path,
         trim_activity_db_path=trim_activity_db_path,
         photo_db_path=photo_db_path,
+        scheduler_db_path=scheduler_db_path,
         titles=titles,
         notes=notes,
     )

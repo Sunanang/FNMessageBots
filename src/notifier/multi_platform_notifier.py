@@ -1865,8 +1865,9 @@ class MultiPlatformNotifier:
             lines.append(f"结束时间: {finished_at}")
         if duration:
             lines.append(f"耗时: {duration}")
-        if log_preview and status != "success":
-            lines.append(f"执行日志:\n{log_preview}")
+        if log_preview:
+            log_title = "执行结果" if status == "success" else "执行日志"
+            lines.append(f"{log_title}:\n{log_preview}")
         return "\n".join(lines) if lines else "（无额外详情）"
 
     def _batch_summary_item_lines(self, event_type: str, ed: Dict[str, Any]) -> List[str]:

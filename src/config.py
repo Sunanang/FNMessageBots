@@ -87,7 +87,7 @@ class Config:
     trim_media_db_path: str = ""
     trim_activity_db_path: str = ""
     photo_db_path: str = ""  # 相册 photo.db，空则不轮询相册事件
-    scheduler_db_path: str = ""  # fn-scheduler scheduler.db，空则不轮询任务计划事件
+    scheduler_db_path: str = "/var/apps/fn-scheduler/var/scheduler.db"  # fn-scheduler scheduler.db，空则不轮询任务计划事件
     logger_poll_interval: int = 5  # 秒，轮询间隔
 
     # 轮询汇总模式：开启后同一轮查询到的多条事件合并为一条通知；关闭则逐条推送（易触发渠道限流）

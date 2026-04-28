@@ -211,7 +211,7 @@ class SchedulerDBPoller:
         FROM task_results
         WHERE finished_at IS NOT NULL
           AND status IN ('success', 'failed', 'condition_failed')
-        ORDER BY finished_at DESC, id DESC
+        ORDER BY datetime(finished_at) DESC, id DESC
         LIMIT 1
         """
         try:
@@ -229,13 +229,17 @@ class SchedulerDBPoller:
             return {"last_finished_at": "", "last_id": 0}
 
     def _fetch_rows(self, from_finished_at_ts: float) -> List[Dict[str, Any]]:
-        """查询 finished_at >= from_finished_at_ts 的已完成记录，联表获取任务名。"""
-        # 将时间戳转回 ISO 字符串（数据库存的是 ISO 格式）
+        """查询 finished_at >= from_finished_at_ts 的已完成记录，联表获取任务名。
+
+        使用 datetime() 函数做归一化比较，兼容 fn-scheduler 存储的空格分隔格式
+        ("2026-04-26 10:23:07") 和标准 ISO T 分隔格式，避免直接字符串比较出错。
+        """
         try:
             from_dt = datetime.fromtimestamp(from_finished_at_ts, tz=timezone.utc)
-            from_iso = from_dt.strftime("%Y-%m-%dT%H:%M:%S")
+            # 用空格格式传参，与 fn-scheduler 存储格式一致；datetime() 两侧均可归一化
+            from_str = from_dt.strftime("%Y-%m-%d %H:%M:%S")
         except Exception:
-            from_iso = "1970-01-01T00:00:00"
+            from_str = "1970-01-01 00:00:00"
 
         sql = """
         SELECT
@@ -253,13 +257,13 @@ class SchedulerDBPoller:
         FROM task_results r
         LEFT JOIN tasks t ON t.id = r.task_id
         WHERE r.finished_at IS NOT NULL
-          AND r.finished_at >= ?
+          AND datetime(r.finished_at) >= datetime(?)
           AND r.status IN ('success', 'failed', 'condition_failed')
-        ORDER BY r.finished_at ASC, r.id ASC
+        ORDER BY datetime(r.finished_at) ASC, r.id ASC
         """
         try:
             conn = self._connect()
-            rows = [dict(r) for r in conn.execute(sql, (from_iso,)).fetchall()]
+            rows = [dict(r) for r in conn.execute(sql, (from_str,)).fetchall()]
             conn.close()
             return rows
         except Exception as e:
