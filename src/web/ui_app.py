@@ -159,7 +159,7 @@ def _collect_external_db_access_warnings(raw_cfg: dict, events: list[str]) -> li
     monitor_events = set(events or [])
     warnings: list[str] = []
 
-    backup_events = {"BACKUP_TASK_SUCCESS", "BACKUP_TASK_FAILED"}
+    backup_events = {"BACKUP_TASK_SUCCESS", "BACKUP_TASK_FAILED", "BACKUP_TASK_PARTIAL_SUCCESS"}
     trimmedia_events = {"TRIM_RESOURCE_ADDED", "TRIM_SCRAPE_SUCCESS"}
     trimactivity_events = {"MEDIA_LOGIN_SUCC", "MEDIA_LOGOUT"}
     photo_events = {"PHOTO_SHARE_CREATED", "PHOTO_SHARE_EXPIRED", "PHOTO_DEVICE_REGISTERED", "FACE_RECOGNITION_UPDATED"}

@@ -138,6 +138,7 @@ class MultiPlatformNotifier:
         'POLL_BATCH_SUMMARY': '飞牛NAS-多事件合并通知',
         'BACKUP_TASK_SUCCESS': '✅ 飞牛NAS-备份任务完成',
         'BACKUP_TASK_FAILED': '❌ 飞牛NAS-备份任务失败',
+        'BACKUP_TASK_PARTIAL_SUCCESS': '⚠️ 飞牛NAS-备份任务部分成功',
         'SCHEDULER_TASK_SUCCESS': '✅ 飞牛NAS-任务计划执行成功',
         'SCHEDULER_TASK_FAILED': '❌ 飞牛NAS-任务计划执行失败',
         'SCHEDULER_TASK_CONDITION_FAILED': '⚠️ 飞牛NAS-任务计划条件不满足',
@@ -231,6 +232,7 @@ class MultiPlatformNotifier:
         'POLL_BATCH_SUMMARY': '多事件合并通知',
         'BACKUP_TASK_SUCCESS': '备份任务完成',
         'BACKUP_TASK_FAILED': '备份任务失败',
+        'BACKUP_TASK_PARTIAL_SUCCESS': '备份任务部分成功',
         'SCHEDULER_TASK_SUCCESS': '任务计划执行成功',
         'SCHEDULER_TASK_FAILED': '任务计划执行失败',
         'SCHEDULER_TASK_CONDITION_FAILED': '任务计划条件不满足',
@@ -321,6 +323,7 @@ class MultiPlatformNotifier:
         'POLL_BATCH_SUMMARY': '',
         'BACKUP_TASK_SUCCESS': '备份任务执行完成。',
         'BACKUP_TASK_FAILED': '备份任务执行失败，请检查任务配置与网络状态。',
+        'BACKUP_TASK_PARTIAL_SUCCESS': '备份任务部分完成，部分文件未能成功传输。',
         'SCHEDULER_TASK_SUCCESS': '任务计划执行完成。',
         'SCHEDULER_TASK_FAILED': '任务计划执行失败，请检查脚本与执行日志。',
         'SCHEDULER_TASK_CONDITION_FAILED': '任务计划触发条件不满足，任务未执行。',
@@ -1196,6 +1199,7 @@ class MultiPlatformNotifier:
             "APP_UPDATE_FAILED": "应用更新失败",
             "BACKUP_TASK_SUCCESS": "备份任务完成",
             "BACKUP_TASK_FAILED": "备份任务失败",
+            "BACKUP_TASK_PARTIAL_SUCCESS": "备份任务部分成功",
             "SCHEDULER_TASK_SUCCESS": "任务计划完成",
             "SCHEDULER_TASK_FAILED": "任务计划失败",
             "SCHEDULER_TASK_CONDITION_FAILED": "任务计划条件不满足",
@@ -1294,7 +1298,7 @@ class MultiPlatformNotifier:
                 detail = self._build_disk_spindown_content(event_data)
         elif event_type == 'DISK_IO_ERR':
             detail = self._build_disk_io_err_content(event_data)
-        elif event_type in {'BACKUP_TASK_SUCCESS', 'BACKUP_TASK_FAILED'}:
+        elif event_type in {'BACKUP_TASK_SUCCESS', 'BACKUP_TASK_FAILED', 'BACKUP_TASK_PARTIAL_SUCCESS'}:
             detail = self._build_backup_task_content(event_data)
         elif event_type in {'SCHEDULER_TASK_SUCCESS', 'SCHEDULER_TASK_FAILED', 'SCHEDULER_TASK_CONDITION_FAILED'}:
             detail = self._build_scheduler_task_content(event_data)
@@ -1997,7 +2001,7 @@ class MultiPlatformNotifier:
                 lines.append(f"错误次数: {cnt}")
             return lines or ["磁盘IO错误"]
 
-        if et in ("BACKUP_TASK_SUCCESS", "BACKUP_TASK_FAILED"):
+        if et in ("BACKUP_TASK_SUCCESS", "BACKUP_TASK_FAILED", "BACKUP_TASK_PARTIAL_SUCCESS"):
             backup_lines: List[str] = []
             if ed.get("task_name"):
                 backup_lines.append(f"任务: {ed.get('task_name')}")

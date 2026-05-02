@@ -21,6 +21,7 @@ from monitor.db_log_poller import DBLogPoller
 from monitor.backup_db_poller import (
     BackupDBPoller,
     BACKUP_FAILED_EVENT,
+    BACKUP_PARTIAL_EVENT,
     BACKUP_POLL_EVENTS,
     BACKUP_SUCCESS_EVENT,
 )
@@ -451,7 +452,7 @@ class Application:
                 continue
             # 登录/退出保留 logger 兜底，避免 trimactivity 的 app_name 过滤导致漏报。
             self.log_poller.add_handler(event_type, handler)
-            if self.backup_poller and event_type in (BACKUP_SUCCESS_EVENT, BACKUP_FAILED_EVENT):
+            if self.backup_poller and event_type in (BACKUP_SUCCESS_EVENT, BACKUP_FAILED_EVENT, BACKUP_PARTIAL_EVENT):
                 self.backup_poller.add_handler(event_type, handler)
             if self.media_db_poller and event_type in trim_ev:
                 self.media_db_poller.add_handler(event_type, handler)

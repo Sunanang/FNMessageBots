@@ -17,7 +17,8 @@ from .models import JournalEntry
 
 BACKUP_SUCCESS_EVENT = "BACKUP_TASK_SUCCESS"
 BACKUP_FAILED_EVENT = "BACKUP_TASK_FAILED"
-BACKUP_POLL_EVENTS = frozenset({BACKUP_SUCCESS_EVENT, BACKUP_FAILED_EVENT})
+BACKUP_PARTIAL_EVENT = "BACKUP_TASK_PARTIAL_SUCCESS"
+BACKUP_POLL_EVENTS = frozenset({BACKUP_SUCCESS_EVENT, BACKUP_FAILED_EVENT, BACKUP_PARTIAL_EVENT})
 BACKUP_LOOKBACK_SECONDS = 600
 DEDUP_TTL_SECONDS = 3 * 24 * 3600
 
@@ -222,7 +223,11 @@ class BackupDBPoller:
         if status == 3 and error_code == 0:
             event_type = BACKUP_SUCCESS_EVENT
         elif status == 4:
-            event_type = BACKUP_FAILED_EVENT
+            actual_count = int(row.get("actual_count") or 0)
+            if actual_count > 0:
+                event_type = BACKUP_PARTIAL_EVENT
+            else:
+                event_type = BACKUP_FAILED_EVENT
         else:
             return None
         event_data = {
