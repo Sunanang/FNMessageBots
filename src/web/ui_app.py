@@ -32,7 +32,6 @@ from web.app_paths import GITHUB_ICON_FILE
 from web.app_paths import ICON_FILE
 from web.app_paths import SUPPORT_QR_DIR
 from web.app_paths import SUPPORT_QR_FILENAMES
-from web.app_paths import BARK_ICONS_DIR
 from web.config_store import join_urls as _join_urls
 from web.config_store import load_raw_config as _load_raw_config_from_file
 from web.config_store import save_raw_config as _save_raw_config_to_file
@@ -2221,7 +2220,7 @@ def create_app(on_config_saved=None) -> Flask:
         log_retention_days: document.getElementById("input-log-days").value,
         logger_poll_interval: document.getElementById("input-poll-interval").value,
         title_prefix: (document.getElementById("input-title-prefix").value || "").trim(),
-        bark_icon: document.getElementById("input-bark-fnos-icon").checked ? (window.location.origin + "/assets/icons/fnos-icon.png") : "",
+        bark_icon: document.getElementById("input-bark-fnos-icon").checked ? "https://club.fnnas.com/uc_server/data/avatar/000/00/00/05_avatar_middle.jpg" : "",
         web_password_enabled: document.getElementById("input-web-password-enabled").checked,
         poll_batch_summary_enabled: document.getElementById("input-poll-batch-summary").checked,
         minimal_push_enabled: document.getElementById("input-minimal-push-enabled").checked,
