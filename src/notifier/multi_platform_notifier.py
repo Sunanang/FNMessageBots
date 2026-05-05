@@ -364,6 +364,7 @@ class MultiPlatformNotifier:
                  dingtalk_webhook_url: str = "",
                  feishu_webhook_url: str = "",
                  bark_url: str = "",
+                 bark_icon: str = "",
                  pushplus_params: str = "",
                  magic_push_params: str = "",
                  smtp_params: str = "",
@@ -396,6 +397,7 @@ class MultiPlatformNotifier:
         self.dingtalk_webhook_url = dingtalk_webhook_url
         self.feishu_webhook_url = feishu_webhook_url
         self.bark_url = bark_url
+        self.bark_icon = (bark_icon or "").strip()
         self.pushplus_params = pushplus_params or ""
         self.magic_push_params = magic_push_params or ""
         self.smtp_params = smtp_params or ""
@@ -823,25 +825,31 @@ class MultiPlatformNotifier:
         any_ok = any(r.get("success") for r in results)
         return any_ok, self._channel_result("飞书", results)
 
+    def _bark_key_from_url(self, raw_url: str) -> str:
+        """从 Bark URL 中提取 key（路径最后一段）。"""
+        return raw_url.rstrip('/').rsplit('/', 1)[-1] if '/' in raw_url else raw_url
+
+    def _bark_base_url(self, raw_url: str) -> str:
+        """从 Bark URL 中提取 base URL（scheme + host）。"""
+        parts = urllib.parse.urlsplit(raw_url)
+        return f"{parts.scheme}://{parts.netloc}" if parts.scheme and parts.netloc else "https://api.day.app"
+
     def _send_to_bark(self, message: MultiPlatformMessage) -> tuple:
-        """发送到Bark。返回 (是否有任一成功, 渠道结果 dict)。"""
+        """发送到Bark（POST JSON，避免 URL 编码问题）。"""
         urls = self._iter_urls(self.bark_url)
         if not urls:
             return False, {"channel": "Bark", "success": False, "response": None, "error": "未配置"}
-        encoded_title = urllib.parse.quote(message.title, safe='')
-        encoded_content = urllib.parse.quote(message.content, safe='')
-        encoded_title_and_content = urllib.parse.quote(
-            message.merged_plain_text(blank_line_between=True), safe=""
-        )
         results = []
         for raw_url in urls:
-            if '{title}' in raw_url and '{content}' in raw_url:
-                bark_push_url = raw_url.replace('{title}', encoded_title).replace('{content}', encoded_content)
-            elif '{content}' in raw_url:
-                bark_push_url = raw_url.replace('{content}', encoded_title_and_content)
-            else:
-                bark_push_url = f"{raw_url.rstrip('/')}/{encoded_title}/{encoded_content}"
-            results.append(self.connection_pool.get(bark_push_url))
+            push_url = f"{self._bark_base_url(raw_url)}/push"
+            payload = {
+                "device_key": self._bark_key_from_url(raw_url),
+                "title": message.title,
+                "body": message.content,
+            }
+            if self.bark_icon:
+                payload["icon"] = self.bark_icon
+            results.append(self.connection_pool.post(push_url, payload))
         any_ok = any(r.get("success") for r in results)
         return any_ok, self._channel_result("Bark", results)
 

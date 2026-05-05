@@ -25,4 +25,5 @@ ICON_FILE = BASE_DIR / "assets" / "icons" / "app-icon.png"
 GITHUB_ICON_FILE = BASE_DIR / "assets" / "icons" / "github.svg"
 SUPPORT_QR_DIR = BASE_DIR / "assets" / "icons"
 SUPPORT_QR_FILENAMES = frozenset({"wechat_pay.jpg", "ali_pay.jpg"})
+BARK_ICONS_DIR = BASE_DIR / "data" / "bark-icons"
 

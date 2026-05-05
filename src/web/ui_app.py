@@ -32,6 +32,7 @@ from web.app_paths import GITHUB_ICON_FILE
 from web.app_paths import ICON_FILE
 from web.app_paths import SUPPORT_QR_DIR
 from web.app_paths import SUPPORT_QR_FILENAMES
+from web.app_paths import BARK_ICONS_DIR
 from web.config_store import join_urls as _join_urls
 from web.config_store import load_raw_config as _load_raw_config_from_file
 from web.config_store import save_raw_config as _save_raw_config_to_file
@@ -416,6 +417,7 @@ def create_app(on_config_saved=None) -> Flask:
             "selected_events": monitor_events,
             "channels": channels,
             "title_prefix": _title_prefix_from_dict(raw),
+            "bark_icon": (raw.get("bark_icon") or "").strip(),
             "log_retention_days": int(raw.get("log_retention_days", raw.get("max_log_age", 7))),
             "logger_poll_interval": int(raw.get("logger_poll_interval", 3)),
             "dnd_enabled": _as_bool(raw.get("dnd_enabled", False), False),
@@ -448,6 +450,7 @@ def create_app(on_config_saved=None) -> Flask:
         title_prefix = _title_prefix_from_dict(payload)
         if title_prefix and len(title_prefix) > 20:
             return jsonify({"ok": False, "message": "标题前缀过长（最多 20 个字符）。"}), 400
+        bark_icon = (payload.get("bark_icon") or "").strip()
 
         if dnd_enabled:
             if not dnd_start_time or not dnd_end_time:
@@ -579,6 +582,7 @@ def create_app(on_config_saved=None) -> Flask:
                 "poll_batch_summary_enabled": poll_batch_summary_enabled,
                 "minimal_push_enabled": minimal_push_enabled,
                 "title_prefix": title_prefix,
+                "bark_icon": bark_icon,
             }
         )
 
@@ -1556,6 +1560,13 @@ def create_app(on_config_saved=None) -> Flask:
           </div>
           <div>
             <div class="field-label" style="display: flex; align-items: center; gap: 8px;">
+              <input type="checkbox" id="input-bark-fnos-icon" />
+              <span>Bark 使用飞牛图标</span>
+            </div>
+            <div class="field-helper">开启后 Bark 推送通知将显示飞牛 NAS 图标，而非默认 Bark 图标。</div>
+          </div>
+          <div>
+            <div class="field-label" style="display: flex; align-items: center; gap: 8px;">
               <input type="checkbox" id="input-poll-batch-summary" />
               <span>轮询汇总模式</span>
             </div>
@@ -2127,6 +2138,7 @@ def create_app(on_config_saved=None) -> Flask:
         document.getElementById("input-minimal-push-enabled").checked = !!data.minimal_push_enabled;
         document.getElementById("input-title-prefix").value =
           typeof data.title_prefix === "string" ? data.title_prefix : "飞牛NAS";
+        document.getElementById("input-bark-fnos-icon").checked = !!data.bark_icon;
         const dndEnabled = !!data.dnd_enabled;
         document.getElementById("input-dnd-enabled").checked = dndEnabled;
         document.getElementById("input-dnd-start").value = data.dnd_start_time || "22:00";
@@ -2209,6 +2221,7 @@ def create_app(on_config_saved=None) -> Flask:
         log_retention_days: document.getElementById("input-log-days").value,
         logger_poll_interval: document.getElementById("input-poll-interval").value,
         title_prefix: (document.getElementById("input-title-prefix").value || "").trim(),
+        bark_icon: document.getElementById("input-bark-fnos-icon").checked ? (window.location.origin + "/assets/icons/fnos-icon.png") : "",
         web_password_enabled: document.getElementById("input-web-password-enabled").checked,
         poll_batch_summary_enabled: document.getElementById("input-poll-batch-summary").checked,
         minimal_push_enabled: document.getElementById("input-minimal-push-enabled").checked,
