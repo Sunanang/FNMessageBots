@@ -2220,7 +2220,7 @@ def create_app(on_config_saved=None) -> Flask:
         log_retention_days: document.getElementById("input-log-days").value,
         logger_poll_interval: document.getElementById("input-poll-interval").value,
         title_prefix: (document.getElementById("input-title-prefix").value || "").trim(),
-        bark_icon: document.getElementById("input-bark-fnos-icon").checked ? "https://club.fnnas.com/uc_server/data/avatar/000/00/00/05_avatar_middle.jpg" : "",
+        bark_icon: document.getElementById("input-bark-fnos-icon").checked ? "https://i0.hdslb.com/bfs/face/5fd8761b93b19770990c37c1fc31dbf3a3e4d53d.jpg@128w_128h_1c_1s.webp" : "",
         web_password_enabled: document.getElementById("input-web-password-enabled").checked,
         poll_batch_summary_enabled: document.getElementById("input-poll-batch-summary").checked,
         minimal_push_enabled: document.getElementById("input-minimal-push-enabled").checked,
