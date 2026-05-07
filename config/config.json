@@ -3,6 +3,7 @@
   "dingtalk_webhook_url": "",
   "feishu_webhook_url": "",
   "bark_url": "",
+  "bark_icon": "",
   "magic_push_params": "",
   "smtp_params": "",
   "monitor_events": [

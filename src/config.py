@@ -39,6 +39,7 @@ class Config:
     dingtalk_webhook_url: str = ""  # 钉钉Webhook URL
     feishu_webhook_url: str = ""   # 飞书Webhook URL
     bark_url: str = ""  # Bark推送URL
+    bark_icon: str = ""  # Bark 自定义图标 URL（留空使用默认图标）
     pushplus_params: str = ""  # PushPlus 推送参数（JSON 字符串，多个用 | 分隔）
     magic_push_params: str = ""  # 魔法推送（JSON：base_url、token、可选 title，多个用 | 分隔）
     smtp_params: str = ""  # SMTP 邮件参数（JSON：server、port、username、password、from、to；多个用 | 分隔）
@@ -176,6 +177,8 @@ class Config:
             self.feishu_webhook_url = data["feishu_webhook_url"]
         if "bark_url" in data and isinstance(data["bark_url"], str):
             self.bark_url = data["bark_url"]
+        if "bark_icon" in data and isinstance(data["bark_icon"], str):
+            self.bark_icon = data["bark_icon"]
         if "pushplus_params" in data and isinstance(data["pushplus_params"], str):
             self.pushplus_params = data["pushplus_params"]
         if "magic_push_params" in data and isinstance(data["magic_push_params"], str):
@@ -248,6 +251,9 @@ class Config:
         if bark_url := os.getenv('BARK_URL'):
             self.bark_url = bark_url
             self._env_set_keys.add('bark_url')
+        if bark_icon := os.getenv('BARK_ICON'):
+            self.bark_icon = bark_icon
+            self._env_set_keys.add('bark_icon')
         if minimal_push_enabled := os.getenv('MINIMAL_PUSH_ENABLED'):
             self.minimal_push_enabled = minimal_push_enabled.lower() in ['1', 'true', 'yes', 'on']
             self._env_set_keys.add('minimal_push_enabled')
