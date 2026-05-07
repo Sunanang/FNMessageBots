@@ -1,5 +1,5 @@
 {
-  "wechat_webhook_url": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=3b355a21-c5b9-47cb-86dd-7d7032871935",
+  "wechat_webhook_url": "",
   "dingtalk_webhook_url": "",
   "feishu_webhook_url": "",
   "bark_url": "",
@@ -71,7 +71,5 @@
   "user_display_map": {},
   "web_password_enabled": true,
   "title_prefix": "飞牛NAS",
-  "web_password_salt": "818f83cd211bf5376ef850e89d9d01c8",
-  "web_password_hash": "bdc140332df2c76cdddca0d0ab2dfae02d3435e51083dc6559732d5429725337",
   "minimal_push_enabled": false
 }
