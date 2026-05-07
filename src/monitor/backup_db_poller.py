@@ -17,7 +17,8 @@ from .models import JournalEntry
 
 BACKUP_SUCCESS_EVENT = "BACKUP_TASK_SUCCESS"
 BACKUP_FAILED_EVENT = "BACKUP_TASK_FAILED"
-BACKUP_POLL_EVENTS = frozenset({BACKUP_SUCCESS_EVENT, BACKUP_FAILED_EVENT})
+BACKUP_PARTIAL_EVENT = "BACKUP_TASK_PARTIAL_SUCCESS"
+BACKUP_POLL_EVENTS = frozenset({BACKUP_SUCCESS_EVENT, BACKUP_FAILED_EVENT, BACKUP_PARTIAL_EVENT})
 BACKUP_LOOKBACK_SECONDS = 600
 DEDUP_TTL_SECONDS = 3 * 24 * 3600
 
@@ -216,10 +217,19 @@ class BackupDBPoller:
             self.logger.error("查询备份数据库失败: %s", e)
             return []
 
-    def _to_event(self, row: Dict[str, Any]) -> Dict[str, Any]:
+    def _to_event(self, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         status = int(row.get("status") or 0)
         error_code = int(row.get("error_code") or 0)
-        event_type = BACKUP_SUCCESS_EVENT if (status == 3 and error_code == 0) else BACKUP_FAILED_EVENT
+        if status == 3 and error_code == 0:
+            event_type = BACKUP_SUCCESS_EVENT
+        elif status == 4:
+            actual_count = int(row.get("actual_count") or 0)
+            if actual_count > 0:
+                event_type = BACKUP_PARTIAL_EVENT
+            else:
+                event_type = BACKUP_FAILED_EVENT
+        else:
+            return None
         event_data = {
             "operation_id": row.get("id"),
             "uid": row.get("uid"),
@@ -293,6 +303,8 @@ class BackupDBPoller:
                 continue
 
             ev = self._to_event(row)
+            if not ev:
+                continue
             et = ev["event_type"]
             if self.monitor_events and et not in self.monitor_events:
                 continue

@@ -68,6 +68,7 @@ class UnifiedNotifier:
     DND_LIGHT_BUFFER_EVENT_TYPES: Set[str] = {
         "BACKUP_TASK_SUCCESS",
         "BACKUP_TASK_FAILED",
+        "BACKUP_TASK_PARTIAL_SUCCESS",
         "TRIM_RESOURCE_ADDED",
         "TRIM_SCRAPE_SUCCESS",
         "PHOTO_SHARE_CREATED",

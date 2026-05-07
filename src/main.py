@@ -21,12 +21,20 @@ from monitor.db_log_poller import DBLogPoller
 from monitor.backup_db_poller import (
     BackupDBPoller,
     BACKUP_FAILED_EVENT,
+    BACKUP_PARTIAL_EVENT,
     BACKUP_POLL_EVENTS,
     BACKUP_SUCCESS_EVENT,
 )
 from monitor.media_db_poller import MediaDBPoller
 from monitor.trim_activity_poller import TrimActivityPoller
 from monitor.photo_db_poller import PHOTO_POLL_EVENTS, PhotoDBPoller
+from monitor.scheduler_db_poller import (
+    SchedulerDBPoller,
+    SCHEDULER_POLL_EVENTS,
+    SCHEDULER_TASK_SUCCESS_EVENT,
+    SCHEDULER_TASK_FAILED_EVENT,
+    SCHEDULER_TASK_CONDITION_FAILED_EVENT,
+)
 from monitor.event_processor import EventProcessor
 from notifier.unified_notifier import UnifiedNotifier
 from web.ui_app import start_ui_server_in_background
@@ -49,6 +57,7 @@ class Application:
         self.media_db_poller = None
         self.trim_activity_poller = None
         self.photo_db_poller = None
+        self.scheduler_db_poller = None
         self.logger = None
         self.running = False
         self.notification_health_thread = None
@@ -169,6 +178,8 @@ class Application:
             self._probe_db_readable("影视库 trimactivity.db", getattr(self.config, "trim_activity_db_path", "") or "")
         if me & PHOTO_POLL_EVENTS:
             self._probe_db_readable("相册库 photo.db", getattr(self.config, "photo_db_path", "") or "")
+        if me & SCHEDULER_POLL_EVENTS:
+            self._probe_db_readable("任务计划库 scheduler.db", getattr(self.config, "scheduler_db_path", "") or "")
     
     def initialize(self) -> bool:
         """初始化应用组件"""
@@ -281,6 +292,13 @@ class Application:
                 )
             else:
                 print("未勾选相册相关事件，跳过 photo.db 轮询")
+            if self.scheduler_db_poller:
+                print(
+                    f"任务计划 scheduler.db 轮询已启用（间隔 {self.config.logger_poll_interval} 秒，"
+                    f"{getattr(self.config, 'scheduler_db_path', '') or '(路径未配置)'}）"
+                )
+            else:
+                print("未勾选任务计划事件，跳过 scheduler.db 轮询")
 
 
             print("开始注册事件处理器...")
@@ -387,6 +405,27 @@ class Application:
                 self.photo_db_poller.stop()
                 self.photo_db_poller = None
 
+        scheduler_path = getattr(self.config, "scheduler_db_path", "") or ""
+        scheduler_ok = self._probe_db_readable("任务计划库 scheduler.db", scheduler_path) if (me & SCHEDULER_POLL_EVENTS) else False
+        if (me & SCHEDULER_POLL_EVENTS) and scheduler_ok:
+            if self.scheduler_db_poller is None:
+                self.scheduler_db_poller = SchedulerDBPoller(
+                    db_path=scheduler_path,
+                    cursor_dir=cdir,
+                    poll_interval=interval,
+                    monitor_events=self.config.monitor_events,
+                )
+            else:
+                self.scheduler_db_poller.update_config(
+                    monitor_events=self.config.monitor_events,
+                    poll_interval=interval,
+                    db_path=scheduler_path,
+                )
+        else:
+            if self.scheduler_db_poller is not None:
+                self.scheduler_db_poller.stop()
+                self.scheduler_db_poller = None
+
     def _register_db_event_handlers(self) -> None:
         """为 logger / 备份 / 影视库 / 相册 SQLite 轮询器注册 monitor_events 中的处理器。"""
         if not self.log_poller or not self.event_processor or not self.config:
@@ -400,9 +439,12 @@ class Application:
             self.trim_activity_poller.clear_handlers()
         if self.photo_db_poller:
             self.photo_db_poller.clear_handlers()
+        if self.scheduler_db_poller:
+            self.scheduler_db_poller.clear_handlers()
         trim_ev = {"TRIM_RESOURCE_ADDED", "TRIM_SCRAPE_SUCCESS"}
         act_ev = {"MEDIA_LOGIN_SUCC", "MEDIA_LOGOUT"}
         photo_ev = set(PHOTO_POLL_EVENTS)
+        scheduler_ev = set(SCHEDULER_POLL_EVENTS)
         for event_type in self.config.monitor_events:
             handler = self.event_processor.get_handler(event_type)
             if not handler:
@@ -410,7 +452,7 @@ class Application:
                 continue
             # 登录/退出保留 logger 兜底，避免 trimactivity 的 app_name 过滤导致漏报。
             self.log_poller.add_handler(event_type, handler)
-            if self.backup_poller and event_type in (BACKUP_SUCCESS_EVENT, BACKUP_FAILED_EVENT):
+            if self.backup_poller and event_type in (BACKUP_SUCCESS_EVENT, BACKUP_FAILED_EVENT, BACKUP_PARTIAL_EVENT):
                 self.backup_poller.add_handler(event_type, handler)
             if self.media_db_poller and event_type in trim_ev:
                 self.media_db_poller.add_handler(event_type, handler)
@@ -418,6 +460,8 @@ class Application:
                 self.trim_activity_poller.add_handler(event_type, handler)
             if self.photo_db_poller and event_type in photo_ev:
                 self.photo_db_poller.add_handler(event_type, handler)
+            if self.scheduler_db_poller and event_type in scheduler_ev:
+                self.scheduler_db_poller.add_handler(event_type, handler)
             print(f"✓ 注册事件处理器: {event_type}")
 
     def reload_config(self) -> None:
@@ -465,6 +509,8 @@ class Application:
                 self.trim_activity_poller.start()
             if self.photo_db_poller:
                 self.photo_db_poller.start()
+            if self.scheduler_db_poller:
+                self.scheduler_db_poller.start()
             if self.logger:
                 self.logger.info("热加载完成：监控已启动")
         elif self.notifier is not None:
@@ -492,6 +538,8 @@ class Application:
                     self.trim_activity_poller.start()
                 if self.photo_db_poller:
                     self.photo_db_poller.start()
+                if self.scheduler_db_poller:
+                    self.scheduler_db_poller.start()
             if self.logger:
                 self.logger.info("热加载完成：监控配置已更新")
     
@@ -560,6 +608,11 @@ class Application:
                     self.photo_db_poller.start()
                 else:
                     print("未勾选相册相关事件，跳过 photo.db 轮询")
+                if self.scheduler_db_poller:
+                    print("启动任务计划 scheduler.db 轮询器...")
+                    self.scheduler_db_poller.start()
+                else:
+                    print("未勾选任务计划事件，跳过 scheduler.db 轮询")
             
             # 设置信号处理
             signal.signal(signal.SIGINT, self._signal_handler)
@@ -714,6 +767,8 @@ class Application:
             self.trim_activity_poller.stop()
         if self.photo_db_poller:
             self.photo_db_poller.stop()
+        if self.scheduler_db_poller:
+            self.scheduler_db_poller.stop()
 
         # 停止运行日志清理线程
         cleanup_flag = getattr(self.logger, 'cleanup_stop_flag', None) if self.logger else None

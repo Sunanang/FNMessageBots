@@ -62,7 +62,7 @@ class Config:
         "SSH_INVALID_USER", "SSH_AUTH_FAILED",
         "SSH_LOGIN_SUCCESS", "SSH_DISCONNECTED",
         "DISK_IO_ERR",
-        "BACKUP_TASK_SUCCESS", "BACKUP_TASK_FAILED",
+        "BACKUP_TASK_SUCCESS", "BACKUP_TASK_FAILED", "BACKUP_TASK_PARTIAL_SUCCESS",
     ])
     
     # 日志配置
@@ -87,6 +87,7 @@ class Config:
     trim_media_db_path: str = ""
     trim_activity_db_path: str = ""
     photo_db_path: str = ""  # 相册 photo.db，空则不轮询相册事件
+    scheduler_db_path: str = "/var/apps/fn-scheduler/var/scheduler.db"  # fn-scheduler scheduler.db，空则不轮询任务计划事件
     logger_poll_interval: int = 5  # 秒，轮询间隔
 
     # 轮询汇总模式：开启后同一轮查询到的多条事件合并为一条通知；关闭则逐条推送（易触发渠道限流）
@@ -219,6 +220,8 @@ class Config:
             self.trim_activity_db_path = data["trim_activity_db_path"].strip()
         if "photo_db_path" in data and isinstance(data["photo_db_path"], str):
             self.photo_db_path = data["photo_db_path"].strip()
+        if "scheduler_db_path" in data and isinstance(data["scheduler_db_path"], str):
+            self.scheduler_db_path = data["scheduler_db_path"].strip()
         return True
 
     def _load_from_env(self):
@@ -318,6 +321,9 @@ class Config:
         if photo_p := os.getenv('PHOTO_DB_PATH'):
             self.photo_db_path = photo_p.strip()
             self._env_set_keys.add('photo_db_path')
+        if scheduler_p := os.getenv('SCHEDULER_DB_PATH'):
+            self.scheduler_db_path = scheduler_p.strip()
+            self._env_set_keys.add('scheduler_db_path')
 
         # 高级配置
         if max_age := os.getenv('MAX_LOG_AGE'):
@@ -439,7 +445,8 @@ class Config:
                         "DLNA_ENABLED", "DLNA_DISABLED", "FTP_ENABLED", "FTP_DISABLED", "NFS_ENABLED", "NFS_DISABLED",
                         "FW_ENABLE", "FW_DISABLE", "SECURITY_PORTCHANGED",
                         "SHUTDOWN_VM", "STATUS_RUNNING_VM", "STATUS_REBOOTED_VM", "DESTROY_VM",
-                        "BACKUP_TASK_SUCCESS", "BACKUP_TASK_FAILED",
+                        "BACKUP_TASK_SUCCESS", "BACKUP_TASK_FAILED", "BACKUP_TASK_PARTIAL_SUCCESS",
+                        "SCHEDULER_TASK_SUCCESS", "SCHEDULER_TASK_FAILED", "SCHEDULER_TASK_CONDITION_FAILED",
                         "MEDIA_LOGIN_SUCC", "MEDIA_LOGOUT", "MEDIA_USER_CREATED",
                         "TRIM_RESOURCE_ADDED", "TRIM_SCRAPE_SUCCESS",
                         "PHOTO_SHARE_CREATED", "PHOTO_SHARE_EXPIRED", "PHOTO_DEVICE_REGISTERED",

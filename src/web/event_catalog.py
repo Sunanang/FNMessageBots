@@ -39,7 +39,10 @@ EVENT_CATEGORIES = [
         "STATUS_RUNNING_VM", "SHUTDOWN_VM", "DESTROY_VM",
     ]),
     ("vm_backup", "备份任务", [
-        "BACKUP_TASK_SUCCESS", "BACKUP_TASK_FAILED",
+        "BACKUP_TASK_SUCCESS", "BACKUP_TASK_FAILED", "BACKUP_TASK_PARTIAL_SUCCESS",
+    ]),
+    ("scheduler", "任务计划", [
+        "SCHEDULER_TASK_SUCCESS", "SCHEDULER_TASK_FAILED", "SCHEDULER_TASK_CONDITION_FAILED",
     ]),
     ("vm_media", "影视库", [
         "MEDIA_LOGIN_SUCC", "MEDIA_LOGOUT", "MEDIA_USER_CREATED",
@@ -100,7 +103,8 @@ VALID_EVENT_IDS = frozenset({
     "DLNA_ENABLED", "DLNA_DISABLED", "FTP_ENABLED", "FTP_DISABLED", "NFS_ENABLED", "NFS_DISABLED",
     "FW_ENABLE", "FW_DISABLE", "SECURITY_PORTCHANGED",
     "SHUTDOWN_VM", "STATUS_RUNNING_VM", "STATUS_REBOOTED_VM", "DESTROY_VM",
-    "BACKUP_TASK_SUCCESS", "BACKUP_TASK_FAILED",
+    "BACKUP_TASK_SUCCESS", "BACKUP_TASK_FAILED", "BACKUP_TASK_PARTIAL_SUCCESS",
+    "SCHEDULER_TASK_SUCCESS", "SCHEDULER_TASK_FAILED", "SCHEDULER_TASK_CONDITION_FAILED",
     "MEDIA_LOGIN_SUCC", "MEDIA_LOGOUT", "MEDIA_USER_CREATED",
     "TRIM_RESOURCE_ADDED", "TRIM_SCRAPE_SUCCESS",
     "PHOTO_SHARE_CREATED", "PHOTO_SHARE_EXPIRED", "PHOTO_DEVICE_REGISTERED",
@@ -198,10 +202,15 @@ def build_events_for_ui(
     trim_media_db_path: str,
     trim_activity_db_path: str,
     photo_db_path: str,
-    titles: Dict[str, str],
-    notes: Dict[str, str],
+    scheduler_db_path: str = "",
+    titles: Dict[str, str] = None,
+    notes: Dict[str, str] = None,
 ) -> Tuple[List[Dict[str, Any]], set, List[str]]:
     """构建配置页事件分类与可选事件集合。"""
+    if titles is None:
+        titles = {}
+    if notes is None:
+        notes = {}
     discovered_vm_event_ids = discover_vm_event_ids(logger_db_path)
     if not discovered_vm_event_ids:
         discovered_vm_event_ids = list(VM_EVENT_PREFERRED_ORDER)
@@ -211,10 +220,11 @@ def build_events_for_ui(
     trim_media_ok = _is_db_readable(trim_media_db_path)
     trim_activity_ok = _is_db_readable(trim_activity_db_path)
     photo_ok = _is_db_readable(photo_db_path)
+    scheduler_ok = _is_db_readable(scheduler_db_path)
 
     unreadable_event_hints: Dict[str, str] = {}
     if not backup_ok:
-        for eid in {"BACKUP_TASK_SUCCESS", "BACKUP_TASK_FAILED"}:
+        for eid in {"BACKUP_TASK_SUCCESS", "BACKUP_TASK_FAILED", "BACKUP_TASK_PARTIAL_SUCCESS"}:
             unreadable_event_hints[eid] = "当前备份库不可访问（通常是路径或权限问题），保存后请按页面告警修复。"
     if not trim_media_ok:
         for eid in {"TRIM_RESOURCE_ADDED", "TRIM_SCRAPE_SUCCESS"}:
@@ -228,6 +238,10 @@ def build_events_for_ui(
             "PHOTO_DEVICE_REGISTERED", "FACE_RECOGNITION_UPDATED",
         }:
             unreadable_event_hints[eid] = "当前 photo.db 不可访问（通常是路径或权限问题），保存后请按页面告警修复。"
+    if not scheduler_ok:
+        for eid in {"SCHEDULER_TASK_SUCCESS", "SCHEDULER_TASK_FAILED", "SCHEDULER_TASK_CONDITION_FAILED"}:
+            hint = "当前 scheduler.db 不可访问，请确认 Docker 已挂载 /var/apps/fn-scheduler/var，且文件 /var/apps/fn-scheduler/var/scheduler.db 存在并可读。"
+            unreadable_event_hints[eid] = hint
 
     valid_event_ids = set(VALID_EVENT_IDS) | set(discovered_vm_event_ids)
 
