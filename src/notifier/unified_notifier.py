@@ -17,6 +17,7 @@ from typing import Dict, Any, List, Optional, Set, Tuple
 from zoneinfo import ZoneInfo
 
 from config import TITLE_PREFIX_DEFAULT
+from utils.logtime_display import get_logtime_display_offset_seconds
 from .multi_platform_notifier import MultiPlatformNotifier
 from monitor.db_log_poller import DB_EVENT_ID_TO_PROJECT
 
@@ -286,7 +287,7 @@ class UnifiedNotifier:
         db_path = getattr(self.config, "logger_db_path", "") or ""
         if not db_path or not os.path.exists(db_path):
             return {}
-        offset = int(os.environ.get("LOGTIME_DISPLAY_OFFSET_SECONDS", "28800"))
+        offset = get_logtime_display_offset_seconds()
         start_ts = int(start_dt.timestamp()) - offset
         end_ts = int(end_dt.timestamp()) - offset
         monitor_set = set(getattr(self.config, "monitor_events", []) or [])

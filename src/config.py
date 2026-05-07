@@ -77,10 +77,10 @@ class Config:
     http_timeout: int = 10
     dedup_window: int = 300
     
-    # 系统路径配置
+    # 系统路径配置（默认空：请在 config.json 或环境变量 LOGGER_DB_PATH / BACKUP_DB_PATH 等中配置）
     cursor_dir: str = "./data/cursor"  # 数据库轮询游标等
-    logger_db_path: str = "/usr/trim/var/eventlogger_service/logger_data.db3"
-    backup_db_path: str = "/usr/trim/var/backup_service/basic_backup.db3"
+    logger_db_path: str = ""
+    backup_db_path: str = ""
     # 影视库：logger 中按 serviceId/parameter 匹配；trimmedia / trimactivity 路径为空则不启用对应轮询
     media_lib_logger_enabled: bool = False
     media_lib_service_patterns: List[str] = field(default_factory=lambda: ["mediadb", "trimmedia"])
@@ -88,7 +88,7 @@ class Config:
     trim_media_db_path: str = ""
     trim_activity_db_path: str = ""
     photo_db_path: str = ""  # 相册 photo.db，空则不轮询相册事件
-    scheduler_db_path: str = "/var/apps/fn-scheduler/var/scheduler.db"  # fn-scheduler scheduler.db，空则不轮询任务计划事件
+    scheduler_db_path: str = ""  # fn-scheduler scheduler.db，空则不轮询任务计划事件
     logger_poll_interval: int = 5  # 秒，轮询间隔
 
     # 轮询汇总模式：开启后同一轮查询到的多条事件合并为一条通知；关闭则逐条推送（易触发渠道限流）
@@ -167,41 +167,45 @@ class Config:
                 data = json.load(f)
         except Exception:
             return False
-        if "monitor_events" in data and isinstance(data["monitor_events"], list):
+
+        def env_skip(field: str) -> bool:
+            return field in self._env_set_keys
+
+        if not env_skip("monitor_events") and "monitor_events" in data and isinstance(data["monitor_events"], list):
             self.monitor_events = data["monitor_events"]
-        if "wechat_webhook_url" in data and isinstance(data["wechat_webhook_url"], str):
+        if not env_skip("wechat_webhook_url") and "wechat_webhook_url" in data and isinstance(data["wechat_webhook_url"], str):
             self.wechat_webhook_url = data["wechat_webhook_url"]
-        if "dingtalk_webhook_url" in data and isinstance(data["dingtalk_webhook_url"], str):
+        if not env_skip("dingtalk_webhook_url") and "dingtalk_webhook_url" in data and isinstance(data["dingtalk_webhook_url"], str):
             self.dingtalk_webhook_url = data["dingtalk_webhook_url"]
-        if "feishu_webhook_url" in data and isinstance(data["feishu_webhook_url"], str):
+        if not env_skip("feishu_webhook_url") and "feishu_webhook_url" in data and isinstance(data["feishu_webhook_url"], str):
             self.feishu_webhook_url = data["feishu_webhook_url"]
-        if "bark_url" in data and isinstance(data["bark_url"], str):
+        if not env_skip("bark_url") and "bark_url" in data and isinstance(data["bark_url"], str):
             self.bark_url = data["bark_url"]
-        if "bark_icon" in data and isinstance(data["bark_icon"], str):
+        if not env_skip("bark_icon") and "bark_icon" in data and isinstance(data["bark_icon"], str):
             self.bark_icon = data["bark_icon"]
+        if not env_skip("minimal_push_enabled") and "minimal_push_enabled" in data:
+            self.minimal_push_enabled = _as_bool(data["minimal_push_enabled"], False)
+        if not env_skip("smtp_params") and "smtp_params" in data and isinstance(data["smtp_params"], str):
+            self.smtp_params = data["smtp_params"]
         if "pushplus_params" in data and isinstance(data["pushplus_params"], str):
             self.pushplus_params = data["pushplus_params"]
         if "magic_push_params" in data and isinstance(data["magic_push_params"], str):
             self.magic_push_params = data["magic_push_params"]
-        if "smtp_params" in data and isinstance(data["smtp_params"], str):
-            self.smtp_params = data["smtp_params"]
         if "title_prefix" in data and isinstance(data["title_prefix"], str):
             self.title_prefix = (data["title_prefix"] or "").strip()
-        if "minimal_push_enabled" in data:
-            self.minimal_push_enabled = _as_bool(data["minimal_push_enabled"], False)
-        if "log_retention_days" in data and data["log_retention_days"] is not None:
+        if not env_skip("log_retention_days") and "log_retention_days" in data and data["log_retention_days"] is not None:
             try:
                 self.log_retention_days = int(data["log_retention_days"])
             except (TypeError, ValueError):
                 pass
-        if "logger_poll_interval" in data and data["logger_poll_interval"] is not None:
+        if not env_skip("logger_poll_interval") and "logger_poll_interval" in data and data["logger_poll_interval"] is not None:
             try:
                 self.logger_poll_interval = int(data["logger_poll_interval"])
             except (TypeError, ValueError):
                 pass
-        if "logger_db_path" in data and isinstance(data["logger_db_path"], str):
+        if not env_skip("logger_db_path") and "logger_db_path" in data and isinstance(data["logger_db_path"], str):
             self.logger_db_path = data["logger_db_path"].strip()
-        if "backup_db_path" in data and isinstance(data["backup_db_path"], str):
+        if not env_skip("backup_db_path") and "backup_db_path" in data and isinstance(data["backup_db_path"], str):
             self.backup_db_path = data["backup_db_path"].strip()
         if "dnd_enabled" in data:
             self.dnd_enabled = _as_bool(data["dnd_enabled"], False)
@@ -211,19 +215,19 @@ class Config:
             self.dnd_end_time = data["dnd_end_time"].strip()
         if "poll_batch_summary_enabled" in data:
             self.poll_batch_summary_enabled = _as_bool(data["poll_batch_summary_enabled"], False)
-        if "media_lib_logger_enabled" in data:
+        if not env_skip("media_lib_logger_enabled") and "media_lib_logger_enabled" in data:
             self.media_lib_logger_enabled = _as_bool(data["media_lib_logger_enabled"], False)
-        if "media_lib_service_patterns" in data and isinstance(data["media_lib_service_patterns"], list):
+        if not env_skip("media_lib_service_patterns") and "media_lib_service_patterns" in data and isinstance(data["media_lib_service_patterns"], list):
             self.media_lib_service_patterns = [str(x).strip() for x in data["media_lib_service_patterns"] if str(x).strip()]
-        if "media_lib_app_name_patterns" in data and isinstance(data["media_lib_app_name_patterns"], list):
+        if not env_skip("media_lib_app_name_patterns") and "media_lib_app_name_patterns" in data and isinstance(data["media_lib_app_name_patterns"], list):
             self.media_lib_app_name_patterns = [str(x).strip() for x in data["media_lib_app_name_patterns"] if str(x).strip()]
-        if "trim_media_db_path" in data and isinstance(data["trim_media_db_path"], str):
+        if not env_skip("trim_media_db_path") and "trim_media_db_path" in data and isinstance(data["trim_media_db_path"], str):
             self.trim_media_db_path = data["trim_media_db_path"].strip()
-        if "trim_activity_db_path" in data and isinstance(data["trim_activity_db_path"], str):
+        if not env_skip("trim_activity_db_path") and "trim_activity_db_path" in data and isinstance(data["trim_activity_db_path"], str):
             self.trim_activity_db_path = data["trim_activity_db_path"].strip()
-        if "photo_db_path" in data and isinstance(data["photo_db_path"], str):
+        if not env_skip("photo_db_path") and "photo_db_path" in data and isinstance(data["photo_db_path"], str):
             self.photo_db_path = data["photo_db_path"].strip()
-        if "scheduler_db_path" in data and isinstance(data["scheduler_db_path"], str):
+        if not env_skip("scheduler_db_path") and "scheduler_db_path" in data and isinstance(data["scheduler_db_path"], str):
             self.scheduler_db_path = data["scheduler_db_path"].strip()
         return True
 

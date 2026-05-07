@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  {% if favicon_url %}
+  <link rel="icon" href="{{ favicon_url }}" />
+  {% endif %}
+  <title>支持作者 - FnMessageBot</title>
+  <script>
+    (function() {
+      var mode = localStorage.getItem("fnmb_theme");
+      var resolved = (mode === "dark") ? "dark" : "light";
+      document.documentElement.setAttribute("data-theme", resolved);
+    })();
+  </script>
+  <style>
+    :root {
+      color-scheme: light;
+      --support-bg: #eef3ff;
+      --support-bg-accent: #e0e7ff;
+      --support-card: #ffffff;
+      --support-panel: #f9fafb;
+      --support-panel-border: #e5e7eb;
+      --support-top-btn-bg: rgba(255, 255, 255, 0.96);
+      --support-text: #1f2933;
+      --support-muted: #6b7280;
+      --support-faint: #9ca3af;
+      --support-accent: #ea580c;
+      --support-accent-soft: #fb923c;
+      --support-border: rgba(148, 163, 184, 0.35);
+      --support-shadow: 0 14px 36px rgba(15, 23, 42, 0.08);
+      --support-shadow-card: 0 8px 28px rgba(15, 23, 42, 0.06);
+      --ali-blue: #1677ff;
+      --wx-green: #07c160;
+    }
+    html[data-theme="dark"] {
+      color-scheme: dark;
+      --support-bg: #111827;
+      --support-bg-accent: #1f2937;
+      --support-card: rgba(17, 24, 39, 0.92);
+      --support-panel: rgba(17, 24, 39, 0.92);
+      --support-panel-border: rgba(75, 85, 99, 0.55);
+      --support-top-btn-bg: rgba(17, 24, 39, 0.92);
+      --support-text: #f3f4f6;
+      --support-muted: #9ca3af;
+      --support-faint: #6b7280;
+      --support-accent: #fb923c;
+      --support-accent-soft: #fdba74;
+      --support-border: rgba(75, 85, 99, 0.55);
+      --support-shadow: 0 18px 40px rgba(0, 0, 0, 0.35);
+      --support-shadow-card: 0 12px 32px rgba(0, 0, 0, 0.25);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", "PingFang SC", sans-serif;
+      background: var(--support-bg);
+      color: var(--support-text);
+    }
+    .page {
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 32px 16px;
+    }
+    .card {
+      width: 100%;
+      max-width: 920px;
+      background: var(--support-card);
+      border-radius: 16px;
+      box-shadow: 0 18px 40px rgba(15,23,42,0.18);
+      border: 1px solid var(--support-border);
+      backdrop-filter: blur(10px);
+    }
+    html[data-theme="dark"] .card {
+      background: rgba(17,24,39,0.9);
+      border-color: rgba(75,85,99,0.55);
+      box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
+    }
+    .support-back-bar {
+      display: flex;
+      justify-content: flex-start;
+      align-items: center;
+      padding: 24px 24px 0;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+    .support-wrap {
+      max-width: 760px;
+      margin: 0 auto;
+      padding: 20px 24px 36px;
+    }
+    a.btn {
+      text-decoration: none;
+    }
+    .btn {
+      min-width: 96px;
+      border-radius: 999px;
+      padding: 8px 20px;
+      border: none;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      transition: background-color 0.15s, box-shadow 0.15s, transform 0.05s;
+      font-family: inherit;
+    }
+    .btn-ghost {
+      background: #fff;
+      color: #111827;
+      border: 1px solid #d1d5db;
+    }
+    .btn-ghost:hover {
+      background: #f3f4f6;
+    }
+    html[data-theme="dark"] .btn-ghost {
+      background: #111827;
+      color: #e5e7eb;
+      border-color: #4b5563;
+    }
+    html[data-theme="dark"] .btn-ghost:hover {
+      background: #1f2937;
+    }
+    .hero {
+      text-align: center;
+      margin-bottom: 28px;
+    }
+    .hero h1 {
+      font-size: clamp(1.65rem, 4.5vw, 2rem);
+      font-weight: 700;
+      margin: 0 0 12px;
+      letter-spacing: 0.02em;
+      color: var(--support-accent);
+    }
+    .hero p {
+      margin: 0 auto;
+      max-width: 34em;
+      font-size: 14px;
+      line-height: 1.65;
+      color: var(--support-muted);
+    }
+    .sheet {
+      background: var(--support-panel);
+      border-radius: 16px;
+      border: 1px solid var(--support-panel-border);
+      box-shadow: var(--support-shadow);
+      padding: 22px 22px 20px;
+      margin-bottom: 28px;
+    }
+    .sheet h2 {
+      font-size: 16px;
+      font-weight: 650;
+      margin: 0 0 14px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--support-text);
+    }
+    .sheet h2 .emoji {
+      font-size: 18px;
+      line-height: 1;
+    }
+    .sheet p {
+      margin: 0;
+      font-size: 14px;
+      line-height: 1.7;
+      color: var(--support-muted);
+    }
+    .pay-section-title {
+      text-align: center;
+      font-size: 15px;
+      font-weight: 650;
+      margin: 0 0 18px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      color: var(--support-text);
+    }
+    .pay-section-title .emoji { font-size: 17px; }
+    .pay-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+    }
+    .pay-grid.single {
+      grid-template-columns: minmax(0, 280px);
+      justify-content: center;
+    }
+    .pay-card {
+      background: var(--support-panel);
+      border-radius: 14px;
+      border: 1px solid var(--support-panel-border);
+      box-shadow: var(--support-shadow-card);
+      padding: 18px 16px 16px;
+      text-align: center;
+    }
+    .pay-card-head {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      margin-bottom: 14px;
+      font-size: 15px;
+      font-weight: 600;
+    }
+    .pay-card--ali .pay-card-head { color: var(--ali-blue); }
+    .pay-card--wx .pay-card-head { color: var(--wx-green); }
+    .pay-badge {
+      width: 28px;
+      height: 28px;
+      border-radius: 8px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      font-weight: 700;
+      color: #fff;
+    }
+    .pay-badge--ali { background: var(--ali-blue); }
+    .pay-badge--wx { background: var(--wx-green); }
+    .qr-frame {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0 auto 12px;
+      max-width: 240px;
+    }
+    .pay-card--ali .qr-frame {
+      padding: 10px;
+      background: #0f172a;
+      border-radius: 12px;
+    }
+    html[data-theme="dark"] .pay-card--ali .qr-frame {
+      background: #030712;
+    }
+    .pay-card--wx .qr-frame {
+      padding: 10px;
+      background: #ffffff;
+      border-radius: 12px;
+      border: 2px solid rgba(251, 191, 36, 0.65);
+      box-shadow: inset 0 0 0 1px rgba(251, 191, 36, 0.2);
+    }
+    html[data-theme="dark"] .pay-card--wx .qr-frame {
+      background: #0f172a;
+    }
+    .qr-frame img {
+      display: block;
+      width: 100%;
+      height: auto;
+      border-radius: 8px;
+    }
+    .pay-card--ali .qr-frame img {
+      border-radius: 6px;
+    }
+    .pay-caption {
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--support-faint);
+      margin: 0;
+    }
+    .no-qr {
+      text-align: center;
+      font-size: 13px;
+      line-height: 1.65;
+      color: var(--support-muted);
+      padding: 8px 4px 0;
+    }
+    .no-qr code {
+      font-size: 12px;
+      padding: 2px 6px;
+      border-radius: 6px;
+      background: #f3f4f6;
+    }
+    html[data-theme="dark"] .no-qr code {
+      background: var(--support-bg-accent);
+    }
+    .page-footer {
+      text-align: center;
+      margin-top: 32px;
+      padding-top: 20px;
+      border-top: 1px solid var(--support-border);
+    }
+    .page-footer .thanks {
+      font-size: 13px;
+      color: var(--support-muted);
+      margin: 0 0 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    }
+    .page-footer .license-footer {
+      margin: 0;
+      padding: 0;
+      font-size: 12px;
+      color: var(--support-faint);
+      border: none;
+    }
+    @media (max-width: 640px) {
+      .page { padding: 12px; }
+      .card { border-radius: 14px; }
+      .support-back-bar { padding: 16px 16px 0; }
+      .support-wrap { padding: 16px 16px 24px; }
+      .pay-grid { grid-template-columns: 1fr; }
+      .pay-grid.single { grid-template-columns: 1fr; }
+      .btn { min-width: 0; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="card">
+      <div class="support-back-bar">
+        <a class="btn btn-ghost" href="/">返回配置页</a>
+      </div>
+      <div class="support-wrap">
+    <header class="hero">
+      <h1>支持作者</h1>
+      <p>您的每一份支持都是我继续创作的动力，感谢您的鼓励与陪伴！</p>
+    </header>
+
+    <section class="sheet">
+      <h2><span class="emoji" aria-hidden="true">❤️</span>关于作者</h2>
+      <p>
+        我热爱用技术把复杂的事情变简单。FnMessageBot（日志推送） 面向飞牛 NAS 用户，把日志里的关键事件推到微信、钉钉、飞书、Bark 与 PushPlus 等平台，希望能在你身边默默当好一只「消息守门员」。
+        如果这个小工具为你省过时间、少踩过坑，欢迎通过下方二维码随缘打赏——金额随意，心意最重，也欢迎到 GitHub 点个 Star 传播给更多需要的人。
+      </p>
+      <h2 style="margin-top: 16px;"><span class="emoji" aria-hidden="true">📮</span>联系方式</h2>
+      <p style="margin-bottom: 0;">
+        1. GitHub 联系：
+        <a href="https://github.com/Sunanang/FNMessageBots/issues/3" target="_blank" rel="noopener noreferrer">
+          查看 Issue #3 二维码加群
+        </a><br />
+        2. 邮箱联系：<a href="mailto:1334630986@qq.com">1334630986@qq.com</a><br />
+        3. 用户群：查看论坛 FnMessageBots 帖子的置顶评论
+        <a href="https://club.fnnas.com/forum.php?mod=viewthread&tid=57252" target="_blank" rel="noopener noreferrer">
+          点击前往
+        </a>
+      </p>
+    </section>
+
+    <section>
+      <h2 class="pay-section-title"><span class="emoji" aria-hidden="true">🧡</span>选择支付方式</h2>
+      {% if wechat_src or ali_src %}
+      <div class="pay-grid{% if (wechat_src and not ali_src) or (ali_src and not wechat_src) %} single{% endif %}">
+        {% if ali_src %}
+        <div class="pay-card pay-card--ali">
+          <div class="pay-card-head">
+            <span class="pay-badge pay-badge--ali" aria-hidden="true">支</span>
+            支付宝
+          </div>
+          <div class="qr-frame">
+            <img src="{{ ali_src }}" alt="支付宝收款码" loading="lazy" decoding="async" />
+          </div>
+          <p class="pay-caption">使用支付宝扫描二维码进行捐赠</p>
+        </div>
+        {% endif %}
+        {% if wechat_src %}
+        <div class="pay-card pay-card--wx">
+          <div class="pay-card-head">
+            <span class="pay-badge pay-badge--wx" aria-hidden="true">微</span>
+            微信支付
+          </div>
+          <div class="qr-frame">
+            <img src="{{ wechat_src }}" alt="微信收款码" loading="lazy" decoding="async" />
+          </div>
+          <p class="pay-caption">使用微信扫描二维码进行捐赠</p>
+        </div>
+        {% endif %}
+      </div>
+      {% else %}
+      <p class="no-qr">未找到本地收款码图片。镜像或源码部署需在 <code>assets/icons</code> 下放置 <code>wechat_pay.jpg</code> 与 <code>ali_pay.jpg</code>；也可前往 GitHub 仓库 README 查看。</p>
+      {% endif %}
+    </section>
+
+        <footer class="page-footer">
+          <p class="thanks"><span aria-hidden="true">💛</span>再次感谢您的支持与鼓励！</p>
+          <p class="license-footer">© 2024 Sunanang · FnMessageBot · MIT License terms apply.</p>
+        </footer>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

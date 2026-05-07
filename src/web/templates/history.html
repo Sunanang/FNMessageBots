@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  {% if favicon_url %}
+  <link rel="icon" href="{{ favicon_url }}" />
+  {% endif %}
+<title>推送记录 - FnMessageBot</title>
+  <style>
+    * { box-sizing: border-box; }
+    :root { color-scheme: light; }
+    html[data-theme="dark"] { color-scheme: dark; }
+    body {
+      margin: 0;
+      padding: 32px 24px 40px;
+      min-height: 100vh;
+      min-height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", "PingFang SC", sans-serif;
+      background: #eef3ff;
+      color: #1f2933;
+    }
+    .history-main {
+      flex: 1 1 auto;
+      width: 100%;
+      min-height: 0;
+    }
+    h1 {
+      font-size: 24px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      color: #111827;
+      margin: 0 0 8px;
+    }
+    .page-hint {
+      font-size: 14px;
+      color: #6b7280;
+      line-height: 1.5;
+      margin: 0 0 16px;
+    }
+    .top-bar { margin-bottom: 20px; display: flex; justify-content: flex-start; }
+    .toolbar { margin-bottom: 14px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .toolbar .field-label { margin-bottom: 0; }
+    .field-label {
+      font-size: 13px;
+      color: #4b5563;
+      margin-bottom: 4px;
+    }
+    a.btn {
+      text-decoration: none;
+    }
+    .btn {
+      min-width: 96px;
+      border-radius: 999px;
+      padding: 8px 20px;
+      border: none;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      transition: background-color 0.15s, box-shadow 0.15s, transform 0.05s;
+      font-family: inherit;
+    }
+    .btn-primary {
+      background: linear-gradient(135deg, #2563eb, #1d4ed8);
+      color: #fff;
+      box-shadow: 0 12px 22px rgba(37, 99, 235, 0.28);
+    }
+    .btn-primary:hover {
+      background: linear-gradient(135deg, #1d4ed8, #1e40af);
+      box-shadow: 0 14px 26px rgba(37, 99, 235, 0.3);
+      transform: translateY(-1px);
+    }
+    .btn-ghost {
+      background: #fff;
+      color: #111827;
+      border: 1px solid #d1d5db;
+    }
+    .btn-ghost:hover {
+      background: #f3f4f6;
+    }
+    .table-wrap { width: 100%; overflow-x: auto; border-radius: 8px; }
+    table {
+      width: 100%;
+      table-layout: fixed;
+      border-collapse: collapse;
+      font-size: 13px;
+      background: #fff;
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+      min-width: 760px;
+    }
+    th, td { padding: 10px 12px; text-align: left; vertical-align: middle; }
+    thead th {
+      color: #6b7280;
+      font-weight: 500;
+      border-bottom: 1px solid #e5e7eb;
+      background: #fff;
+    }
+    tbody td {
+      border-bottom: 1px solid #f3f4f6;
+      color: #374151;
+    }
+    tbody tr:last-child td { border-bottom: none; }
+    tbody td.result-ok { color: #059669; font-weight: 700; }
+    tbody td.result-fail { color: #dc2626; font-weight: 700; }
+    .summary {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      vertical-align: middle;
+    }
+    .channel-results {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      vertical-align: middle;
+      font-size: 12px;
+    }
+    .empty { padding: 24px; text-align: center; color: #9ca3af; font-size: 13px; }
+    .link { color: #2563eb; cursor: pointer; }
+    .link:hover { text-decoration: underline; }
+    .more-wrap { margin-top: 14px; text-align: center; }
+    .detail-wrap { margin-top: 20px; padding: 16px; background: #fffbeb; border-radius: 8px; border: 1px solid #fde68a; }
+    .detail-wrap h2 { font-size: 14px; margin: 0 0 8px; }
+    pre { margin: 0; white-space: pre-wrap; word-break: break-all; font-size: 12px; background: #1f2937; color: #e5e7eb; padding: 12px; border-radius: 6px; }
+    .license-footer {
+      flex-shrink: 0;
+      margin: 0;
+      padding-top: 12px;
+      text-align: center;
+      font-size: 11px;
+      line-height: 1.5;
+      color: #9ca3af;
+    }
+    html[data-theme="dark"] body { background: #111827; color: #e5e7eb; }
+    html[data-theme="dark"] h1 { color: #f9fafb; }
+    html[data-theme="dark"] .page-hint { color: #9ca3af; }
+    html[data-theme="dark"] .field-label { color: #9ca3af; }
+    html[data-theme="dark"] table { background: #0f172a; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4); }
+    html[data-theme="dark"] thead th {
+      background: #0f172a;
+      color: #9ca3af;
+      border-bottom-color: #374151;
+    }
+    html[data-theme="dark"] tbody td {
+      color: #d1d5db;
+      border-bottom-color: #1f2937;
+    }
+    html[data-theme="dark"] tbody td.result-ok { color: #34d399; font-weight: 700; }
+    html[data-theme="dark"] tbody td.result-fail { color: #f87171; font-weight: 700; }
+    html[data-theme="dark"] .empty { color: #9ca3af; }
+    html[data-theme="dark"] .detail-wrap { background: #111827; border-color: #374151; }
+    html[data-theme="dark"] .license-footer { color: #6b7280; }
+    html[data-theme="dark"] .btn-ghost {
+      background: #111827;
+      color: #e5e7eb;
+      border-color: #4b5563;
+    }
+    html[data-theme="dark"] .btn-ghost:hover {
+      background: #1f2937;
+    }
+    @media (max-width: 768px) {
+      body { padding: 16px 16px 24px; }
+      h1 { font-size: 20px; }
+      .btn { min-width: 0; }
+      .detail-wrap { padding: 12px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="history-main">
+      <div class="top-bar">
+        <a class="btn btn-ghost" href="/">返回配置页</a>
+      </div>
+      <h1>推送记录</h1>
+      <p class="page-hint">最多存储一万条数据，超过限制会自动删除。</p>
+      <div class="toolbar">
+        <span class="field-label">筛选：</span>
+        <button type="button" class="btn btn-primary filter-btn" data-filter="">全部</button>
+        <button type="button" class="btn btn-ghost filter-btn" data-filter="true">成功</button>
+        <button type="button" class="btn btn-ghost filter-btn" data-filter="false">失败</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <colgroup>
+            <col style="width:160px" />
+            <col style="width:120px" />
+            <col style="width:64px" />
+            <!-- 摘要列尽量宽，「渠道返回结果」列保持更窄，避免占满视口 -->
+            <col style="width:calc(100% - 604px)" />
+            <col style="width:260px" />
+          </colgroup>
+          <thead><tr><th>时间</th><th>事件类型</th><th>结果</th><th>摘要</th><th>渠道返回结果</th></tr></thead>
+          <tbody id="tbody"></tbody>
+        </table>
+      </div>
+      <div id="empty" class="empty" style="display:none;">暂无推送记录</div>
+      <div class="more-wrap"><button type="button" id="btn-more" class="btn btn-ghost" style="display:none;">加载更多</button></div>
+  <script>
+  var THEME_STORAGE_KEY = "fnmb_theme";
+  function applyHistoryTheme() {
+    var mode = localStorage.getItem(THEME_STORAGE_KEY);
+    var resolved = (mode === "dark") ? "dark" : "light";
+    document.documentElement.setAttribute("data-theme", resolved);
+  }
+  applyHistoryTheme();
+  var fetchOpts = { credentials: "include" };
+  var offset = 0;
+  var pageSize = 30;
+  var currentFilter = "";
+  function loadList(reset) {
+    if (reset) { offset = 0; document.getElementById("tbody").innerHTML = ""; }
+    var params = "limit=" + pageSize + "&offset=" + offset;
+    if (currentFilter !== "") params += "&success=" + currentFilter;
+    fetch("/api/push-history?" + params, fetchOpts).then(function(r){
+      if (r.status === 401) { window.location.href = "/"; return; }
+      return r.json();
+    }).then(function(json){
+      if (!json || !json.ok || !Array.isArray(json.data)) return;
+      var rows = json.data;
+      var tbody = document.getElementById("tbody");
+      var emptyEl = document.getElementById("empty");
+      if (rows.length === 0 && offset === 0) { emptyEl.style.display = "block"; } else { emptyEl.style.display = "none"; }
+      for (var i = 0; i < rows.length; i++) {
+        var r = rows[i];
+        var tr = document.createElement("tr");
+        var td1 = document.createElement("td"); td1.textContent = r.created_at || ""; tr.appendChild(td1);
+        var td2 = document.createElement("td"); td2.textContent = r.event_type_label || r.event_type || ""; tr.appendChild(td2);
+        var td3 = document.createElement("td"); td3.textContent = r.success ? "成功" : "失败"; td3.className = r.success ? "result-ok" : "result-fail"; tr.appendChild(td3);
+        var td4 = document.createElement("td"); td4.className = "summary"; td4.textContent = r.summary || "-"; td4.title = r.summary || ""; tr.appendChild(td4);
+        var td5 = document.createElement("td"); td5.className = "channel-results";
+        var channelText = "-";
+        var channelTitle = "";
+        if (r.detail) {
+          try {
+            var detail = typeof r.detail === "string" ? JSON.parse(r.detail) : r.detail;
+            if (detail && Array.isArray(detail.channel_results) && detail.channel_results.length > 0) {
+              var parts = [];
+              var fullParts = [];
+              detail.channel_results.forEach(function(c){
+                var status = c.success ? "成功" : "失败";
+                var extra = "";
+                if (!c.success) {
+                  if (c.response != null && typeof c.response === "object") {
+                    extra = JSON.stringify(c.response);
+                  } else if (typeof c.response === "string") {
+                    extra = c.response;
+                  }
+                  if (!extra && c.error) extra = c.error;
+                  if (!extra) extra = "无返回详情";
+                }
+                var extraShort = extra ? (extra.length > 28 ? extra.slice(0, 28) + "…" : extra) : "";
+                var short = c.channel + ": " + status + (extraShort ? " (" + extraShort + ")" : "");
+                parts.push(short);
+                var fullExtra = extra ? " — " + extra : "";
+                fullParts.push(c.channel + ": " + status + fullExtra);
+              });
+              channelText = parts.join("; ");
+              channelTitle = fullParts.join(String.fromCharCode(10));
+            }
+          } catch (e) {
+            channelText = "详情解析失败";
+          }
+        }
+        td5.textContent = channelText;
+        td5.title = channelTitle || channelText;
+        tr.appendChild(td5);
+        tbody.appendChild(tr);
+      }
+      offset += rows.length;
+      document.getElementById("btn-more").style.display = rows.length >= pageSize ? "inline-block" : "none";
+    }).catch(function(){});
+  }
+  document.querySelectorAll(".filter-btn").forEach(function(btn){
+    btn.onclick = function(){
+      document.querySelectorAll(".filter-btn").forEach(function(b){
+        b.classList.remove("btn-primary");
+        b.classList.add("btn-ghost");
+      });
+      this.classList.remove("btn-ghost");
+      this.classList.add("btn-primary");
+      currentFilter = this.getAttribute("data-filter") || "";
+      loadList(true);
+    };
+  });
+  document.getElementById("btn-more").onclick = function(){ loadList(false); };
+  loadList(true);
+  </script>
+  </main>
+  <p class="license-footer">© 2024 Sunanang · FnMessageBot · MIT License terms apply.</p>
+</body>
+</html>

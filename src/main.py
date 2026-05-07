@@ -61,6 +61,7 @@ class Application:
         self.logger = None
         self.running = False
         self.notification_health_thread = None
+        self._exit_code = 0
 
         
     def _print_banner(self):
@@ -319,7 +320,7 @@ class Application:
         interval = self.config.logger_poll_interval
         cdir = self.config.cursor_dir
 
-        backup_path = getattr(self.config, "backup_db_path", "/usr/trim/var/backup_service/basic_backup.db3")
+        backup_path = (getattr(self.config, "backup_db_path", "") or "").strip()
         backup_ok = self._probe_db_readable("备份库 basic_backup.db3", backup_path) if (me & BACKUP_POLL_EVENTS) else False
         if (me & BACKUP_POLL_EVENTS) and backup_ok:
             if self.backup_poller is None:
@@ -742,7 +743,8 @@ class Application:
             pass
 
         time.sleep(2)
-        os._exit(1)
+        self._exit_code = 1
+        self.running = False
     
     def shutdown(self):
         """关闭应用"""
@@ -802,6 +804,7 @@ def main():
     """主函数"""
     app = Application()
     app.run()
+    raise SystemExit(getattr(app, "_exit_code", 0))
 
 if __name__ == "__main__":
     main()

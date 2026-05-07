@@ -1,12 +1,11 @@
 """
 数据库日志轮询器
-从 eventlogger 的 SQLite 数据库 log 表轮询新记录（默认 /usr/trim/var/eventlogger_service/logger_data.db3）。
+从 eventlogger 的 SQLite 数据库 log 表轮询新记录（路径由配置 logger_db_path / LOGGER_DB_PATH 指定）。
 表结构: id, serviceId, uid, uname, logtime(10位时间戳), loglevel, eventId, parameter(JSON), category
 """
 
 import json
 import logging
-import os
 import sqlite3
 import threading
 import time
@@ -15,8 +14,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 from typing import Callable, Dict, List, Optional, Any, Sequence
 
-# 推送时间显示偏移（秒）。若 NAS 存库的 logtime 比 UTC 少 8 小时，设 LOGTIME_DISPLAY_OFFSET_SECONDS=28800
-_LOGTIME_OFFSET_SECONDS = int(os.environ.get("LOGTIME_DISPLAY_OFFSET_SECONDS", "28800"))
+from utils.logtime_display import get_logtime_display_offset_seconds
 
 from .models import JournalEntry
 
@@ -90,7 +88,7 @@ DB_EVENT_ID_TO_PROJECT: Dict[str, str] = {
 def _logtime_to_datetime(logtime: int) -> str:
     """10 位 Unix 时间戳转 YYYY-MM-DD HH:MM:SS（Asia/Shanghai）。可设 LOGTIME_DISPLAY_OFFSET_SECONDS 修正存库偏差（如 28800=+8h）。"""
     try:
-        ts = int(logtime) + _LOGTIME_OFFSET_SECONDS
+        ts = int(logtime) + get_logtime_display_offset_seconds()
         dt = datetime.fromtimestamp(ts, tz=ZoneInfo("Asia/Shanghai"))
         return dt.strftime("%Y-%m-%d %H:%M:%S")
     except (ValueError, TypeError, OSError):
