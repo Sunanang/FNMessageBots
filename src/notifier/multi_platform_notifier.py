@@ -1747,12 +1747,41 @@ class MultiPlatformNotifier:
         end_time = _fmt_ts(event_data.get("finished_time"))
         files_count = event_data.get("files_count")
         completed_count = event_data.get("completed_count")
-        total_size = _fmt_size(event_data.get("total_size"))
-        completed_size = _fmt_size(event_data.get("completed_size"))
-        actual_time = event_data.get("actual_time")
+        actual_count = event_data.get("actual_count")
+        actual_size = _fmt_size(event_data.get("actual_size"))
+        ignoring_files = event_data.get("ignoring_files")
         status = event_data.get("status")
         error_code = event_data.get("error_code")
         error_message = str(event_data.get("error_message") or "")
+
+        # 无变更跳过 = 已处理文件数 - 实际传输文件数
+        skipped: Optional[int] = None
+        try:
+            if completed_count is not None and actual_count is not None:
+                v = int(completed_count) - int(actual_count)
+                skipped = max(0, v)
+        except (TypeError, ValueError):
+            pass
+
+        # 耗时 = finished_time - start_time（秒）
+        elapsed_str = ""
+        try:
+            s = int(event_data.get("start_time") or 0)
+            f = int(event_data.get("finished_time") or 0)
+            if s > 10_000_000_000:
+                s = int(s / 1000)
+            if f > 10_000_000_000:
+                f = int(f / 1000)
+            if s > 0 and f > 0 and f >= s:
+                sec = f - s
+                if sec < 60:
+                    elapsed_str = f"{sec} 秒"
+                elif sec < 3600:
+                    elapsed_str = f"{sec // 60} 分 {sec % 60} 秒"
+                else:
+                    elapsed_str = f"{sec // 3600} 小时 {(sec % 3600) // 60} 分"
+        except (TypeError, ValueError):
+            pass
 
         lines: List[str] = []
         if task_name:
@@ -1772,12 +1801,18 @@ class MultiPlatformNotifier:
             lines.append(f"开始时间: {start_time}")
         if end_time:
             lines.append(f"结束时间: {end_time}")
-        if files_count not in (None, "") or completed_count not in (None, ""):
-            lines.append(f"处理文件: {completed_count or 0} / {files_count or 0}")
-        if total_size or completed_size:
-            lines.append(f"处理大小: {completed_size or '0 B'} / {total_size or '0 B'}")
-        if actual_time not in (None, ""):
-            lines.append(f"耗时: {actual_time} 秒")
+        if actual_count not in (None, ""):
+            lines.append(f"传输文件数: {actual_count}")
+        if actual_size:
+            lines.append(f"传输文件大小: {actual_size}")
+        if ignoring_files not in (None, ""):
+            lines.append(f"排除文件数: {ignoring_files}")
+        if skipped is not None:
+            lines.append(f"无变更跳过: {skipped}")
+        if files_count not in (None, ""):
+            lines.append(f"总文件数: {files_count}")
+        if elapsed_str:
+            lines.append(f"耗时: {elapsed_str}")
         if status not in (None, ""):
             lines.append(f"状态码: {status}")
         if error_code not in (None, "") and int(error_code or 0) != 0:
@@ -1919,8 +1954,8 @@ class MultiPlatformNotifier:
                 backup_lines.append(f"任务: {ed.get('task_name')}")
             if ed.get("operation_id") is not None:
                 backup_lines.append(f"执行ID: {ed.get('operation_id')}")
-            if ed.get("completed_count") is not None or ed.get("files_count") is not None:
-                backup_lines.append(f"文件: {ed.get('completed_count', 0)}/{ed.get('files_count', 0)}")
+            if ed.get("actual_count") is not None or ed.get("files_count") is not None:
+                backup_lines.append(f"传输: {ed.get('actual_count', 0)}/{ed.get('files_count', 0)}")
             if int(ed.get("error_code") or 0) != 0:
                 backup_lines.append(f"错误码: {ed.get('error_code')}")
             return [" · ".join(backup_lines)] if backup_lines else [et]
