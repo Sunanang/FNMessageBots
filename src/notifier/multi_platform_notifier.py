@@ -26,6 +26,36 @@ from .connection_pool import ConnectionPool
 # PushPlus 固定接口地址
 PUSHPLUS_URL = "http://www.pushplus.plus/send"
 
+# Docker Engine 容器事件（与 monitor.docker_events_poller 中映射一致）
+DOCKER_CONTAINER_EVENT_TYPES = frozenset({
+    "DOCKER_CONTAINER_CREATE",
+    "DOCKER_CONTAINER_START",
+    "DOCKER_CONTAINER_STOP",
+    "DOCKER_CONTAINER_DIE",
+    "DOCKER_CONTAINER_OOM",
+    "DOCKER_CONTAINER_KILL",
+    "DOCKER_CONTAINER_PAUSE",
+    "DOCKER_CONTAINER_UNPAUSE",
+    "DOCKER_CONTAINER_RESTART",
+    "DOCKER_CONTAINER_DESTROY",
+})
+
+
+def normalize_disk_io_payload(ed: Dict[str, Any]) -> Tuple[str, str, str, Any]:
+    """DISK_IO_ERR：兼容 parameter 内 data.DEV 与顶层 disk/model/serial（与 DiskWakeup 扁平结构一致）。"""
+    nested = ed.get("data")
+    data = nested if isinstance(nested, dict) else {}
+    dev = (data.get("DEV") or data.get("dev") or ed.get("disk") or ed.get("dev") or "")
+    dev = str(dev).strip()
+    model = (data.get("MODEL") or data.get("model") or ed.get("model") or "")
+    model = str(model).strip()
+    sn = (data.get("SN") or data.get("sn") or ed.get("serial") or "")
+    sn = str(sn).strip()
+    err_cnt = data.get("ERR_CNT", data.get("err_cnt"))
+    if err_cnt is None:
+        err_cnt = ed.get("ERR_CNT", ed.get("err_cnt", 0))
+    return dev, model, sn, err_cnt
+
 
 @dataclass
 class MultiPlatformMessage:
@@ -103,6 +133,7 @@ class MultiPlatformNotifier:
         'InsertDisk': '💾 飞牛NAS-插入硬盘',
         'EjectDisk': '🧷 飞牛NAS-弹出硬盘',
         'StorageBroken': '⚠️ 飞牛NAS-存储空间损坏',
+        'STORAGE_DEGRADED': '⚠️ 飞牛NAS-存储空间降级',
         'SSH_INVALID_USER': '⚠️ 飞牛NAS-SSH无效用户尝试',
         'SSH_AUTH_FAILED': '❌ 飞牛NAS-SSH认证失败',
         'SSH_LOGIN_SUCCESS': '🔐 飞牛NAS-SSH登录成功',
@@ -186,6 +217,17 @@ class MultiPlatformNotifier:
         'PHOTO_SHARE_EXPIRED': '⏱️ 飞牛NAS-相册分享过期',
         'PHOTO_DEVICE_REGISTERED': '📱 飞牛NAS-相册同步设备',
         'FACE_RECOGNITION_UPDATED': '✅ 飞牛NAS-相册人脸识别',
+        # Docker 容器（Engine events）
+        'DOCKER_CONTAINER_CREATE': '📦 飞牛NAS-Docker容器已创建',
+        'DOCKER_CONTAINER_START': '▶️ 飞牛NAS-Docker容器已启动',
+        'DOCKER_CONTAINER_STOP': '⏹️ 飞牛NAS-Docker容器已停止',
+        'DOCKER_CONTAINER_DIE': '🛑 飞牛NAS-Docker容器已退出',
+        'DOCKER_CONTAINER_OOM': '💥 飞牛NAS-Docker容器OOM',
+        'DOCKER_CONTAINER_KILL': '⚠️ 飞牛NAS-Docker容器已Kill',
+        'DOCKER_CONTAINER_PAUSE': '⏸️ 飞牛NAS-Docker容器已暂停',
+        'DOCKER_CONTAINER_UNPAUSE': '▶️ 飞牛NAS-Docker容器已恢复',
+        'DOCKER_CONTAINER_RESTART': '🔄 飞牛NAS-Docker容器重启',
+        'DOCKER_CONTAINER_DESTROY': '🗑️ 飞牛NAS-Docker容器已删除',
     }
     
     # Bark事件标题映射 - 用于Bark推送，标题统一为"飞牛NAS通知"
@@ -198,6 +240,7 @@ class MultiPlatformNotifier:
         'InsertDisk': '插入硬盘{name}',
         'EjectDisk': '弹出硬盘{name}',
         'StorageBroken': '存储空间损坏 volume={volume}',
+        'STORAGE_DEGRADED': '存储空间{volume}已降级',
         'SSH_INVALID_USER': '无效用户{user}尝试登录',
         'SSH_AUTH_FAILED': 'SSH认证失败{user_info}',
         'SSH_LOGIN_SUCCESS': 'SSH用户{user}登录成功',
@@ -278,6 +321,16 @@ class MultiPlatformNotifier:
         'PHOTO_SHARE_EXPIRED': '相册分享过期',
         'PHOTO_DEVICE_REGISTERED': '相册同步设备',
         'FACE_RECOGNITION_UPDATED': '相册人脸识别',
+        'DOCKER_CONTAINER_CREATE': 'Docker容器 {container_name} 已创建',
+        'DOCKER_CONTAINER_START': 'Docker容器 {container_name} 已启动',
+        'DOCKER_CONTAINER_STOP': 'Docker容器 {container_name} 已停止',
+        'DOCKER_CONTAINER_DIE': 'Docker容器 {container_name} 已退出',
+        'DOCKER_CONTAINER_OOM': 'Docker容器 {container_name} OOM',
+        'DOCKER_CONTAINER_KILL': 'Docker容器 {container_name} kill',
+        'DOCKER_CONTAINER_PAUSE': 'Docker容器 {container_name} 已暂停',
+        'DOCKER_CONTAINER_UNPAUSE': 'Docker容器 {container_name} 已恢复运行',
+        'DOCKER_CONTAINER_RESTART': 'Docker容器 {container_name} 重启',
+        'DOCKER_CONTAINER_DESTROY': 'Docker容器 {container_name} 已删除',
     }
     
     # 事件备注
@@ -290,6 +343,7 @@ class MultiPlatformNotifier:
         'InsertDisk': '检测到存储设备插入。',
         'EjectDisk': '检测到存储设备弹出。',
         'StorageBroken': '检测到存储空间损坏，请尽快检查。',
+        'STORAGE_DEGRADED': '检测到存储空间已降级，请及时检查存储与磁盘状态。',
         'SSH_INVALID_USER': '检测到无效用户登录尝试，请注意安全。',
         'SSH_AUTH_FAILED': 'SSH认证失败，请确认是否为合法用户。',
         'SSH_LOGIN_SUCCESS': 'SSH登录成功，请确认是否为本人操作。',
@@ -369,6 +423,16 @@ class MultiPlatformNotifier:
         'PHOTO_SHARE_EXPIRED': '该相册分享已超过有效期。',
         'PHOTO_DEVICE_REGISTERED': '相册库已登记新的同步设备。',
         'FACE_RECOGNITION_UPDATED': '相册人脸识别有新的任务记录。',
+        'DOCKER_CONTAINER_CREATE': 'Docker 引擎上报容器已创建。',
+        'DOCKER_CONTAINER_START': 'Docker 引擎上报容器已开始运行。',
+        'DOCKER_CONTAINER_STOP': 'Docker 引擎上报容器停止信号。',
+        'DOCKER_CONTAINER_DIE': 'Docker 引擎上报容器进程已退出。',
+        'DOCKER_CONTAINER_OOM': '容器因内存不足被系统终止（OOM）。',
+        'DOCKER_CONTAINER_KILL': '容器收到 kill 信号。',
+        'DOCKER_CONTAINER_PAUSE': '容器已暂停（cgroup 冻结）。',
+        'DOCKER_CONTAINER_UNPAUSE': '容器已从暂停状态恢复。',
+        'DOCKER_CONTAINER_RESTART': '容器因策略或手动触发重启。',
+        'DOCKER_CONTAINER_DESTROY': '容器实例已从 Docker 中删除。',
     }
     
     def __init__(self, 
@@ -1067,10 +1131,19 @@ class MultiPlatformNotifier:
             minute_window = int(time.time() / 60)
             key = f"{event_type}_{user}_{ip}_{minute_window}"
         elif event_type == 'DISK_IO_ERR':
-            data = event_data.get('data', {})
-            dev = data.get('DEV', data.get('dev', 'unknown'))
+            dev, _, _, _ = normalize_disk_io_payload(event_data)
+            dev_key = dev or "unknown"
             minute_window = int(time.time() / 60)
-            key = f"disk_io_err_{dev}_{minute_window}"
+            key = f"disk_io_err_{dev_key}_{minute_window}"
+        elif event_type == 'STORAGE_DEGRADED':
+            vol = event_data.get('volume', event_data.get('VOL'))
+            vol_key = str(vol).strip() if vol not in (None, '') else 'unknown'
+            minute_window = int(time.time() / 60)
+            key = f"storage_degraded_{vol_key}_{minute_window}"
+        elif event_type in DOCKER_CONTAINER_EVENT_TYPES:
+            cid = str(event_data.get('container_id_full') or event_data.get('container_id') or 'unknown')
+            minute_window = int(time.time() / 60)
+            key = f"{event_type}_{cid}_{minute_window}"
         elif event_type in {
             'ARCHIVING_SUCCESS', 'DeleteFile', 'MovetoTrashbin', 'SHARE_EVENTID_DEL', 'SHARE_EVENTID_PUT',
             'WEBDAV_ENABLED', 'WEBDAV_DISABLED', 'SAMBA_ENABLED', 'SAMBA_DISABLED',
@@ -1183,6 +1256,30 @@ class MultiPlatformNotifier:
                 return f"{prefix}-{body}"
             return body
 
+        if event_type == "STORAGE_DEGRADED":
+            vol = event_data.get("volume") or event_data.get("VOL")
+            if vol is not None and str(vol).strip() != "":
+                body = f"存储空间{vol}已降级"
+            else:
+                body = "存储空间降级"
+            prefix = (self.title_prefix or "").strip()
+            if prefix:
+                return f"{prefix}-{body}"
+            return body
+
+        if event_type in DOCKER_CONTAINER_EVENT_TYPES:
+            nm = (event_data.get("container_name") or "").strip()
+            cid = (event_data.get("container_id") or "").strip()
+            label = nm or cid or "容器"
+            verb = self._strip_body_emojis(
+                self.EVENT_TITLES.get(event_type, "").replace("飞牛NAS-", "").replace("飞牛NAS", "").strip(" -")
+            ) or event_type
+            body = f"{label} {verb}".strip()
+            prefix = (self.title_prefix or "").strip()
+            if prefix:
+                return f"{prefix}-{body}"
+            return body
+
         user = self._display_user(
             event_data.get("user")
             or event_data.get("user_guid")
@@ -1211,6 +1308,16 @@ class MultiPlatformNotifier:
             "SCHEDULER_TASK_SUCCESS": "任务计划完成",
             "SCHEDULER_TASK_FAILED": "任务计划失败",
             "SCHEDULER_TASK_CONDITION_FAILED": "任务计划条件不满足",
+            "DOCKER_CONTAINER_CREATE": "Docker容器创建",
+            "DOCKER_CONTAINER_START": "Docker容器启动",
+            "DOCKER_CONTAINER_STOP": "Docker容器停止",
+            "DOCKER_CONTAINER_DIE": "Docker容器退出",
+            "DOCKER_CONTAINER_OOM": "Docker容器OOM",
+            "DOCKER_CONTAINER_KILL": "Docker容器Kill",
+            "DOCKER_CONTAINER_PAUSE": "Docker容器暂停",
+            "DOCKER_CONTAINER_UNPAUSE": "Docker容器恢复",
+            "DOCKER_CONTAINER_RESTART": "Docker容器重启",
+            "DOCKER_CONTAINER_DESTROY": "Docker容器删除",
         }
         action = action_map.get(event_type)
         if not action:
@@ -1264,6 +1371,8 @@ class MultiPlatformNotifier:
             detail = self._build_disk_content(event_data)
         elif event_type == 'StorageBroken':
             detail = self._build_storage_broken_content(event_data)
+        elif event_type == 'STORAGE_DEGRADED':
+            detail = self._build_storage_degraded_content(event_data)
         elif event_type == 'APP_CRASH':
             detail = self._build_app_crash_content(event_data)
         elif event_type in ('APP_STARTED', 'APP_STOPPED', 'APP_UPDATED', 'APP_INSTALLED', 'APP_AUTO_STARTED', 'APP_UNINSTALLED'):
@@ -1310,6 +1419,8 @@ class MultiPlatformNotifier:
             detail = self._build_backup_task_content(event_data)
         elif event_type in {'SCHEDULER_TASK_SUCCESS', 'SCHEDULER_TASK_FAILED', 'SCHEDULER_TASK_CONDITION_FAILED'}:
             detail = self._build_scheduler_task_content(event_data)
+        elif event_type in DOCKER_CONTAINER_EVENT_TYPES:
+            detail = self._build_docker_container_content(event_data)
         elif event_type in {'SHUTDOWN_VM', 'STATUS_RUNNING_VM', 'DESTROY_VM'} or ("VM" in str(event_type).upper()):
             detail = self._build_vm_content(event_data)
         elif event_type in {
@@ -1576,6 +1687,19 @@ class MultiPlatformNotifier:
         if serial:
             content += f"🔢 序列号: {serial}\n"
         return content or "（无额外详情）"
+
+    def _build_storage_degraded_content(self, event_data: Dict[str, Any]) -> str:
+        """存储空间降级事件内容（parameter 顶层 volume）。"""
+        content = ""
+        vol = event_data.get('volume') or event_data.get('VOL') or event_data.get('vol')
+        if vol not in (None, ""):
+            content += f"📦 存储空间{vol}已降级\n"
+        else:
+            content += "存储空间已降级\n"
+        tpl = (event_data.get('template') or '').strip()
+        if tpl:
+            content += f"📋 模板: {tpl}\n"
+        return content.rstrip('\n') or "（无额外详情）"
 
     def _build_vm_content(self, event_data: Dict[str, Any]) -> str:
         """虚拟机事件内容：展示 VM_TITLE、USER_NAME 等（parameter 中 data）。"""
@@ -1882,6 +2006,26 @@ class MultiPlatformNotifier:
             lines.append(f"{log_title}:\n{log_preview}")
         return "\n".join(lines) if lines else "（无额外详情）"
 
+    def _build_docker_container_content(self, event_data: Dict[str, Any]) -> str:
+        """Docker Engine 容器事件正文。"""
+        lines: List[str] = []
+        name = str(event_data.get("container_name") or "").strip()
+        cid = str(event_data.get("container_id") or "").strip()
+        img = str(event_data.get("image") or "").strip()
+        dact = str(event_data.get("docker_action") or "").strip()
+        if name:
+            lines.append(f"容器名称: {name}")
+        if cid:
+            lines.append(f"容器ID: {cid}")
+        if img:
+            lines.append(f"镜像: {img}")
+        if dact:
+            lines.append(f"引擎动作: {dact}")
+        ec = event_data.get("exit_code")
+        if ec is not None and str(ec).strip() != "":
+            lines.append(f"退出码: {ec}")
+        return "\n".join(lines) if lines else "（无额外详情）"
+
     def _batch_summary_item_lines(self, event_type: str, ed: Dict[str, Any]) -> List[str]:
         """多事件合并时，单条事件只展示关键字段（无图标，多行时每条一行）。"""
         data_raw = ed.get("data")
@@ -1999,14 +2143,26 @@ class MultiPlatformNotifier:
                 out.append(f"型号: {ed.get('model')}")
             return out or ["发现新硬盘"]
 
+        if et == "STORAGE_DEGRADED":
+            vol = ed.get("volume", ed.get("VOL"))
+            if vol is not None and str(vol).strip() != "":
+                return [f"存储空间{vol}已降级"]
+            return ["存储空间降级"]
+
         if et == "DISK_IO_ERR":
-            dev = data.get("DEV", data.get("dev", ""))
-            cnt = data.get("ERR_CNT", data.get("err_cnt", ""))
+            dev, model, sn, cnt = normalize_disk_io_payload(ed)
             lines = []
             if dev:
                 lines.append(f"设备: {dev}")
+            if model:
+                lines.append(f"型号: {model}")
+            if sn:
+                lines.append(f"序列号: {sn}")
             if cnt != "" and cnt is not None:
                 lines.append(f"错误次数: {cnt}")
+            tpl = (ed.get("template") or "").strip()
+            if tpl:
+                lines.append(f"模板: {tpl}")
             return lines or ["磁盘IO错误"]
 
         if et in ("BACKUP_TASK_SUCCESS", "BACKUP_TASK_FAILED", "BACKUP_TASK_PARTIAL_SUCCESS"):
@@ -2030,6 +2186,18 @@ class MultiPlatformNotifier:
             if ed.get("duration"):
                 sched_lines.append(f"耗时: {ed.get('duration')}")
             return [" · ".join(sched_lines)] if sched_lines else [et]
+
+        if et in DOCKER_CONTAINER_EVENT_TYPES:
+            bits: List[str] = []
+            if ed.get("container_name"):
+                bits.append(str(ed.get("container_name")))
+            elif ed.get("container_id"):
+                bits.append(str(ed.get("container_id")))
+            if ed.get("image"):
+                bits.append(str(ed.get("image")))
+            if ed.get("exit_code") is not None and str(ed.get("exit_code")).strip() != "":
+                bits.append(f"exit={ed.get('exit_code')}")
+            return [" · ".join(bits)] if bits else [et]
 
         if et in ("UPS_ONBATT", "UPS_ONBATT_LOWBATT"):
             ups_bits: List[str] = []
@@ -2194,19 +2362,18 @@ class MultiPlatformNotifier:
         return "\n".join(lines)
 
     def _build_disk_io_err_content(self, event_data: Dict[str, Any]) -> str:
-        """构建磁盘IO错误事件内容（data: DEV, SN, MODEL, ERR_CNT）"""
+        """构建磁盘IO错误事件内容（data 嵌套或顶层 disk/model/serial）。"""
+        dev, model, sn, err_cnt = normalize_disk_io_payload(event_data)
         content = ""
-        data = event_data.get('data', {})
-        dev = data.get('DEV', data.get('dev', ''))
-        sn = data.get('SN', data.get('sn', ''))
-        model = data.get('MODEL', data.get('model', ''))
-        err_cnt = data.get('ERR_CNT', data.get('err_cnt', 0))
         if dev:
             content += f"📛 设备: {dev}\n"
         if model:
             content += f"🔧 型号: {model}\n"
         if sn:
             content += f"🔢 序列号: {sn}\n"
+        tpl = (event_data.get("template") or "").strip()
+        if tpl:
+            content += f"📋 模板: {tpl}\n"
         content += f"⚠️ 错误次数: {err_cnt}\n"
         return content
 
@@ -2541,7 +2708,8 @@ class MultiPlatformNotifier:
             additional_info: 额外信息字典
             
         Returns:
-            dict: {"success": bool, "success_count": int, "fail_count": int}
+            dict: success、success_count、fail_count、channel_results（每渠道发送明细）；
+            去重跳过时有 skipped=\"duplicate\"，channel_results 为空。
         """
         self.logger.info(f"准备发送系统事件通知: {event_type}")
         
@@ -2559,8 +2727,14 @@ class MultiPlatformNotifier:
         # 检查去重
         if self._is_duplicate(event_fingerprint):
             self.logger.debug(f"跳过重复系统事件: {event_type}")
-            return {"success": False, "success_count": 0, "fail_count": 0}
-        
+            return {
+                "success": False,
+                "success_count": 0,
+                "fail_count": 0,
+                "channel_results": [],
+                "skipped": "duplicate",
+            }
+
         # 构建消息
         # 勿扰汇总始终走完整模式，不受极简开关影响
         if self.minimal_push_enabled and event_type != "DND_SUMMARY":
@@ -2573,34 +2747,42 @@ class MultiPlatformNotifier:
             content = self._build_system_content(event_type, event_data, message)
             multi_msg = MultiPlatformMessage(title=title, content=content)
         
-        results = []
+        results: List[bool] = []
+        channel_results: List[Dict[str, Any]] = []
         if self.wechat_webhook_url:
             ok, cr = self._send_to_wechat(multi_msg)
             results.append(ok)
+            channel_results.append(cr)
             self.logger.debug("企业微信系统通知: %s", cr)
         if self.dingtalk_webhook_url:
             ok, cr = self._send_to_dingtalk(multi_msg)
             results.append(ok)
+            channel_results.append(cr)
             self.logger.debug("钉钉系统通知: %s", cr)
         if self.feishu_webhook_url:
             ok, cr = self._send_to_feishu(multi_msg)
             results.append(ok)
+            channel_results.append(cr)
             self.logger.debug("飞书系统通知: %s", cr)
         if self.bark_url:
             ok, cr = self._send_to_bark(multi_msg)
             results.append(ok)
+            channel_results.append(cr)
             self.logger.debug("Bark系统通知: %s", cr)
         if self.pushplus_params:
             ok, cr = self._send_to_pushplus(multi_msg)
             results.append(ok)
+            channel_results.append(cr)
             self.logger.debug("PushPlus系统通知: %s", cr)
         if self.magic_push_params:
             ok, cr = self._send_to_magic_push(multi_msg)
             results.append(ok)
+            channel_results.append(cr)
             self.logger.debug("魔法推送系统通知: %s", cr)
         if self.smtp_params:
             ok, cr = self._send_to_smtp(multi_msg)
             results.append(ok)
+            channel_results.append(cr)
             self.logger.debug("SMTP邮件系统通知: %s", cr)
         success_count = sum(1 for r in results if r)
         fail_count = len(results) - success_count
@@ -2612,7 +2794,12 @@ class MultiPlatformNotifier:
         else:
             self._record_send_result(False)
             self.logger.warning(f"系统事件通知发送失败: {event_type}")
-        return {"success": any_ok, "success_count": success_count, "fail_count": fail_count}
+        return {
+            "success": any_ok,
+            "success_count": success_count,
+            "fail_count": fail_count,
+            "channel_results": channel_results,
+        }
     
     def _generate_system_fingerprint(self, event_type: str, event_data: Dict[str, Any]) -> str:
         """生成系统事件指纹（用于去重）"""

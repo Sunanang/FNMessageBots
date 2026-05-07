@@ -254,6 +254,15 @@ sudo setfacl -m u:FnMessageBot:rx /usr/local/apps/@appdata/trim.media/database
 sudo setfacl -m u:FnMessageBot:r /usr/local/apps/@appdata/trim.media/database/trimmedia.db
 sudo setfacl -m u:FnMessageBot:r /usr/local/apps/@appdata/trim.media/database/trimactivity.db</pre>
 若相册侧仍有权限错误，可对 <code>trim.photos/db</code> 下实际使用的 <code>.db</code> 文件按同样方式为 <code>FnMessageBot</code> 增加只读 ACL（示例：<code>sudo setfacl -m u:FnMessageBot:r &lt;文件路径&gt;</code>）。</p>
+            <p>若仍有问题，可在 <code>config.json</code> 中核对或追加如下字段（路径按 NAS 实际为准）：</p>
+            <pre class="faq-pre">  "logger_db_path": "/usr/trim/var/eventlogger_service/logger_data.db3",
+  "backup_db_path": "/usr/trim/var/backup_service/basic_backup.db3",
+  "media_lib_logger_enabled": false,
+  "media_lib_service_patterns": ["mediadb", "trimmedia"],
+  "media_lib_app_name_patterns": ["影视"],
+  "trim_media_db_path": "/usr/local/apps/@appdata/trim.media/database/trimmedia.db",
+  "trim_activity_db_path": "/usr/local/apps/@appdata/trim.media/database/trimactivity.db",
+  "photo_db_path": "/usr/local/apps/@appdata/trim.photos/db/photo.db"</pre>
           </article>
         </section>
 

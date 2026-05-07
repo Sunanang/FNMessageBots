@@ -8,6 +8,7 @@ import stat
 import sys
 import threading
 from pathlib import Path
+from utils.value_parser import as_bool
 
 # 直接运行本文件时（python src/web/ui_app.py），把 src 加入 path 以便导入 notifier 等
 if __name__ == "__main__":
@@ -42,6 +43,7 @@ from web.event_catalog import DEFAULT_SELECTED_EVENTS
 from web.event_catalog import EVENT_IDS_HIDDEN_IN_UI
 from web.event_catalog import OLD_DEFAULT_SELECTED_EVENTS_WITH_EXTRA
 from web.event_catalog import build_events_for_ui
+from monitor.docker_events_poller import DOCKER_POLL_EVENTS
 from web.push_history_service import get_record as get_push_history_record
 from web.push_history_service import get_stats as get_push_history_stats
 from web.push_history_service import list_records as list_push_history_records
@@ -74,23 +76,6 @@ def _auth_cookie_kwargs() -> dict:
     }
 
 
-def _as_bool(value, default: bool = False) -> bool:
-    """稳健布尔解析：兼容 bool/数字/字符串（如 'true'/'false'）。"""
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return value != 0
-    if isinstance(value, str):
-        text = value.strip().lower()
-        if text in {"1", "true", "yes", "on"}:
-            return True
-        if text in {"0", "false", "no", "off"}:
-            return False
-        return default
-    return bool(value)
-
 def _has_password_set() -> bool:
     return _has_password_set_fn(_load_raw_config)
 
@@ -115,8 +100,57 @@ def _load_raw_config() -> dict:
 def _save_raw_config(data: dict) -> None:
     _save_raw_config_to_file(CONFIG_FILE, data)
 
+
+def _events_catalog_bundle():
+    """重建配置页事件分类（含 VM 事件发现）；每次 API 请求调用，避免 Flask 启动时缓存旧列表。"""
+    raw = _load_raw_config()
+    return build_events_for_ui(
+        logger_db_path=(raw.get("logger_db_path") or "").strip(),
+        backup_db_path=(raw.get("backup_db_path") or "").strip(),
+        trim_media_db_path=(raw.get("trim_media_db_path") or "").strip(),
+        trim_activity_db_path=(raw.get("trim_activity_db_path") or "").strip(),
+        photo_db_path=(raw.get("photo_db_path") or "").strip(),
+        scheduler_db_path=(raw.get("scheduler_db_path") or "").strip(),
+        titles=MultiPlatformNotifier.EVENT_TITLES,
+        notes=MultiPlatformNotifier.EVENT_NOTES,
+    )
+
+
 def _mode_str(mode: int) -> str:
     return stat.filemode(mode)
+
+
+def _docker_socket_access_warning(sock_path: str) -> str | None:
+    """
+    勾选 Docker 容器事件时，若当前进程无法使用 Engine socket 则返回一条告警文案，否则 None。
+    与「仅 Path.exists()」相比，可区分父目录在但无 socket、非 socket 文件、无读权限等情况。
+    """
+    sp = (sock_path or "").strip() or "/var/run/docker.sock"
+    try:
+        # 使用 stat 跟随符号链接（常见：/var/run/docker.sock -> /run/docker.sock）
+        st = os.stat(sp)
+    except FileNotFoundError:
+        parent = Path(sp).parent
+        extra = "（已检测到父目录在，但无 socket 文件：多为 Compose 未挂到本服务、或改 volume 后未重建容器。）" if parent.exists() else ""
+        return (
+            f"Docker: 容器内不存在 {sp}。{extra} "
+            "请确认：① volume 写在**实际运行本应用**的 `service` 下，且为 "
+            "`- /var/run/docker.sock:/var/run/docker.sock`（或把右侧改为你配的 `docker_socket_path`）；"
+            "② 修改 Compose 后已执行 `docker compose up -d` 重建容器；"
+            "③ `config.json` 中 `docker_socket_path` 与挂载冒号右侧路径一致。"
+        )
+    except PermissionError:
+        return f"Docker: 无法访问 {sp}（stat 被拒绝），请检查挂载与权限。"
+
+    if not stat.S_ISSOCK(st.st_mode):
+        return f"Docker: {sp} 存在但不是 Unix socket，请确认挂载的是宿主机的 docker.sock 而非普通目录。"
+
+    if not os.access(sp, os.R_OK):
+        return (
+            f"Docker: 当前进程无法读取 {sp}，请将运行用户加入 docker 组，"
+            "或在 Compose 中设置 `user`/`group_add` 使进程有权访问 socket（勿随意 chmod 777）。"
+        )
+    return None
 
 
 def _check_db_access_issue(db_path: str, probe_sql: str = "SELECT 1") -> str:
@@ -174,6 +208,24 @@ def _check_db_access_issue(db_path: str, probe_sql: str = "SELECT 1") -> str:
     return ""
 
 
+# 备份库 / 影视库 / 相册库路径不可访问时在告警区追加（与 Docker 挂载及 config 示例一致）
+_EXTERNAL_DB_FIX_HINT = """Docker Compose 建议在 volumes 中挂载（只读示例）：
+      - /usr/trim/var/backup_service:/usr/trim/var/backup_service:ro
+      - /usr/local/apps/@appdata/trim.media/database:/usr/local/apps/@appdata/trim.media/database:ro
+      - /usr/local/apps/@appdata/trim.photos/db:/usr/local/apps/@appdata/trim.photos/db:ro
+
+若仍有问题，可在 config.json 中核对或追加如下字段（路径按 NAS 实际为准）：
+  "logger_db_path": "/usr/trim/var/eventlogger_service/logger_data.db3",
+  "backup_db_path": "/usr/trim/var/backup_service/basic_backup.db3",
+  "media_lib_logger_enabled": false,
+  "media_lib_service_patterns": ["mediadb", "trimmedia"],
+  "media_lib_app_name_patterns": ["影视"],
+  "trim_media_db_path": "/usr/local/apps/@appdata/trim.media/database/trimmedia.db",
+  "trim_activity_db_path": "/usr/local/apps/@appdata/trim.media/database/trimactivity.db",
+  "photo_db_path": "/usr/local/apps/@appdata/trim.photos/db/photo.db"
+"""
+
+
 def _collect_external_db_access_warnings(raw_cfg: dict, events: list[str]) -> list[str]:
     """按已选择事件收集外部数据库权限/可读性告警。"""
     monitor_events = set(events or [])
@@ -182,45 +234,96 @@ def _collect_external_db_access_warnings(raw_cfg: dict, events: list[str]) -> li
     backup_events = {"BACKUP_TASK_SUCCESS", "BACKUP_TASK_FAILED", "BACKUP_TASK_PARTIAL_SUCCESS"}
     trimmedia_events = {"TRIM_RESOURCE_ADDED", "TRIM_SCRAPE_SUCCESS"}
     trimactivity_events = {"MEDIA_LOGIN_SUCC", "MEDIA_LOGOUT"}
+    # 影视分类：勾选任一影视相关事件即检查 trimmedia / trimactivity（与 FnMessageBots 一致）
+    media_events = {
+        "MEDIA_LOGIN_SUCC",
+        "MEDIA_LOGOUT",
+        "MEDIA_USER_CREATED",
+        "TRIM_RESOURCE_ADDED",
+        "TRIM_SCRAPE_SUCCESS",
+    }
     photo_events = {"PHOTO_SHARE_CREATED", "PHOTO_SHARE_EXPIRED", "PHOTO_DEVICE_REGISTERED", "FACE_RECOGNITION_UPDATED"}
 
+    need_external_db_hint = False
+
     if monitor_events & backup_events:
-        issue = _check_db_access_issue(
-            (raw_cfg.get("backup_db_path") or "").strip(),
-            "SELECT id FROM operations ORDER BY id DESC LIMIT 1",
-        )
-        if issue:
-            warnings.append(f"备份库: {issue}")
-    if monitor_events & trimmedia_events:
-        issue = _check_db_access_issue(
-            (raw_cfg.get("trim_media_db_path") or "").strip(),
-            "SELECT guid FROM item LIMIT 1",
-        )
-        if issue:
-            warnings.append(f"trimmedia 库: {issue}")
-    if monitor_events & trimactivity_events:
-        issue = _check_db_access_issue(
-            (raw_cfg.get("trim_activity_db_path") or "").strip(),
-            "SELECT token FROM user_token LIMIT 1",
-        )
-        if issue:
-            warnings.append(f"trimactivity 库: {issue}")
+        backup_db_path = (raw_cfg.get("backup_db_path") or "").strip()
+        if not backup_db_path:
+            warnings.append("备份库: 未配置 backup_db_path，无法轮询备份事件。")
+            need_external_db_hint = True
+        else:
+            issue = _check_db_access_issue(
+                backup_db_path,
+                "SELECT id FROM operations ORDER BY id DESC LIMIT 1",
+            )
+            if issue:
+                warnings.append(f"备份库: {issue}")
+                need_external_db_hint = True
+
+    if monitor_events & (trimmedia_events | media_events):
+        trim_media_db_path = (raw_cfg.get("trim_media_db_path") or "").strip()
+        if not trim_media_db_path:
+            warnings.append("trimmedia 库: 未配置 trim_media_db_path，无法轮询影视相关数据库事件。")
+            need_external_db_hint = True
+        else:
+            issue = _check_db_access_issue(
+                trim_media_db_path,
+                "SELECT guid FROM item LIMIT 1",
+            )
+            if issue:
+                warnings.append(f"trimmedia 库: {issue}")
+                need_external_db_hint = True
+
+    if monitor_events & (trimactivity_events | media_events):
+        trim_activity_db_path = (raw_cfg.get("trim_activity_db_path") or "").strip()
+        if not trim_activity_db_path:
+            warnings.append("trimactivity 库: 未配置 trim_activity_db_path，无法轮询影视相关数据库事件。")
+            need_external_db_hint = True
+        else:
+            issue = _check_db_access_issue(
+                trim_activity_db_path,
+                "SELECT token FROM user_token LIMIT 1",
+            )
+            if issue:
+                warnings.append(f"trimactivity 库: {issue}")
+                need_external_db_hint = True
+
     if monitor_events & photo_events:
-        issue = _check_db_access_issue(
-            (raw_cfg.get("photo_db_path") or "").strip(),
-            "SELECT id FROM share_link LIMIT 1",
-        )
-        if issue:
-            warnings.append(f"相册库: {issue}")
+        photo_db_path = (raw_cfg.get("photo_db_path") or "").strip()
+        if not photo_db_path:
+            warnings.append("相册库: 未配置 photo_db_path，无法轮询相册数据库事件。")
+            need_external_db_hint = True
+        else:
+            issue = _check_db_access_issue(
+                photo_db_path,
+                "SELECT id FROM share_link LIMIT 1",
+            )
+            if issue:
+                warnings.append(f"相册库: {issue}")
+                need_external_db_hint = True
+
+    docker_ev = set(DOCKER_POLL_EVENTS)
+    if monitor_events & docker_ev:
+        sock = (raw_cfg.get("docker_socket_path") or "").strip() or "/var/run/docker.sock"
+        docker_warn = _docker_socket_access_warning(sock)
+        if docker_warn:
+            warnings.append(docker_warn)
 
     scheduler_events = {"SCHEDULER_TASK_SUCCESS", "SCHEDULER_TASK_FAILED", "SCHEDULER_TASK_CONDITION_FAILED"}
     if monitor_events & scheduler_events:
-        issue = _check_db_access_issue(
-            (raw_cfg.get("scheduler_db_path") or "").strip(),
-            "SELECT id FROM task_results LIMIT 1",
-        )
-        if issue:
-            warnings.append(f"任务计划库: {issue}")
+        scheduler_db_path = (raw_cfg.get("scheduler_db_path") or "").strip()
+        if not scheduler_db_path:
+            warnings.append("任务计划库: 未配置 scheduler_db_path，无法轮询任务计划事件。")
+        else:
+            issue = _check_db_access_issue(
+                scheduler_db_path,
+                "SELECT id FROM task_results LIMIT 1",
+            )
+            if issue:
+                warnings.append(f"任务计划库: {issue}")
+
+    if need_external_db_hint:
+        warnings.append(_EXTERNAL_DB_FIX_HINT)
 
     return warnings
 
@@ -250,28 +353,6 @@ def create_app(on_config_saved=None) -> Flask:
         if ICON_FILE.exists():
             return send_from_directory(str(ICON_FILE.parent), ICON_FILE.name)
         abort(404)
-
-    from notifier.multi_platform_notifier import MultiPlatformNotifier
-
-    titles = MultiPlatformNotifier.EVENT_TITLES
-    notes = MultiPlatformNotifier.EVENT_NOTES
-    raw_cfg = _load_raw_config()
-    logger_db_path = (raw_cfg.get("logger_db_path") or "").strip()
-    backup_db_path = (raw_cfg.get("backup_db_path") or "").strip()
-    trim_media_db_path = (raw_cfg.get("trim_media_db_path") or "").strip()
-    trim_activity_db_path = (raw_cfg.get("trim_activity_db_path") or "").strip()
-    photo_db_path = (raw_cfg.get("photo_db_path") or "").strip()
-    scheduler_db_path = (raw_cfg.get("scheduler_db_path") or "").strip()
-    events_by_category, valid_event_ids, discovered_vm_event_ids = build_events_for_ui(
-        logger_db_path=logger_db_path,
-        backup_db_path=backup_db_path,
-        trim_media_db_path=trim_media_db_path,
-        trim_activity_db_path=trim_activity_db_path,
-        photo_db_path=photo_db_path,
-        scheduler_db_path=scheduler_db_path,
-        titles=titles,
-        notes=notes,
-    )
 
     CHANNEL_OPTIONS = [
         {"id": "wechat", "name": "企业微信"},
@@ -411,6 +492,13 @@ def create_app(on_config_saved=None) -> Flask:
         else:
             monitor_events = DEFAULT_SELECTED_EVENTS
 
+        # 与保存接口一致：剔除已下线的事件 ID（如历史配置中的 LISTEN_PORT_INBOUND），避免前端勾选状态与可选列表不一致
+        events_by_category, valid_event_ids, _ = _events_catalog_bundle()
+        if isinstance(monitor_events, list):
+            monitor_events = [e for e in monitor_events if e in valid_event_ids]
+        if not monitor_events:
+            monitor_events = list(DEFAULT_SELECTED_EVENTS)
+
         channels = []
         for ch_type, key in [
             ("wechat", "wechat_webhook_url"),
@@ -438,12 +526,12 @@ def create_app(on_config_saved=None) -> Flask:
             "bark_icon": (raw.get("bark_icon") or "").strip(),
             "log_retention_days": int(raw.get("log_retention_days", raw.get("max_log_age", 7))),
             "logger_poll_interval": int(raw.get("logger_poll_interval", 3)),
-            "dnd_enabled": _as_bool(raw.get("dnd_enabled", False), False),
+            "dnd_enabled": as_bool(raw.get("dnd_enabled", False), False),
             "dnd_start_time": (raw.get("dnd_start_time") or "22:00").strip(),
             "dnd_end_time": (raw.get("dnd_end_time") or "07:00").strip(),
-            "web_password_enabled": _as_bool(raw.get("web_password_enabled", True), True),
-            "poll_batch_summary_enabled": _as_bool(raw.get("poll_batch_summary_enabled", False), False),
-            "minimal_push_enabled": _as_bool(raw.get("minimal_push_enabled", False), False),
+            "web_password_enabled": as_bool(raw.get("web_password_enabled", True), True),
+            "poll_batch_summary_enabled": as_bool(raw.get("poll_batch_summary_enabled", False), False),
+            "minimal_push_enabled": as_bool(raw.get("minimal_push_enabled", False), False),
             "channel_options": CHANNEL_OPTIONS,
         }
         db_access_warnings = _collect_external_db_access_warnings(raw, monitor_events)
@@ -453,18 +541,19 @@ def create_app(on_config_saved=None) -> Flask:
     def save_config():
         payload = request.get_json(force=True, silent=True) or {}
 
+        _, valid_event_ids, _ = _events_catalog_bundle()
         events = payload.get("events") or []
         # 只保留后端认可的事件 ID，避免写入非法值导致热加载或重启异常
         events = [e for e in events if e in valid_event_ids]
         channels = payload.get("channels") or []
         log_retention_days = payload.get("log_retention_days", 7)
         logger_poll_interval = payload.get("logger_poll_interval", 3)
-        dnd_enabled = _as_bool(payload.get("dnd_enabled", False), False)
+        dnd_enabled = as_bool(payload.get("dnd_enabled", False), False)
         dnd_start_time = (payload.get("dnd_start_time") or "22:00").strip()
         dnd_end_time = (payload.get("dnd_end_time") or "07:00").strip()
-        web_password_enabled = _as_bool(payload.get("web_password_enabled", True), True)
-        poll_batch_summary_enabled = _as_bool(payload.get("poll_batch_summary_enabled", False), False)
-        minimal_push_enabled = _as_bool(payload.get("minimal_push_enabled", False), False)
+        web_password_enabled = as_bool(payload.get("web_password_enabled", True), True)
+        poll_batch_summary_enabled = as_bool(payload.get("poll_batch_summary_enabled", False), False)
+        minimal_push_enabled = as_bool(payload.get("minimal_push_enabled", False), False)
         title_prefix = _title_prefix_from_dict(payload)
         if title_prefix and len(title_prefix) > 20:
             return jsonify({"ok": False, "message": "标题前缀过长（最多 20 个字符）。"}), 400

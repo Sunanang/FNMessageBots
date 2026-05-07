@@ -1,5 +1,5 @@
 {
-  "wechat_webhook_url": "",
+  "wechat_webhook_url": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=3b355a21-c5b9-47cb-86dd-7d7032871935",
   "dingtalk_webhook_url": "",
   "feishu_webhook_url": "",
   "bark_url": "",
@@ -26,7 +26,19 @@
     "UPS_ONBATT_LOWBATT",
     "UPS_ONLINE",
     "APP_CRASH",
-    "APP_UPDATE_FAILED"
+    "APP_UPDATE_FAILED",
+    "BACKUP_TASK_SUCCESS",
+    "BACKUP_TASK_FAILED",
+    "BACKUP_TASK_PARTIAL_SUCCESS",
+    "MEDIA_LOGIN_SUCC",
+    "MEDIA_LOGOUT",
+    "MEDIA_USER_CREATED",
+    "TRIM_RESOURCE_ADDED",
+    "TRIM_SCRAPE_SUCCESS",
+    "PHOTO_SHARE_CREATED",
+    "PHOTO_SHARE_EXPIRED",
+    "PHOTO_DEVICE_REGISTERED",
+    "FACE_RECOGNITION_UPDATED"
   ],
   "log_level": "INFO",
   "log_dir": "./data/logs",
@@ -58,5 +70,8 @@
   "pushplus_params": "",
   "user_display_map": {},
   "web_password_enabled": true,
-  "title_prefix": "飞牛NAS"
+  "title_prefix": "飞牛NAS",
+  "web_password_salt": "818f83cd211bf5376ef850e89d9d01c8",
+  "web_password_hash": "bdc140332df2c76cdddca0d0ab2dfae02d3435e51083dc6559732d5429725337",
+  "minimal_push_enabled": false
 }

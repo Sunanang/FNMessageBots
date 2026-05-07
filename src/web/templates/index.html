@@ -256,6 +256,7 @@
       padding: 6px 8px;
       font-size: 13px;
       text-align: left;
+      vertical-align: top;
     }
     .channels-table thead th {
       color: #6b7280;
@@ -431,6 +432,7 @@
     }
     .warning-panel-item {
       word-break: break-word;
+      white-space: pre-wrap;
       margin: 2px 0;
     }
     .toast-container {
@@ -792,6 +794,7 @@
             </thead>
             <tbody id="channels-body"></tbody>
           </table>
+          <input type="hidden" id="input-bark-icon" value="" />
         </div>
         <div class="field-helper" style="margin-top: 10px;">
           渠道配置教程：
@@ -841,11 +844,6 @@
               <span>极简推送</span>
             </div>
             <div class="field-helper">开启后推送消息将压缩为一行显示，仅展示关键信息</div>
-          </div>
-          <div>
-            <div class="field-label">Bark 自定义图标 URL</div>
-            <input id="input-bark-icon" type="text" placeholder="留空则使用 Bark 默认图标" />
-            <div class="field-helper">须为公网可访问的 https 图片链接；仅作用于 Bark 渠道。</div>
           </div>
         </div>
         <div class="dnd-section" style="margin-top: 16px; padding-top: 16px; border-top: 1px solid #e5e7eb;">
@@ -1093,6 +1091,27 @@
       return JSON.stringify(o);
     }
 
+    function syncBarkIconInputsFromMaster() {
+      const master = document.getElementById("input-bark-icon");
+      if (!master) return;
+      const v = master.value;
+      channelsBody.querySelectorAll(".bark-icon-input").forEach(function (el) {
+        el.value = v;
+      });
+    }
+
+    function bindBarkIconInput(iconInp) {
+      const master = document.getElementById("input-bark-icon");
+      if (!master || !iconInp) return;
+      iconInp.addEventListener("input", function () {
+        const v = this.value;
+        master.value = v;
+        channelsBody.querySelectorAll(".bark-icon-input").forEach(function (el) {
+          if (el !== iconInp) el.value = v;
+        });
+      });
+    }
+
     function serializeMagicPushFromInputs(wrap) {
       if (!wrap) return "";
       const base = (wrap.querySelector(".magic-push-base") && wrap.querySelector(".magic-push-base").value || "").trim();
@@ -1135,6 +1154,10 @@
           const wrap = tdUrl.querySelector(".smtp-fields");
           return serializeSmtpFromInputs(wrap);
         }
+        if (rowChannelType === "bark") {
+          const inp = tdUrl.querySelector(".bark-channel-fields input.channel-url-input");
+          return inp ? inp.value.trim() : "";
+        }
         const inp = tdUrl.querySelector("input.channel-url-input");
         return inp ? inp.value.trim() : "";
       }
@@ -1164,24 +1187,30 @@
           const wrap = document.createElement("div");
           wrap.className = "magic-push-fields";
           wrap.style.display = "flex";
-          wrap.style.flexDirection = "row";
-          wrap.style.flexWrap = "wrap";
-          wrap.style.alignItems = "center";
+          wrap.style.flexDirection = "column";
           wrap.style.gap = "8px";
+          wrap.style.width = "100%";
           const inBase = document.createElement("input");
           inBase.type = "text";
           inBase.className = "magic-push-base channel-url-input";
           inBase.placeholder = "基础 URL（如 https://push.example.com，不含 /api/push）";
           inBase.value = base;
-          inBase.style.flex = "2 1 200px";
-          inBase.style.minWidth = "160px";
+          inBase.style.width = "100%";
+          const row2 = document.createElement("div");
+          row2.className = "magic-push-row2";
+          row2.style.display = "flex";
+          row2.style.flexDirection = "row";
+          row2.style.flexWrap = "wrap";
+          row2.style.alignItems = "center";
+          row2.style.gap = "8px";
+          row2.style.width = "100%";
           const inTok = document.createElement("input");
           inTok.type = "text";
           inTok.className = "magic-push-token";
           inTok.placeholder = "Token";
           inTok.autocomplete = "off";
           inTok.value = token;
-          inTok.style.flex = "1 1 140px";
+          inTok.style.flex = "1 1 120px";
           inTok.style.minWidth = "100px";
           const inTitle = document.createElement("input");
           inTitle.type = "text";
@@ -1191,8 +1220,9 @@
           inTitle.style.flex = "1 1 160px";
           inTitle.style.minWidth = "120px";
           wrap.appendChild(inBase);
-          wrap.appendChild(inTok);
-          wrap.appendChild(inTitle);
+          row2.appendChild(inTok);
+          row2.appendChild(inTitle);
+          wrap.appendChild(row2);
           tdUrl.appendChild(wrap);
         } else if (type === "smtp") {
           let server = "", port = "", username = "", password = "", fromAddr = "", toAddr = "";
@@ -1252,6 +1282,36 @@
           wrap.appendChild(inFrom);
           wrap.appendChild(inTo);
           tdUrl.appendChild(wrap);
+        } else if (type === "bark") {
+          const wrap = document.createElement("div");
+          wrap.className = "bark-channel-fields";
+          wrap.style.display = "flex";
+          wrap.style.flexDirection = "column";
+          wrap.style.gap = "8px";
+          wrap.style.width = "100%";
+          const inp = document.createElement("input");
+          inp.type = "text";
+          inp.className = "channel-url-input";
+          inp.placeholder = "Bark 推送 URL（如 https://api.day.app/YourKey ）";
+          inp.value = val || "";
+          const iconWrap = document.createElement("div");
+          iconWrap.style.marginTop = "2px";
+          const iconLabel = document.createElement("div");
+          iconLabel.className = "field-helper";
+          iconLabel.style.marginBottom = "2px";
+          iconLabel.textContent = "Bark 自定义图标 URL（留空则默认；须公网 https 图片）";
+          const iconInp = document.createElement("input");
+          iconInp.type = "text";
+          iconInp.className = "bark-icon-input";
+          iconInp.placeholder = "留空则使用 Bark 默认图标";
+          const master = document.getElementById("input-bark-icon");
+          iconInp.value = master ? master.value : "";
+          bindBarkIconInput(iconInp);
+          iconWrap.appendChild(iconLabel);
+          iconWrap.appendChild(iconInp);
+          wrap.appendChild(inp);
+          wrap.appendChild(iconWrap);
+          tdUrl.appendChild(wrap);
         } else {
           const inp = document.createElement("input");
           inp.type = "text";
@@ -1305,6 +1365,9 @@
         document.getElementById("app-version").textContent = data.version || "";
 
         channelOptions = data.channel_options || [];
+
+        document.getElementById("input-bark-icon").value =
+          typeof data.bark_icon === "string" ? data.bark_icon : "";
 
         // 按分类渲染事件
         eventsContainer.innerHTML = "";
@@ -1406,8 +1469,7 @@
         document.getElementById("input-minimal-push-enabled").checked = !!data.minimal_push_enabled;
         document.getElementById("input-title-prefix").value =
           typeof data.title_prefix === "string" ? data.title_prefix : "飞牛NAS";
-        document.getElementById("input-bark-icon").value =
-          typeof data.bark_icon === "string" ? data.bark_icon : "";
+        syncBarkIconInputsFromMaster();
         const dndEnabled = !!data.dnd_enabled;
         document.getElementById("input-dnd-enabled").checked = dndEnabled;
         document.getElementById("input-dnd-start").value = data.dnd_start_time || "22:00";
@@ -1472,6 +1534,11 @@
         } else if (type === "smtp") {
           const wrap = tr.querySelector(".smtp-fields");
           url = serializeSmtpFromInputs(wrap);
+          if (!url) return;
+        } else if (type === "bark") {
+          const inp = tr.querySelector(".bark-channel-fields input.channel-url-input");
+          if (!inp) return;
+          url = inp.value.trim();
           if (!url) return;
         } else {
           const inp = tr.querySelector("input.channel-url-input");

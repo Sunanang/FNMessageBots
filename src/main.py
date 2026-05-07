@@ -35,6 +35,7 @@ from monitor.scheduler_db_poller import (
     SCHEDULER_TASK_FAILED_EVENT,
     SCHEDULER_TASK_CONDITION_FAILED_EVENT,
 )
+from monitor.docker_events_poller import DOCKER_POLL_EVENTS, DockerEventsPoller
 from monitor.event_processor import EventProcessor
 from notifier.unified_notifier import UnifiedNotifier
 from web.ui_app import start_ui_server_in_background
@@ -58,6 +59,7 @@ class Application:
         self.trim_activity_poller = None
         self.photo_db_poller = None
         self.scheduler_db_poller = None
+        self.docker_events_poller = None
         self.logger = None
         self.running = False
         self.notification_health_thread = None
@@ -181,6 +183,36 @@ class Application:
             self._probe_db_readable("相册库 photo.db", getattr(self.config, "photo_db_path", "") or "")
         if me & SCHEDULER_POLL_EVENTS:
             self._probe_db_readable("任务计划库 scheduler.db", getattr(self.config, "scheduler_db_path", "") or "")
+
+    def _build_log_poller(self):
+        """按配置创建主日志轮询器；logger_db_path 缺失或不可读时返回 None。"""
+        if not self.config:
+            return None
+        logger_db_path = (getattr(self.config, "logger_db_path", "") or "").strip()
+        if not logger_db_path:
+            print("未配置 logger_db_path，跳过主日志库轮询（仅启用其他已配置轮询源）。")
+            if self.logger:
+                self.logger.warning("未配置 logger_db_path，主日志库轮询未启用")
+            return None
+        if not self._probe_db_readable("主日志库 logger_data.db3", logger_db_path):
+            print("主日志库不可访问，跳过主日志库轮询（仅启用其他已配置轮询源）。")
+            return None
+
+        poller = DBLogPoller(
+            db_path=logger_db_path,
+            cursor_dir=self.config.cursor_dir,
+            poll_interval=self.config.logger_poll_interval,
+            monitor_events=self.config.monitor_events,
+            media_lib_logger_enabled=getattr(self.config, "media_lib_logger_enabled", False),
+            media_lib_service_patterns=getattr(self.config, "media_lib_service_patterns", []),
+        )
+        if getattr(self.config, "poll_batch_summary_enabled", False):
+            poller.set_batch_handler(self._dispatch_batch_events)
+            print("轮询汇总模式：已开启（同一轮查询内多事件合并为一条推送）")
+        else:
+            poller.set_batch_handler(None)
+            print("轮询汇总模式：已关闭（逐条推送；事件密集时可能触发渠道限流）")
+        return poller
     
     def initialize(self) -> bool:
         """初始化应用组件"""
@@ -247,21 +279,11 @@ class Application:
             print("事件处理器初始化完成")
             
             print("正在初始化数据库日志轮询器...")
-            self.log_poller = DBLogPoller(
-                db_path=self.config.logger_db_path,
-                cursor_dir=self.config.cursor_dir,
-                poll_interval=self.config.logger_poll_interval,
-                monitor_events=self.config.monitor_events,
-                media_lib_logger_enabled=getattr(self.config, "media_lib_logger_enabled", False),
-                media_lib_service_patterns=getattr(self.config, "media_lib_service_patterns", []),
-            )
-            if getattr(self.config, "poll_batch_summary_enabled", False):
-                self.log_poller.set_batch_handler(self._dispatch_batch_events)
-                print("轮询汇总模式：已开启（同一轮查询内多事件合并为一条推送）")
+            self.log_poller = self._build_log_poller()
+            if self.log_poller:
+                print(f"数据库轮询器初始化完成（间隔: {self.config.logger_poll_interval}秒，数据库: {self.config.logger_db_path}）")
             else:
-                self.log_poller.set_batch_handler(None)
-                print("轮询汇总模式：已关闭（逐条推送；事件密集时可能触发渠道限流）")
-            print(f"数据库轮询器初始化完成（间隔: {self.config.logger_poll_interval}秒，数据库: {self.config.logger_db_path}）")
+                print("主日志库轮询器未启用")
 
             print("正在按监控事件初始化备份库/影视库/相册轮询器...")
             self._sync_optional_pollers()
@@ -300,7 +322,17 @@ class Application:
                 )
             else:
                 print("未勾选任务计划事件，跳过 scheduler.db 轮询")
-
+            ds = (getattr(self.config, "docker_socket_path", "") or "").strip() or "/var/run/docker.sock"
+            if self.docker_events_poller:
+                print(f"Docker 容器事件监听已启用（socket: {ds}）")
+            else:
+                if set(self.config.monitor_events or []) & set(DOCKER_POLL_EVENTS):
+                    if not Path(ds).exists():
+                        print(f"已勾选 Docker 容器事件，但 socket 不存在: {ds}（请挂载 docker.sock）")
+                    else:
+                        print("Docker 容器事件：依赖未就绪或 docker SDK 不可用，未启动监听")
+                else:
+                    print("未勾选 Docker 容器事件，跳过 Docker events 监听")
 
             print("开始注册事件处理器...")
             self._register_db_event_handlers()
@@ -427,11 +459,32 @@ class Application:
                 self.scheduler_db_poller.stop()
                 self.scheduler_db_poller = None
 
+        docker_sock = (getattr(self.config, "docker_socket_path", "") or "").strip() or "/var/run/docker.sock"
+        docker_wanted = bool(me & DOCKER_POLL_EVENTS)
+        docker_ok = Path(docker_sock).exists() if docker_wanted else False
+        if docker_wanted and docker_ok:
+            if self.docker_events_poller is None:
+                self.docker_events_poller = DockerEventsPoller(
+                    socket_path=docker_sock,
+                    cursor_dir=cdir,
+                    monitor_events=self.config.monitor_events,
+                )
+            else:
+                self.docker_events_poller.update_config(
+                    monitor_events=self.config.monitor_events,
+                    socket_path=docker_sock,
+                )
+        else:
+            if self.docker_events_poller is not None:
+                self.docker_events_poller.stop()
+                self.docker_events_poller = None
+
     def _register_db_event_handlers(self) -> None:
         """为 logger / 备份 / 影视库 / 相册 SQLite 轮询器注册 monitor_events 中的处理器。"""
-        if not self.log_poller or not self.event_processor or not self.config:
+        if not self.event_processor or not self.config:
             return
-        self.log_poller.clear_handlers()
+        if self.log_poller:
+            self.log_poller.clear_handlers()
         if self.backup_poller:
             self.backup_poller.clear_handlers()
         if self.media_db_poller:
@@ -442,17 +495,21 @@ class Application:
             self.photo_db_poller.clear_handlers()
         if self.scheduler_db_poller:
             self.scheduler_db_poller.clear_handlers()
+        if self.docker_events_poller:
+            self.docker_events_poller.clear_handlers()
         trim_ev = {"TRIM_RESOURCE_ADDED", "TRIM_SCRAPE_SUCCESS"}
         act_ev = {"MEDIA_LOGIN_SUCC", "MEDIA_LOGOUT"}
         photo_ev = set(PHOTO_POLL_EVENTS)
         scheduler_ev = set(SCHEDULER_POLL_EVENTS)
+        docker_ev = set(DOCKER_POLL_EVENTS)
         for event_type in self.config.monitor_events:
             handler = self.event_processor.get_handler(event_type)
             if not handler:
                 print(f"✗ 未知事件类型: {event_type}")
                 continue
             # 登录/退出保留 logger 兜底，避免 trimactivity 的 app_name 过滤导致漏报。
-            self.log_poller.add_handler(event_type, handler)
+            if self.log_poller:
+                self.log_poller.add_handler(event_type, handler)
             if self.backup_poller and event_type in (BACKUP_SUCCESS_EVENT, BACKUP_FAILED_EVENT, BACKUP_PARTIAL_EVENT):
                 self.backup_poller.add_handler(event_type, handler)
             if self.media_db_poller and event_type in trim_ev:
@@ -463,6 +520,8 @@ class Application:
                 self.photo_db_poller.add_handler(event_type, handler)
             if self.scheduler_db_poller and event_type in scheduler_ev:
                 self.scheduler_db_poller.add_handler(event_type, handler)
+            if self.docker_events_poller and event_type in docker_ev:
+                self.docker_events_poller.add_handler(event_type, handler)
             print(f"✓ 注册事件处理器: {event_type}")
 
     def reload_config(self) -> None:
@@ -486,18 +545,7 @@ class Application:
             print("配置已保存并热加载：检测到新配置的推送渠道，正在启动监控...")
             self.notifier = UnifiedNotifier(self.config)
             self.event_processor = EventProcessor(self.notifier, self.config)
-            self.log_poller = DBLogPoller(
-                db_path=self.config.logger_db_path,
-                cursor_dir=self.config.cursor_dir,
-                poll_interval=self.config.logger_poll_interval,
-                monitor_events=self.config.monitor_events,
-                media_lib_logger_enabled=getattr(self.config, "media_lib_logger_enabled", False),
-                media_lib_service_patterns=getattr(self.config, "media_lib_service_patterns", []),
-            )
-            if getattr(self.config, "poll_batch_summary_enabled", False):
-                self.log_poller.set_batch_handler(self._dispatch_batch_events)
-            else:
-                self.log_poller.set_batch_handler(None)
+            self.log_poller = self._build_log_poller()
             self._sync_optional_pollers()
             self._register_db_event_handlers()
             if self.log_poller:
@@ -512,38 +560,62 @@ class Application:
                 self.photo_db_poller.start()
             if self.scheduler_db_poller:
                 self.scheduler_db_poller.start()
+            if self.docker_events_poller:
+                self.docker_events_poller.start()
             if self.logger:
                 self.logger.info("热加载完成：监控已启动")
         elif self.notifier is not None:
             self.notifier.reload_config()
-            if self.log_poller is not None:
-                self.log_poller.update_config(
-                    monitor_events=self.config.monitor_events,
-                    poll_interval=self.config.logger_poll_interval,
-                    db_path=self.config.logger_db_path,
-                    media_lib_logger_enabled=getattr(self.config, "media_lib_logger_enabled", False),
-                    media_lib_service_patterns=getattr(self.config, "media_lib_service_patterns", []),
-                )
-                if getattr(self.config, "poll_batch_summary_enabled", False):
-                    self.log_poller.set_batch_handler(self._dispatch_batch_events)
+            logger_db_path = (getattr(self.config, "logger_db_path", "") or "").strip()
+            log_poller_should_run = bool(logger_db_path) and self._probe_db_readable("主日志库 logger_data.db3", logger_db_path)
+            if log_poller_should_run:
+                if self.log_poller is not None:
+                    self.log_poller.update_config(
+                        monitor_events=self.config.monitor_events,
+                        poll_interval=self.config.logger_poll_interval,
+                        db_path=self.config.logger_db_path,
+                        media_lib_logger_enabled=getattr(self.config, "media_lib_logger_enabled", False),
+                        media_lib_service_patterns=getattr(self.config, "media_lib_service_patterns", []),
+                    )
+                    if getattr(self.config, "poll_batch_summary_enabled", False):
+                        self.log_poller.set_batch_handler(self._dispatch_batch_events)
+                    else:
+                        self.log_poller.set_batch_handler(None)
                 else:
-                    self.log_poller.set_batch_handler(None)
+                    # 允许配置热加载后补齐 logger_db_path 并启用主日志轮询器
+                    self.log_poller = self._build_log_poller()
+            else:
+                if self.log_poller is not None:
+                    self.log_poller.stop()
+                    self.log_poller = None
+                    print("主日志库配置不可用，已停止主日志库轮询器。")
             self._sync_optional_pollers()
-            if self.log_poller is not None:
-                self._register_db_event_handlers()
-                if self.backup_poller:
-                    self.backup_poller.start()
-                if self.media_db_poller:
-                    self.media_db_poller.start()
-                if self.trim_activity_poller:
-                    self.trim_activity_poller.start()
-                if self.photo_db_poller:
-                    self.photo_db_poller.start()
-                if self.scheduler_db_poller:
-                    self.scheduler_db_poller.start()
+            self._register_db_event_handlers()
+            if self.log_poller:
+                self.log_poller.start()
+            if self.backup_poller:
+                self.backup_poller.start()
+            if self.media_db_poller:
+                self.media_db_poller.start()
+            if self.trim_activity_poller:
+                self.trim_activity_poller.start()
+            if self.photo_db_poller:
+                self.photo_db_poller.start()
+            if self.scheduler_db_poller:
+                self.scheduler_db_poller.start()
+            if self.docker_events_poller:
+                self.docker_events_poller.start()
             if self.logger:
                 self.logger.info("热加载完成：监控配置已更新")
-    
+
+        # 热加载后同步「原始推送日志保留天数」到存储模块（无需重启进程）
+        if self.event_processor and getattr(self.event_processor, "log_storage", None):
+            try:
+                d = int(getattr(self.config, "log_retention_days", 30))
+                self.event_processor.log_storage.days_to_keep = max(1, d)
+            except (TypeError, ValueError):
+                pass
+
     def _signal_handler(self, signum, frame):
         """信号处理器"""
         print(f"\n接收到信号 {signum}，准备关闭应用...")
@@ -614,6 +686,15 @@ class Application:
                     self.scheduler_db_poller.start()
                 else:
                     print("未勾选任务计划事件，跳过 scheduler.db 轮询")
+                if self.docker_events_poller:
+                    print("启动 Docker 容器事件监听...")
+                    self.docker_events_poller.start()
+                elif set(self.config.monitor_events or []) & set(DOCKER_POLL_EVENTS):
+                    ds = (getattr(self.config, "docker_socket_path", "") or "").strip() or "/var/run/docker.sock"
+                    if not Path(ds).exists():
+                        print(f"已勾选 Docker 容器事件，但 socket 不存在: {ds}")
+                    else:
+                        print("Docker 容器事件依赖未就绪，跳过监听（请确认已 pip install docker）")
             
             # 设置信号处理
             signal.signal(signal.SIGINT, self._signal_handler)
@@ -771,6 +852,8 @@ class Application:
             self.photo_db_poller.stop()
         if self.scheduler_db_poller:
             self.scheduler_db_poller.stop()
+        if self.docker_events_poller:
+            self.docker_events_poller.stop()
 
         # 停止运行日志清理线程
         cleanup_flag = getattr(self.logger, 'cleanup_stop_flag', None) if self.logger else None

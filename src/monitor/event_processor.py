@@ -9,6 +9,7 @@ from datetime import datetime
 from threading import Timer
 
 from .models import JournalEntry
+from src.notifier.multi_platform_notifier import normalize_disk_io_payload
 from src.notifier.unified_notifier import UnifiedNotifier
 from src.utils.log_storage import LogStorage
 
@@ -45,6 +46,7 @@ class EventProcessor:
             'InsertDisk': lambda ed, e: self._handle_simple_notification('InsertDisk', ed, e),
             'EjectDisk': lambda ed, e: self._handle_simple_notification('EjectDisk', ed, e),
             'StorageBroken': lambda ed, e: self._handle_simple_notification('StorageBroken', ed, e),
+            'STORAGE_DEGRADED': lambda ed, e: self._handle_simple_notification('STORAGE_DEGRADED', ed, e),
             'SSH_INVALID_USER': self._handle_ssh_invalid_user,
             'SSH_AUTH_FAILED': self._handle_ssh_auth_failed,
             'SSH_LOGIN_SUCCESS': self._handle_ssh_login_success,
@@ -79,6 +81,17 @@ class EventProcessor:
             'SCHEDULER_TASK_SUCCESS': self._handle_scheduler_task_success,
             'SCHEDULER_TASK_FAILED': self._handle_scheduler_task_failed,
             'SCHEDULER_TASK_CONDITION_FAILED': self._handle_scheduler_task_condition_failed,
+            # Docker 容器（Engine events，按 action 分事件 ID）
+            'DOCKER_CONTAINER_CREATE': lambda ed, e: self._handle_docker_notification('DOCKER_CONTAINER_CREATE', ed, e),
+            'DOCKER_CONTAINER_START': lambda ed, e: self._handle_docker_notification('DOCKER_CONTAINER_START', ed, e),
+            'DOCKER_CONTAINER_STOP': lambda ed, e: self._handle_docker_notification('DOCKER_CONTAINER_STOP', ed, e),
+            'DOCKER_CONTAINER_DIE': lambda ed, e: self._handle_docker_notification('DOCKER_CONTAINER_DIE', ed, e),
+            'DOCKER_CONTAINER_OOM': lambda ed, e: self._handle_docker_notification('DOCKER_CONTAINER_OOM', ed, e),
+            'DOCKER_CONTAINER_KILL': lambda ed, e: self._handle_docker_notification('DOCKER_CONTAINER_KILL', ed, e),
+            'DOCKER_CONTAINER_PAUSE': lambda ed, e: self._handle_docker_notification('DOCKER_CONTAINER_PAUSE', ed, e),
+            'DOCKER_CONTAINER_UNPAUSE': lambda ed, e: self._handle_docker_notification('DOCKER_CONTAINER_UNPAUSE', ed, e),
+            'DOCKER_CONTAINER_RESTART': lambda ed, e: self._handle_docker_notification('DOCKER_CONTAINER_RESTART', ed, e),
+            'DOCKER_CONTAINER_DESTROY': lambda ed, e: self._handle_docker_notification('DOCKER_CONTAINER_DESTROY', ed, e),
             # 可选事件（默认不推送，需用户勾选）
             'ARCHIVING_SUCCESS': lambda ed, e: self._handle_simple_notification('ARCHIVING_SUCCESS', ed, e),
             'DeleteFile': lambda ed, e: self._handle_simple_notification('DeleteFile', ed, e),
@@ -603,10 +616,8 @@ class EventProcessor:
         self._store_notification_log(event_type, event_data, raw_log, entry, source='db')
 
     def _handle_disk_io_err(self, event_data: Dict[str, Any], entry: JournalEntry):
-        """处理磁盘IO错误事件（data: DEV, SN, MODEL, ERR_CNT）"""
-        data = event_data.get('data', {})
-        dev = data.get('DEV', data.get('dev', ''))
-        err_cnt = data.get('ERR_CNT', data.get('err_cnt', 0))
+        """处理磁盘IO错误事件（data 嵌套或顶层 disk/model/serial）。"""
+        dev, _model, _sn, err_cnt = normalize_disk_io_payload(event_data)
         timestamp = getattr(entry, 'timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
         self.logger.warning(f"磁盘IO错误: {dev}, 错误次数 {err_cnt}")
         raw_log = getattr(entry, 'raw_data', '{}')
@@ -641,6 +652,20 @@ class EventProcessor:
             timestamp=timestamp
         )
         self._store_notification_log(event_type, event_data, raw_log, entry, source='db')
+
+    def _handle_docker_notification(self, event_type: str, event_data: Dict[str, Any], entry: JournalEntry):
+        """Docker Engine 容器事件：推送并写入推送日志（来源 docker）。"""
+        timestamp = getattr(entry, 'timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        raw_log = getattr(entry, 'raw_data', '{}')
+        label = event_data.get("container_name") or event_data.get("container_id") or ""
+        self.logger.info("Docker 容器事件 %s: %s", event_type, label)
+        self.notifier.send_notification(
+            event_type=event_type,
+            event_data=event_data,
+            raw_log=raw_log,
+            timestamp=timestamp,
+        )
+        self._store_notification_log(event_type, event_data, raw_log, entry, source="docker")
 
     def _handle_backup_task_success(self, event_data: Dict[str, Any], entry: JournalEntry):
         """处理备份任务成功事件。"""

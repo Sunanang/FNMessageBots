@@ -36,6 +36,18 @@ def _truncate_channel_results_for_storage(channel_results: List[Dict[str, Any]])
     return out
 
 
+def _failure_summary_from_channel_results(channel_results: List[Dict[str, Any]]) -> str:
+    """从各渠道结果拼一段可读失败原因，写入 push_history.detail。"""
+    parts: List[str] = []
+    for cr in channel_results or []:
+        if cr.get("success"):
+            continue
+        ch = str(cr.get("channel") or "?")
+        err = (cr.get("error") or "").strip()
+        parts.append(f"{ch}: {err}" if err else f"{ch}: 发送失败")
+    return "; ".join(parts)[:800] if parts else ""
+
+
 def _event_summary(event_type: str, event_data: Dict[str, Any]) -> str:
     """从 event_data 生成一条简短摘要，用于推送记录列表展示。"""
     data = event_data.get("data") if isinstance(event_data.get("data"), dict) else {}
@@ -432,6 +444,12 @@ class UnifiedNotifier:
                 "event_data": event_data,
                 "channel_results": _truncate_channel_results_for_storage(channel_results),
             }
+            if not success:
+                fs = _failure_summary_from_channel_results(channel_results)
+                if fs:
+                    detail["failure_summary"] = fs
+                elif not channel_results:
+                    detail["failure_summary"] = "未配置推送渠道或事件被去重跳过"
             if event_type == "POLL_BATCH_SUMMARY":
                 by_type = event_data.get("by_type") if isinstance(event_data.get("by_type"), dict) else {}
                 render_meta = event_data.get("batch_render_meta") if isinstance(event_data.get("batch_render_meta"), dict) else {}
@@ -523,6 +541,41 @@ class UnifiedNotifier:
             event_type, message, additional_info
         )
         success = out.get("success", False) if isinstance(out, dict) else bool(out)
+        channel_results = out.get("channel_results") if isinstance(out, dict) else []
+        skipped = out.get("skipped") if isinstance(out, dict) else None
+        # 系统通知失败时写入 push_history（与事件推送同一库），便于 Web「推送记录」查看原因；不去重跳过入库以免刷屏
+        if not success and skipped != "duplicate":
+            try:
+                from utils.push_history import add_record as add_push_history
+                summary = ((message or "").replace("\n", " ")).strip()[:500] or event_type
+                detail_sys: Dict[str, Any] = {
+                    "kind": "system_notification",
+                    "event_type": event_type,
+                    "channel_results": _truncate_channel_results_for_storage(
+                        channel_results if isinstance(channel_results, list) else []
+                    ),
+                }
+                if additional_info:
+                    detail_sys["additional_info"] = {
+                        k: additional_info.get(k)
+                        for k in ("hostname", "version")
+                        if additional_info.get(k) is not None
+                    }
+                fs = _failure_summary_from_channel_results(
+                    channel_results if isinstance(channel_results, list) else []
+                )
+                if fs:
+                    detail_sys["failure_summary"] = fs
+                else:
+                    detail_sys["failure_summary"] = "未配置任何推送渠道或全部渠道发送失败"
+                add_push_history(
+                    success=False,
+                    event_type=event_type,
+                    summary=summary,
+                    detail=detail_sys,
+                )
+            except Exception:
+                pass
         # 系统通知（APP_START/APP_STOP/勿扰汇总等）不参与推送汇总统计，仅事件推送（send_notification）统计
 
         # 确定实际使用的方法（检查哪些平台真正发送了）

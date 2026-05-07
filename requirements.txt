@@ -5,3 +5,4 @@ dataclasses; python_version < '3.7'
 python-dateutil>=2.8.2
 psutil>=5.9.0
 Flask>=3.0.0
+docker>=7.0.0

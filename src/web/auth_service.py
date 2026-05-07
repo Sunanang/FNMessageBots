@@ -7,25 +7,9 @@ from __future__ import annotations
 import hashlib
 import secrets
 from typing import Callable, Optional, Tuple
+from utils.value_parser import as_bool
 
 PBKDF2_ITERATIONS = 100000
-
-
-def _as_bool(value, default: bool = False) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return value != 0
-    if isinstance(value, str):
-        text = value.strip().lower()
-        if text in {"1", "true", "yes", "on"}:
-            return True
-        if text in {"0", "false", "no", "off"}:
-            return False
-        return default
-    return bool(value)
 
 
 def hash_password(password: str, salt: bytes) -> str:
@@ -68,4 +52,4 @@ def has_password_set(load_raw_config: Callable[[], dict]) -> bool:
 def is_password_verification_enabled(load_raw_config: Callable[[], dict]) -> bool:
     """是否开启密码验证（默认 True）。"""
     raw = load_raw_config()
-    return _as_bool(raw.get("web_password_enabled", True), True)
+    return as_bool(raw.get("web_password_enabled", True), True)

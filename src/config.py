@@ -2,32 +2,17 @@
 配置管理模块
 """
 
+import copy
 import os
 import json
 from typing import List, Dict, Any
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
+from utils.value_parser import as_bool
+from valid_event_ids import filter_monitor_events
 
 # 推送标题前缀默认值；配置文件无 title_prefix 项时使用。仅当配置里显式存空字符串时才关闭前缀。
 TITLE_PREFIX_DEFAULT = "飞牛NAS"
-
-
-def _as_bool(value: Any, default: bool = False) -> bool:
-    """稳健布尔解析：兼容 bool/数字/字符串（如 'true'/'false'）。"""
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return value != 0
-    if isinstance(value, str):
-        text = value.strip().lower()
-        if text in {"1", "true", "yes", "on"}:
-            return True
-        if text in {"0", "false", "no", "off"}:
-            return False
-        return default
-    return bool(value)
 
 
 @dataclass
@@ -51,7 +36,7 @@ class Config:
 
     # 监控配置
     monitor_events: List[str] = field(default_factory=lambda: [
-        "LoginSucc", "LoginSucc2FA1", "LoginFail", "Logout", "FoundDisk", "InsertDisk", "EjectDisk", "StorageBroken", "APP_CRASH",
+        "LoginSucc", "LoginSucc2FA1", "LoginFail", "Logout", "FoundDisk", "InsertDisk", "EjectDisk", "StorageBroken", "STORAGE_DEGRADED", "APP_CRASH",
         "APP_UPDATE_FAILED", "APP_START_FAILED_LOCAL_APP_RUN_EXCEPTION",
         "APP_AUTO_START_FAILED_DOCKER_NOT_AVAILABLE",         "CPU_USAGE_ALARM",
         "CPU_USAGE_RESTORED",
@@ -89,6 +74,7 @@ class Config:
     trim_activity_db_path: str = ""
     photo_db_path: str = ""  # 相册 photo.db，空则不轮询相册事件
     scheduler_db_path: str = ""  # fn-scheduler scheduler.db，空则不轮询任务计划事件
+    docker_socket_path: str = "/var/run/docker.sock"  # Docker Engine Unix socket；勾选 Docker 容器事件且文件可访问时监听
     logger_poll_interval: int = 5  # 秒，轮询间隔
 
     # 轮询汇总模式：开启后同一轮查询到的多条事件合并为一条通知；关闭则逐条推送（易触发渠道限流）
@@ -168,6 +154,9 @@ class Config:
         except Exception:
             return False
 
+        # 先备份全部 dataclass 字段，校验失败时回滚，避免热加载后处于未调用 _validate 的不一致状态
+        _backup = {f.name: copy.deepcopy(getattr(self, f.name)) for f in fields(self)}
+
         def env_skip(field: str) -> bool:
             return field in self._env_set_keys
 
@@ -184,7 +173,7 @@ class Config:
         if not env_skip("bark_icon") and "bark_icon" in data and isinstance(data["bark_icon"], str):
             self.bark_icon = data["bark_icon"]
         if not env_skip("minimal_push_enabled") and "minimal_push_enabled" in data:
-            self.minimal_push_enabled = _as_bool(data["minimal_push_enabled"], False)
+            self.minimal_push_enabled = as_bool(data["minimal_push_enabled"], False)
         if not env_skip("smtp_params") and "smtp_params" in data and isinstance(data["smtp_params"], str):
             self.smtp_params = data["smtp_params"]
         if "pushplus_params" in data and isinstance(data["pushplus_params"], str):
@@ -208,15 +197,15 @@ class Config:
         if not env_skip("backup_db_path") and "backup_db_path" in data and isinstance(data["backup_db_path"], str):
             self.backup_db_path = data["backup_db_path"].strip()
         if "dnd_enabled" in data:
-            self.dnd_enabled = _as_bool(data["dnd_enabled"], False)
+            self.dnd_enabled = as_bool(data["dnd_enabled"], False)
         if "dnd_start_time" in data and isinstance(data["dnd_start_time"], str):
             self.dnd_start_time = data["dnd_start_time"].strip()
         if "dnd_end_time" in data and isinstance(data["dnd_end_time"], str):
             self.dnd_end_time = data["dnd_end_time"].strip()
         if "poll_batch_summary_enabled" in data:
-            self.poll_batch_summary_enabled = _as_bool(data["poll_batch_summary_enabled"], False)
+            self.poll_batch_summary_enabled = as_bool(data["poll_batch_summary_enabled"], False)
         if not env_skip("media_lib_logger_enabled") and "media_lib_logger_enabled" in data:
-            self.media_lib_logger_enabled = _as_bool(data["media_lib_logger_enabled"], False)
+            self.media_lib_logger_enabled = as_bool(data["media_lib_logger_enabled"], False)
         if not env_skip("media_lib_service_patterns") and "media_lib_service_patterns" in data and isinstance(data["media_lib_service_patterns"], list):
             self.media_lib_service_patterns = [str(x).strip() for x in data["media_lib_service_patterns"] if str(x).strip()]
         if not env_skip("media_lib_app_name_patterns") and "media_lib_app_name_patterns" in data and isinstance(data["media_lib_app_name_patterns"], list):
@@ -229,6 +218,16 @@ class Config:
             self.photo_db_path = data["photo_db_path"].strip()
         if not env_skip("scheduler_db_path") and "scheduler_db_path" in data and isinstance(data["scheduler_db_path"], str):
             self.scheduler_db_path = data["scheduler_db_path"].strip()
+        if not env_skip("docker_socket_path") and "docker_socket_path" in data and isinstance(data["docker_socket_path"], str):
+            self.docker_socket_path = (data["docker_socket_path"] or "").strip() or "/var/run/docker.sock"
+        self.title_prefix = (self.title_prefix or "").strip()
+        try:
+            self._validate()
+        except ValueError as e:
+            for f in fields(self):
+                setattr(self, f.name, _backup[f.name])
+            print(f"警告: 热加载配置未通过校验，已保持热加载前内存中的配置: {e}")
+            return False
         return True
 
     def _load_from_env(self):
@@ -335,6 +334,10 @@ class Config:
             self.scheduler_db_path = scheduler_p.strip()
             self._env_set_keys.add('scheduler_db_path')
 
+        if docker_sock := os.getenv('DOCKER_SOCKET_PATH'):
+            self.docker_socket_path = docker_sock.strip() or '/var/run/docker.sock'
+            self._env_set_keys.add('docker_socket_path')
+
         # 高级配置
         if max_age := os.getenv('MAX_LOG_AGE'):
             try:
@@ -437,35 +440,8 @@ class Config:
         if not self.monitor_events:
             raise ValueError("必须配置至少一个监控事件")
         
-        # 验证事件类型（含数据库 log 表 eventId 对应的项目类型）
-        valid_events = {"LoginSucc", "LoginSucc2FA1", "LoginFail", "Logout", "FoundDisk", "InsertDisk", "EjectDisk", "StorageBroken", "APP_CRASH",
-                        "APP_UPDATE_FAILED", "APP_START_FAILED_LOCAL_APP_RUN_EXCEPTION",
-                        "APP_AUTO_START_FAILED_DOCKER_NOT_AVAILABLE", "CPU_USAGE_ALARM",
-                        "CPU_USAGE_RESTORED",
-                        "MEMORY_USAGE_ALARM", "MEMORY_USAGE_RESTORED",
-                        "CPU_TEMPERATURE_ALARM", "UPS_ONBATT", "UPS_ONBATT_LOWBATT", "UPS_ONLINE",
-                        "UPS_ENABLE", "UPS_DISABLE",
-                        "DiskWakeup", "DiskSpindown",
-                        "SSH_INVALID_USER", "SSH_AUTH_FAILED",
-                        "SSH_LOGIN_SUCCESS", "SSH_DISCONNECTED",
-                        "APP_STARTED", "APP_STOPPED", "APP_UPDATED", "APP_INSTALLED", "APP_AUTO_STARTED", "APP_UNINSTALLED",
-                        "DISK_IO_ERR",
-                        "ARCHIVING_SUCCESS", "DeleteFile", "MovetoTrashbin", "SHARE_EVENTID_DEL", "SHARE_EVENTID_PUT",
-                        "WEBDAV_ENABLED", "WEBDAV_DISABLED", "SAMBA_ENABLED", "SAMBA_DISABLED",
-                        "DLNA_ENABLED", "DLNA_DISABLED", "FTP_ENABLED", "FTP_DISABLED", "NFS_ENABLED", "NFS_DISABLED",
-                        "FW_ENABLE", "FW_DISABLE", "SECURITY_PORTCHANGED",
-                        "SHUTDOWN_VM", "STATUS_RUNNING_VM", "STATUS_REBOOTED_VM", "DESTROY_VM",
-                        "BACKUP_TASK_SUCCESS", "BACKUP_TASK_FAILED", "BACKUP_TASK_PARTIAL_SUCCESS",
-                        "SCHEDULER_TASK_SUCCESS", "SCHEDULER_TASK_FAILED", "SCHEDULER_TASK_CONDITION_FAILED",
-                        "MEDIA_LOGIN_SUCC", "MEDIA_LOGOUT", "MEDIA_USER_CREATED",
-                        "TRIM_RESOURCE_ADDED", "TRIM_SCRAPE_SUCCESS",
-                        "PHOTO_SHARE_CREATED", "PHOTO_SHARE_EXPIRED", "PHOTO_DEVICE_REGISTERED",
-                        "FACE_RECOGNITION_UPDATED"}
-        # 过滤掉已移除或未知的事件类型，避免旧配置导致启动失败
-        self.monitor_events = [
-            e for e in self.monitor_events
-            if e in valid_events or ("VM" in str(e).upper())
-        ]
+        # 过滤未知事件类型（白名单见 valid_event_ids.MONITOR_EVENT_IDS；含 VM 的动态 eventId）
+        self.monitor_events = filter_monitor_events(self.monitor_events)
         if not self.monitor_events:
             raise ValueError("必须配置至少一个监控事件")
         

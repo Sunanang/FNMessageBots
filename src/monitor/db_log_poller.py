@@ -30,6 +30,7 @@ DB_EVENT_ID_TO_PROJECT: Dict[str, str] = {
     "InsertDisk": "InsertDisk",
     "EjectDisk": "EjectDisk",
     "StorageBroken": "StorageBroken",
+    "StorageDegraded1": "STORAGE_DEGRADED",
     "APP_CRASH": "APP_CRASH",
     "SshdLoginSucc": "SSH_LOGIN_SUCCESS",
     "SshdLoginAuthFail": "SSH_AUTH_FAILED",
@@ -49,6 +50,8 @@ DB_EVENT_ID_TO_PROJECT: Dict[str, str] = {
     "APP_AUTO_STARTED": "APP_AUTO_STARTED",
     "APP_UNINSTALLED": "APP_UNINSTALLED",
     "DISK_IO_ERR": "DISK_IO_ERR",
+    # 部分 NAS 日志使用 DiskError + parameter.template，与 DISK_IO_ERR 同源
+    "DiskError": "DISK_IO_ERR",
     "DiskWakeup": "DiskWakeup",
     "DiskSpindown": "DiskSpindown",
     "CPU_USAGE_ALARM": "CPU_USAGE_ALARM",
@@ -285,12 +288,14 @@ class DBLogPoller:
                 "entry": entry,
                 "handler": handler,
             })
+        batch_delivery_failed = False
         if batch_events:
             if self.batch_handler:
                 try:
                     self.batch_handler(batch_events)
                 except Exception as e:
                     self.logger.error("批量处理事件失败（count=%s）: %s", len(batch_events), e, exc_info=True)
+                    batch_delivery_failed = True
             else:
                 # 兼容旧逻辑：未注册批处理时按条处理
                 for item in batch_events:
@@ -299,11 +304,14 @@ class DBLogPoller:
                     except Exception as e:
                         self.logger.error("处理事件失败 eventId=%s: %s", item["db_event_id"], e)
         if rows:
+            # 汇总模式批量投递失败时不推进游标，下次轮询重试同批 id，避免静默丢事件
+            if self.batch_handler and batch_events and batch_delivery_failed:
+                return last_id
             self._write_last_id(rows[-1].get("id", last_id))
         return last_id if not rows else rows[-1].get("id", last_id)
 
     def _run_loop(self) -> None:
-        # 启动时以当前库中最大 id 为游标，不处理历史；只推送此后新写入的记录
+        # 启动时将游标对齐到当前库最大 id：不补推历史日志，仅从启用轮询这一刻之后的新增记录开始推送
         last_id = self._get_max_log_id()
         self._write_last_id(last_id)
         self.logger.info("数据库轮询启动，仅处理 id > %s 的新记录，间隔 %s 秒", last_id, self.poll_interval)
@@ -319,6 +327,9 @@ class DBLogPoller:
 
     def start(self) -> None:
         if self.running:
+            return
+        if not (self.db_path or "").strip():
+            self.logger.info("未配置 logger_db_path，跳过 DBLogPoller")
             return
         self.running = True
         self._thread = threading.Thread(target=self._run_loop, name="DBLogPoller", daemon=False)

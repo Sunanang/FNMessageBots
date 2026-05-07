@@ -8,6 +8,8 @@ import re
 import sqlite3
 from typing import Any, Dict, List, Tuple
 
+from valid_event_ids import MONITOR_EVENT_IDS
+
 # 事件分类（顺序即展示顺序）；不在此处的事件不会在 UI 中展示
 EVENT_CATEGORIES = [
     ("login", "登录与认证", ["LoginSucc", "LoginSucc2FA1", "LoginFail", "Logout"]),
@@ -19,7 +21,7 @@ EVENT_CATEGORIES = [
         "CPU_USAGE_ALARM", "CPU_USAGE_RESTORED", "CPU_TEMPERATURE_ALARM",
         "MEMORY_USAGE_ALARM", "MEMORY_USAGE_RESTORED",
     ]),
-    ("disk", "磁盘与存储", ["FoundDisk", "InsertDisk", "EjectDisk", "StorageBroken", "DiskWakeup", "DiskSpindown", "DISK_IO_ERR"]),
+    ("disk", "磁盘与存储", ["FoundDisk", "InsertDisk", "EjectDisk", "StorageBroken", "STORAGE_DEGRADED", "DiskWakeup", "DiskSpindown", "DISK_IO_ERR"]),
     ("ups", "UPS", ["UPS_ENABLE", "UPS_DISABLE", "UPS_ONBATT", "UPS_ONBATT_LOWBATT", "UPS_ONLINE"]),
     ("share_protocol", "共享协议", [
         "WEBDAV_ENABLED", "WEBDAV_DISABLED", "SAMBA_ENABLED", "SAMBA_DISABLED",
@@ -41,9 +43,6 @@ EVENT_CATEGORIES = [
     ("vm_backup", "备份任务", [
         "BACKUP_TASK_SUCCESS", "BACKUP_TASK_FAILED", "BACKUP_TASK_PARTIAL_SUCCESS",
     ]),
-    ("scheduler", "任务计划", [
-        "SCHEDULER_TASK_SUCCESS", "SCHEDULER_TASK_FAILED", "SCHEDULER_TASK_CONDITION_FAILED",
-    ]),
     ("vm_media", "影视库", [
         "MEDIA_LOGIN_SUCC", "MEDIA_LOGOUT", "MEDIA_USER_CREATED",
         "TRIM_RESOURCE_ADDED", "TRIM_SCRAPE_SUCCESS",
@@ -53,6 +52,22 @@ EVENT_CATEGORIES = [
         "PHOTO_SHARE_EXPIRED",
         "PHOTO_DEVICE_REGISTERED",
         "FACE_RECOGNITION_UPDATED",
+    ]),
+    # 任务计划三类不在 DEFAULT_SELECTED_EVENTS 中，安装/重置默认后需用户在界面手动勾选
+    ("scheduler", "任务计划", [
+        "SCHEDULER_TASK_SUCCESS", "SCHEDULER_TASK_FAILED", "SCHEDULER_TASK_CONDITION_FAILED",
+    ]),
+    ("docker", "Docker 容器", [
+        "DOCKER_CONTAINER_CREATE",
+        "DOCKER_CONTAINER_START",
+        "DOCKER_CONTAINER_STOP",
+        "DOCKER_CONTAINER_DIE",
+        "DOCKER_CONTAINER_OOM",
+        "DOCKER_CONTAINER_KILL",
+        "DOCKER_CONTAINER_PAUSE",
+        "DOCKER_CONTAINER_UNPAUSE",
+        "DOCKER_CONTAINER_RESTART",
+        "DOCKER_CONTAINER_DESTROY",
     ]),
 ]
 
@@ -87,31 +102,11 @@ APP_LIFECYCLE_EVENTS = {
     "APP_UNINSTALLED",
 }
 
-# 后端认可的事件 ID（与 config.Config 校验一致，保存时只保留此集合内的项）
-VALID_EVENT_IDS = frozenset({
-    "LoginSucc", "LoginSucc2FA1", "LoginFail", "Logout", "FoundDisk", "InsertDisk", "EjectDisk", "StorageBroken",
-    "SSH_INVALID_USER", "SSH_AUTH_FAILED", "SSH_LOGIN_SUCCESS", "SSH_DISCONNECTED",
-    "APP_CRASH", "APP_UPDATE_FAILED", "APP_START_FAILED_LOCAL_APP_RUN_EXCEPTION",
-    "APP_AUTO_START_FAILED_DOCKER_NOT_AVAILABLE",
-    "APP_STARTED", "APP_STOPPED", "APP_UPDATED", "APP_INSTALLED", "APP_AUTO_STARTED", "APP_UNINSTALLED",
-    "CPU_USAGE_ALARM", "CPU_USAGE_RESTORED", "CPU_TEMPERATURE_ALARM",
-    "MEMORY_USAGE_ALARM", "MEMORY_USAGE_RESTORED",
-    "UPS_ONBATT", "UPS_ONBATT_LOWBATT", "UPS_ONLINE", "UPS_ENABLE", "UPS_DISABLE",
-    "DiskWakeup", "DiskSpindown", "DISK_IO_ERR",
-    "ARCHIVING_SUCCESS", "DeleteFile", "MovetoTrashbin", "SHARE_EVENTID_DEL", "SHARE_EVENTID_PUT",
-    "WEBDAV_ENABLED", "WEBDAV_DISABLED", "SAMBA_ENABLED", "SAMBA_DISABLED",
-    "DLNA_ENABLED", "DLNA_DISABLED", "FTP_ENABLED", "FTP_DISABLED", "NFS_ENABLED", "NFS_DISABLED",
-    "FW_ENABLE", "FW_DISABLE", "SECURITY_PORTCHANGED",
-    "SHUTDOWN_VM", "STATUS_RUNNING_VM", "STATUS_REBOOTED_VM", "DESTROY_VM",
-    "BACKUP_TASK_SUCCESS", "BACKUP_TASK_FAILED", "BACKUP_TASK_PARTIAL_SUCCESS",
-    "SCHEDULER_TASK_SUCCESS", "SCHEDULER_TASK_FAILED", "SCHEDULER_TASK_CONDITION_FAILED",
-    "MEDIA_LOGIN_SUCC", "MEDIA_LOGOUT", "MEDIA_USER_CREATED",
-    "TRIM_RESOURCE_ADDED", "TRIM_SCRAPE_SUCCESS",
-    "PHOTO_SHARE_CREATED", "PHOTO_SHARE_EXPIRED", "PHOTO_DEVICE_REGISTERED",
-    "FACE_RECOGNITION_UPDATED",
-})
+# 后端认可的静态事件 ID（与 valid_event_ids.MONITOR_EVENT_IDS 同源；完整可选集合还包含动态发现的 VM eventId）
+VALID_EVENT_IDS = MONITOR_EVENT_IDS
 
-# 默认勾选的事件（不含应用生命周期 6 项；应用启动/自启动失败、UPS 开启/关闭 默认不勾选）
+# 默认勾选的事件（不含应用生命周期 6 项；不含任务计划 SCHEDULER_*；
+# 应用启动/自启动失败、UPS 开启/关闭 默认不勾选）
 DEFAULT_SELECTED_EVENTS = [
     "LoginSucc",
     "LoginSucc2FA1",
@@ -121,6 +116,7 @@ DEFAULT_SELECTED_EVENTS = [
     "InsertDisk",
     "EjectDisk",
     "StorageBroken",
+    "STORAGE_DEGRADED",
     "APP_CRASH",
     "APP_UPDATE_FAILED",
     "CPU_USAGE_ALARM",
@@ -182,20 +178,6 @@ def sort_vm_event_ids(event_ids: List[str]) -> List[str]:
     return preferred + rest
 
 
-def _is_db_readable(db_path: str) -> bool:
-    """检查 SQLite 文件是否可读（只读模式）。"""
-    p = (db_path or "").strip()
-    if not p:
-        return False
-    try:
-        conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True, timeout=1.5)
-        conn.execute("SELECT 1").fetchone()
-        conn.close()
-        return True
-    except Exception:
-        return False
-
-
 def build_events_for_ui(
     logger_db_path: str,
     backup_db_path: str,
@@ -216,33 +198,6 @@ def build_events_for_ui(
         discovered_vm_event_ids = list(VM_EVENT_PREFERRED_ORDER)
     discovered_vm_event_ids = sort_vm_event_ids(discovered_vm_event_ids)
 
-    backup_ok = _is_db_readable(backup_db_path)
-    trim_media_ok = _is_db_readable(trim_media_db_path)
-    trim_activity_ok = _is_db_readable(trim_activity_db_path)
-    photo_ok = _is_db_readable(photo_db_path)
-    scheduler_ok = _is_db_readable(scheduler_db_path)
-
-    unreadable_event_hints: Dict[str, str] = {}
-    if not backup_ok:
-        for eid in {"BACKUP_TASK_SUCCESS", "BACKUP_TASK_FAILED", "BACKUP_TASK_PARTIAL_SUCCESS"}:
-            unreadable_event_hints[eid] = "当前备份库不可访问（通常是路径或权限问题），保存后请按页面告警修复。"
-    if not trim_media_ok:
-        for eid in {"TRIM_RESOURCE_ADDED", "TRIM_SCRAPE_SUCCESS"}:
-            unreadable_event_hints[eid] = "当前 trimmedia.db 不可访问（通常是路径或权限问题），保存后请按页面告警修复。"
-    if not trim_activity_ok:
-        for eid in {"MEDIA_LOGIN_SUCC", "MEDIA_LOGOUT"}:
-            unreadable_event_hints[eid] = "当前 trimactivity.db 不可访问（通常是路径或权限问题），保存后请按页面告警修复。"
-    if not photo_ok:
-        for eid in {
-            "PHOTO_SHARE_CREATED", "PHOTO_SHARE_EXPIRED",
-            "PHOTO_DEVICE_REGISTERED", "FACE_RECOGNITION_UPDATED",
-        }:
-            unreadable_event_hints[eid] = "当前 photo.db 不可访问（通常是路径或权限问题），保存后请按页面告警修复。"
-    if not scheduler_ok:
-        for eid in {"SCHEDULER_TASK_SUCCESS", "SCHEDULER_TASK_FAILED", "SCHEDULER_TASK_CONDITION_FAILED"}:
-            hint = "当前 scheduler.db 不可访问，请确认 Docker 已挂载 /var/apps/fn-scheduler/var，且文件 /var/apps/fn-scheduler/var/scheduler.db 存在并可读。"
-            unreadable_event_hints[eid] = hint
-
     valid_event_ids = set(VALID_EVENT_IDS) | set(discovered_vm_event_ids)
 
     events_by_category: List[Dict[str, Any]] = []
@@ -260,15 +215,10 @@ def build_events_for_ui(
             else:
                 display_title = f"虚拟机事件：{key}" if "VM" in key.upper() else key
             base_note = notes.get(key, "")
-            access_hint = unreadable_event_hints.get(key, "")
-            if base_note and access_hint:
-                merged_note = f"{base_note}；{access_hint}"
-            else:
-                merged_note = base_note or access_hint
             events.append({
                 "id": key,
                 "title": display_title,
-                "note": merged_note,
+                "note": base_note,
             })
         if events:
             events_by_category.append({"id": cat_id, "name": cat_name, "events": events})
