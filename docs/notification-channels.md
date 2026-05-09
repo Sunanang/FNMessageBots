@@ -14,6 +14,7 @@
 | 飞书 | 群机器人 Webhook | [飞书](channels/feishu.md) |
 | Bark | iOS 推送（HTTP API） | [Bark](channels/bark.md) |
 | 魔法推送 | 推送聚合 | [魔法推送](channels/magicpush.md) |
+| SMTP 邮件 | 邮箱通知 | [SMTP 邮件](channels/email.md) |
 | PushPlus | 微信模板消息等 | [官方消息接口文档](https://www.pushplus.plus/doc/guide/api.html) |
 
 ## 按渠道打开文档
@@ -23,6 +24,7 @@
 - [飞书](channels/feishu.md)
 - [Bark](channels/bark.md)
 - [魔法推送](channels/magicpush.md)
+- [SMTP 邮件](channels/email.md)
 - [PushPlus 官方消息接口文档](https://www.pushplus.plus/doc/guide/api.html)
 
 ## 环境变量速查
@@ -33,8 +35,11 @@
 | `DINGTALK_WEBHOOK_URL` | 钉钉 |
 | `FEISHU_WEBHOOK_URL` | 飞书 |
 | `BARK_URL` | Bark |
+| `SMTP_PARAMS` | SMTP 邮件（`smtp_params`） |
 
 **PushPlus**：在 Web 或 `config.json` 中配置 `pushplus_params`，值为包含 `token` 的 JSON 字符串；多个渠道可用 `|` 分隔，例如 `{"token":"xxx"}|{"token":"yyy"}`。接口与参数说明见 [PushPlus 消息接口文档](https://www.pushplus.plus/doc/guide/api.html)
+
+**SMTP 邮件**：在 Web 或 `config.json` 中配置 `smtp_params`，或通过环境变量 `SMTP_PARAMS` 覆盖；值为 SMTP 参数的 JSON 字符串，多套可用 `|` 分隔。字段与常见邮箱示例见 [SMTP 邮件](channels/email.md)。
 
 ## 捐赠
 
