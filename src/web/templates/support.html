@@ -145,6 +145,57 @@
       line-height: 1.65;
       color: var(--support-muted);
     }
+    .support-jump-nav {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      margin: 0 0 24px;
+      padding: 14px 16px;
+      background: var(--support-panel);
+      border: 1px solid var(--support-panel-border);
+      border-radius: 14px;
+      box-shadow: var(--support-shadow-card);
+    }
+    .support-jump-nav .jump-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--support-faint);
+      letter-spacing: 0.04em;
+    }
+    .support-jump-nav .jump-row {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 10px;
+    }
+    .support-jump-nav a {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 8px 14px;
+      font-size: 13px;
+      font-weight: 550;
+      color: var(--support-text);
+      background: var(--support-bg-accent);
+      border: 1px solid var(--support-border);
+      border-radius: 999px;
+      text-decoration: none;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    .support-jump-nav a:hover {
+      border-color: var(--support-accent-soft);
+      color: var(--support-accent);
+    }
+    .support-jump-nav a.jump-external::after {
+      content: " ↗";
+      font-size: 11px;
+      opacity: 0.75;
+    }
+    #support-about,
+    #support-pay {
+      scroll-margin-top: 12px;
+    }
     .sheet {
       background: var(--support-panel);
       border-radius: 16px;
@@ -326,7 +377,16 @@
       <p>您的每一份支持都是我继续创作的动力，感谢您的鼓励与陪伴！</p>
     </header>
 
-    <section class="sheet">
+    <nav class="support-jump-nav" aria-label="本页模块跳转">
+      <span class="jump-label">快速跳转</span>
+      <div class="jump-row">
+        <a href="#support-about">关于作者与联系</a>
+        <a href="#support-pay">选择支付方式</a>
+        <a class="jump-external" href="https://github.com/Sunanang/FNMessageBots/blob/main/docs/donations.md" target="_blank" rel="noopener noreferrer">捐赠记录与需求</a>
+      </div>
+    </nav>
+
+    <section class="sheet" id="support-about">
       <h2><span class="emoji" aria-hidden="true">❤️</span>关于作者</h2>
       <p>
         我热爱用技术把复杂的事情变简单。FnMessageBot（日志推送） 面向飞牛 NAS 用户，把日志里的关键事件推到微信、钉钉、飞书、Bark 与 PushPlus 等平台，希望能在你身边默默当好一只「消息守门员」。
@@ -346,7 +406,7 @@
       </p>
     </section>
 
-    <section>
+    <section id="support-pay">
       <h2 class="pay-section-title"><span class="emoji" aria-hidden="true">🧡</span>选择支付方式</h2>
       {% if wechat_src or ali_src %}
       <div class="pay-grid{% if (wechat_src and not ali_src) or (ali_src and not wechat_src) %} single{% endif %}">
