@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import os
 import re
@@ -33,6 +35,7 @@ from web.app_paths import GITHUB_ICON_FILE
 from web.app_paths import ICON_FILE
 from web.app_paths import SUPPORT_QR_DIR
 from web.app_paths import SUPPORT_QR_FILENAMES
+from web.config_store import config_load_error as _config_load_error
 from web.config_store import join_urls as _join_urls
 from web.config_store import load_raw_config as _load_raw_config_from_file
 from web.config_store import save_raw_config as _save_raw_config_to_file
@@ -99,6 +102,19 @@ def _load_raw_config() -> dict:
 
 def _save_raw_config(data: dict) -> None:
     _save_raw_config_to_file(CONFIG_FILE, data)
+
+
+def _current_config_load_error() -> str:
+    return _config_load_error(_load_raw_config())
+
+
+def _config_load_error_payload(err: str) -> dict:
+    return {
+        "ok": False,
+        "config_error": True,
+        "message": "配置文件读取失败，请修复 config.json 后重试。",
+        "detail": err,
+    }
 
 
 def _events_catalog_bundle():
@@ -208,24 +224,6 @@ def _check_db_access_issue(db_path: str, probe_sql: str = "SELECT 1") -> str:
     return ""
 
 
-# 备份库 / 影视库 / 相册库路径不可访问时在告警区追加（与 Docker 挂载及 config 示例一致）
-_EXTERNAL_DB_FIX_HINT = """Docker Compose 建议在 volumes 中挂载（只读示例）：
-      - /usr/trim/var/backup_service:/usr/trim/var/backup_service:ro
-      - /usr/local/apps/@appdata/trim.media/database:/usr/local/apps/@appdata/trim.media/database:ro
-      - /usr/local/apps/@appdata/trim.photos/db:/usr/local/apps/@appdata/trim.photos/db:ro
-
-若仍有问题，可在 config.json 中核对或追加如下字段（路径按 NAS 实际为准）：
-  "logger_db_path": "/usr/trim/var/eventlogger_service/logger_data.db3",
-  "backup_db_path": "/usr/trim/var/backup_service/basic_backup.db3",
-  "media_lib_logger_enabled": false,
-  "media_lib_service_patterns": ["mediadb", "trimmedia"],
-  "media_lib_app_name_patterns": ["影视"],
-  "trim_media_db_path": "/usr/local/apps/@appdata/trim.media/database/trimmedia.db",
-  "trim_activity_db_path": "/usr/local/apps/@appdata/trim.media/database/trimactivity.db",
-  "photo_db_path": "/usr/local/apps/@appdata/trim.photos/db/photo.db"
-"""
-
-
 def _collect_external_db_access_warnings(raw_cfg: dict, events: list[str]) -> list[str]:
     """按已选择事件收集外部数据库权限/可读性告警。"""
     monitor_events = set(events or [])
@@ -244,13 +242,10 @@ def _collect_external_db_access_warnings(raw_cfg: dict, events: list[str]) -> li
     }
     photo_events = {"PHOTO_SHARE_CREATED", "PHOTO_SHARE_EXPIRED", "PHOTO_DEVICE_REGISTERED", "FACE_RECOGNITION_UPDATED"}
 
-    need_external_db_hint = False
-
     if monitor_events & backup_events:
         backup_db_path = (raw_cfg.get("backup_db_path") or "").strip()
         if not backup_db_path:
             warnings.append("备份库: 未配置 backup_db_path，无法轮询备份事件。")
-            need_external_db_hint = True
         else:
             issue = _check_db_access_issue(
                 backup_db_path,
@@ -258,13 +253,11 @@ def _collect_external_db_access_warnings(raw_cfg: dict, events: list[str]) -> li
             )
             if issue:
                 warnings.append(f"备份库: {issue}")
-                need_external_db_hint = True
 
     if monitor_events & (trimmedia_events | media_events):
         trim_media_db_path = (raw_cfg.get("trim_media_db_path") or "").strip()
         if not trim_media_db_path:
             warnings.append("trimmedia 库: 未配置 trim_media_db_path，无法轮询影视相关数据库事件。")
-            need_external_db_hint = True
         else:
             issue = _check_db_access_issue(
                 trim_media_db_path,
@@ -272,13 +265,11 @@ def _collect_external_db_access_warnings(raw_cfg: dict, events: list[str]) -> li
             )
             if issue:
                 warnings.append(f"trimmedia 库: {issue}")
-                need_external_db_hint = True
 
     if monitor_events & (trimactivity_events | media_events):
         trim_activity_db_path = (raw_cfg.get("trim_activity_db_path") or "").strip()
         if not trim_activity_db_path:
             warnings.append("trimactivity 库: 未配置 trim_activity_db_path，无法轮询影视相关数据库事件。")
-            need_external_db_hint = True
         else:
             issue = _check_db_access_issue(
                 trim_activity_db_path,
@@ -286,13 +277,11 @@ def _collect_external_db_access_warnings(raw_cfg: dict, events: list[str]) -> li
             )
             if issue:
                 warnings.append(f"trimactivity 库: {issue}")
-                need_external_db_hint = True
 
     if monitor_events & photo_events:
         photo_db_path = (raw_cfg.get("photo_db_path") or "").strip()
         if not photo_db_path:
             warnings.append("相册库: 未配置 photo_db_path，无法轮询相册数据库事件。")
-            need_external_db_hint = True
         else:
             issue = _check_db_access_issue(
                 photo_db_path,
@@ -300,7 +289,6 @@ def _collect_external_db_access_warnings(raw_cfg: dict, events: list[str]) -> li
             )
             if issue:
                 warnings.append(f"相册库: {issue}")
-                need_external_db_hint = True
 
     docker_ev = set(DOCKER_POLL_EVENTS)
     if monitor_events & docker_ev:
@@ -321,9 +309,6 @@ def _collect_external_db_access_warnings(raw_cfg: dict, events: list[str]) -> li
             )
             if issue:
                 warnings.append(f"任务计划库: {issue}")
-
-    if need_external_db_hint:
-        warnings.append(_EXTERNAL_DB_FIX_HINT)
 
     return warnings
 
@@ -374,6 +359,15 @@ def create_app(on_config_saved=None) -> Flask:
             return None
         if request.path == "/history" and request.method == "GET":
             return None
+        config_error = _current_config_load_error()
+        if config_error:
+            is_config_page_asset = request.path in {"/support", "/faq"} or request.path.startswith("/support/img/")
+            if (
+                request.path in PROTECTED_PATHS
+                or request.path.startswith(PROTECTED_PREFIXES)
+                or is_config_page_asset
+            ):
+                return jsonify(_config_load_error_payload(config_error)), 500
         # 捐赠页与收款码：与配置页同一套密码与空闲超时（SESSION_IDLE_SECONDS，默认 300s）
         if request.path == "/support" and request.method == "GET":
             if not _has_password_set() or not _is_password_verification_enabled():
@@ -406,6 +400,9 @@ def create_app(on_config_saved=None) -> Flask:
     @app.get("/api/auth/status")
     def auth_status():
         """无需登录即可访问。返回是否需要设置密码、是否需要登录、是否已认证。"""
+        config_error = _current_config_load_error()
+        if config_error:
+            return jsonify(_config_load_error_payload(config_error)), 500
         has_pw = _has_password_set()
         verification_enabled = _is_password_verification_enabled()
         authenticated = _is_authenticated()
@@ -421,6 +418,9 @@ def create_app(on_config_saved=None) -> Flask:
     @app.post("/api/auth/set-password")
     def auth_set_password():
         """首次设置密码（两次输入须一致）。"""
+        config_error = _current_config_load_error()
+        if config_error:
+            return jsonify(_config_load_error_payload(config_error)), 500
         if _has_password_set():
             return jsonify({"ok": False, "message": "已设置过密码，请使用登录。"}), 400
         payload = request.get_json(force=True, silent=True) or {}
@@ -449,6 +449,9 @@ def create_app(on_config_saved=None) -> Flask:
     @app.post("/api/auth/login")
     def auth_login():
         """使用密码登录。"""
+        config_error = _current_config_load_error()
+        if config_error:
+            return jsonify(_config_load_error_payload(config_error)), 500
         if not _has_password_set():
             return jsonify({"ok": False, "message": "尚未设置密码。"}), 400
         payload = request.get_json(force=True, silent=True) or {}
