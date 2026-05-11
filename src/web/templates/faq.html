@@ -87,6 +87,9 @@
       display: grid;
       gap: 12px;
     }
+    #faq-external-db, #faq-docker-sock {
+      scroll-margin-top: 72px;
+    }
     .faq-item {
       background: var(--faq-panel);
       border: 1px solid var(--faq-panel-border);
@@ -104,6 +107,16 @@
       color: var(--faq-text);
       font-size: 14px;
       white-space: pre-line;
+    }
+    .faq-warn-red {
+      margin: 14px 0 0;
+      font-size: 14px;
+      font-weight: 600;
+      color: #dc2626;
+      white-space: normal;
+    }
+    html[data-theme="dark"] .faq-warn-red {
+      color: #f87171;
     }
     code {
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
@@ -242,7 +255,7 @@ Docker 镜像名称：<code>fn-message-bots</code>
 <code>systemctl status eventlogger_service</code></p>
           </article>
 
-          <article class="faq-item">
+          <article id="faq-external-db" class="faq-item">
             <h2>10. 挂载影视库 / 相册提示权限问题</h2>
             <p><strong>Docker 版：</strong>请在编排文件（如 <code>docker-compose.yml</code>）中自行添加卷挂载，使容器能访问宿主上的影视 / 相册数据路径；权限与 UID/GID、挂载只读等均在您本机配置中处理。
 <strong>应用市场版：</strong>若读取影视 / 相册相关数据库时报权限不足，可在 SSH（root）下按需执行下列命令。<strong>请自行评估放宽目录权限、数据库文件权限以及 ACL 带来的安全风险</strong>（例如更多用户可进入目录或读取数据库文件）；系统需支持 <code>setfacl</code>（ACL），否则请先安装/启用相关功能。
@@ -263,6 +276,30 @@ sudo setfacl -m u:FnMessageBot:r /usr/local/apps/@appdata/trim.media/database/tr
   "trim_media_db_path": "/usr/local/apps/@appdata/trim.media/database/trimmedia.db",
   "trim_activity_db_path": "/usr/local/apps/@appdata/trim.media/database/trimactivity.db",
   "photo_db_path": "/usr/local/apps/@appdata/trim.photos/db/photo.db"</pre>
+            <p class="faq-warn-red">若命令执行以后仍然无效，可以尝试卸载重装。</p>
+          </article>
+
+          <article id="faq-docker-sock" class="faq-item">
+            <h2>11. Docker 容器事件与 docker.sock 权限</h2>
+            <p>在监控事件中勾选「Docker 容器」相关事件后，保存时若出现「无法读取 <code>/var/run/docker.sock</code>」类告警，说明<strong>当前进程</strong>无权访问 Docker Engine 的 Unix socket。若你在 <code>config.json</code> 中配置了 <code>docker_socket_path</code>，以下命令中的路径请改为与你配置一致。</p>
+            <p><strong>安全提示：</strong>将用户加入 <code>docker</code> 组或使用 ACL 读写 <code>docker.sock</code>，等同于授予通过 Docker API 操控引擎的能力；请仅在理解风险后操作，勿随意 <code>chmod 777</code>。</p>
+            <p><strong>自建 Docker / Compose：</strong>在 <code>docker-compose.yml</code> 中为运行本应用的服务挂载宿主 <code>docker.sock</code>，并通过 <code>user</code> / <code>group_add</code>（例如加入宿主 <code>docker</code> 组的 GID）使容器内进程有权访问 socket。</p>
+            <p><strong>应用市场版（SSH，默认路径示例）：</strong></p>
+            <pre class="faq-pre"># 查看 socket 权限（SSH root）
+ls -l /var/run/docker.sock
+# 常见：srw-rw---- root docker（仅 root 与 docker 组成员可读写）
+
+# 将应用运行用户加入 docker 组（用户名以 ps 为准，一般为 FnMessageBot）
+sudo usermod -aG docker FnMessageBot
+# 加入组后必须完整关闭并重启本应用，新进程才可能带上 docker 组。
+
+# 若重启后进程仍无 docker 附属组（部分 NAS 环境），可权宜对 socket 使用 ACL（自行评估风险；Docker 重启后 socket 可能被重建）
+sudo setfacl -m u:FnMessageBot:rw /var/run/docker.sock
+
+# 验证（重启进程后再执行）
+sudo -u FnMessageBot test -r /var/run/docker.sock &amp;&amp; echo OK || echo NO
+# 输出 OK 后再回 Web 保存配置；告警应消失。</pre>
+            <p>若仍提示无权限，可用 <code>grep '^Groups:' /proc/&lt;PID&gt;/status</code> 与 <code>getent group docker</code> 对照，确认<strong>运行中的 Python 进程</strong>是否包含 docker 组的 GID；仅用户账号在 docker 组中、但进程附属组未加载时，需依赖平台行为或上述 ACL 等权宜方式。</p>
           </article>
         </section>
 
