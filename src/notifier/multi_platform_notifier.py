@@ -166,6 +166,7 @@ class MultiPlatformNotifier:
         'DISK_IO_ERR': '⚠️ 飞牛NAS-磁盘IO错误告警',
         'TEST_PUSH': '🧪 飞牛NAS-测试推送',
         'DND_SUMMARY': '📋 飞牛NAS-勿扰时段汇总',
+        'NAS_PATROL_REPORT': '飞牛NAS-巡检任务完成',
         'POLL_BATCH_SUMMARY': '飞牛NAS-多事件合并通知',
         'BACKUP_TASK_SUCCESS': '✅ 飞牛NAS-备份任务完成',
         'BACKUP_TASK_FAILED': '❌ 飞牛NAS-备份任务失败',
@@ -272,6 +273,7 @@ class MultiPlatformNotifier:
         'DISK_IO_ERR': '磁盘{dev}发生IO错误，错误次数{err_cnt}',
         'TEST_PUSH': '测试推送',
         'DND_SUMMARY': '勿扰时段事件汇总',
+        'NAS_PATROL_REPORT': 'NAS定时巡检',
         'POLL_BATCH_SUMMARY': '多事件合并通知',
         'BACKUP_TASK_SUCCESS': '备份任务完成',
         'BACKUP_TASK_FAILED': '备份任务失败',
@@ -374,6 +376,7 @@ class MultiPlatformNotifier:
         'APP_UNINSTALLED': '应用已卸载。',
         'DISK_IO_ERR': '磁盘发生IO错误，请检查硬盘健康与连接。',
         'TEST_PUSH': 'Web 配置页发送的测试消息。',
+        'NAS_PATROL_REPORT': '',
         'POLL_BATCH_SUMMARY': '',
         'BACKUP_TASK_SUCCESS': '备份任务执行完成。',
         'BACKUP_TASK_FAILED': '备份任务执行失败，请检查任务配置与网络状态。',
@@ -1144,6 +1147,8 @@ class MultiPlatformNotifier:
             cid = str(event_data.get('container_id_full') or event_data.get('container_id') or 'unknown')
             minute_window = int(time.time() / 60)
             key = f"{event_type}_{cid}_{minute_window}"
+        elif event_type == "NAS_PATROL_REPORT":
+            key = f"nas_patrol_{time.time()}_{id(event_data)}"
         elif event_type in {
             'ARCHIVING_SUCCESS', 'DeleteFile', 'MovetoTrashbin', 'SHARE_EVENTID_DEL', 'SHARE_EVENTID_PUT',
             'WEBDAV_ENABLED', 'WEBDAV_DISABLED', 'SAMBA_ENABLED', 'SAMBA_DISABLED',
@@ -1198,7 +1203,7 @@ class MultiPlatformNotifier:
                       timestamp: str, raw_log: str) -> MultiPlatformMessage:
         """构建多平台消息"""
         # 轮询汇总类消息优先级高于极简：始终按完整文案推送
-        if self.minimal_push_enabled and event_type != "POLL_BATCH_SUMMARY":
+        if self.minimal_push_enabled and event_type not in ("POLL_BATCH_SUMMARY", "NAS_PATROL_REPORT"):
             one_line = self._build_minimal_one_line(event_type, event_data)
             return MultiPlatformMessage(title=one_line, content="")
 
@@ -1358,6 +1363,9 @@ class MultiPlatformNotifier:
             content = f"{timestamp}\n{body}" if body else timestamp
             return self._strip_body_emojis(content)
 
+        if event_type == "NAS_PATROL_REPORT":
+            return self._strip_body_emojis(self._build_nas_patrol_content(event_data))
+
         fragments: List[str] = []
         if not for_batch_inner:
             fragments.append(str(timestamp))
@@ -1491,7 +1499,26 @@ class MultiPlatformNotifier:
         if custom_prefix:
             result = result.replace(f"{custom_prefix}-", "", 1)
         return result
-    
+
+    def _build_nas_patrol_content(self, event_data: Dict[str, Any]) -> str:
+        """NAS 定时巡检正文：三行固定格式，全角竖线分隔。"""
+        fw_bar = "\uff5c"  # ｜
+        cpu = str(event_data.get("cpu_percent") or "—")
+        mem = str(event_data.get("mem_percent") or "—")
+        disk_gb = str(event_data.get("disk_free_gb") or "—")
+        ct = str(event_data.get("cpu_temp_c") or "—")
+        dt = str(event_data.get("disk_temp_c") or "—")
+
+        def fmt_temp(t: str) -> str:
+            if t == "—":
+                return "—"
+            return f"{t}℃"
+
+        line1 = f"CPU 使用率：{cpu}%{fw_bar}温度：{fmt_temp(ct)}"
+        line2 = f"内存 使用率：{mem}%"
+        line3 = f"硬盘 剩余空间：{disk_gb} GB{fw_bar}温度：{fmt_temp(dt)}"
+        return f"{line1}\n{line2}\n{line3}"
+
     def _build_login_content(self, event_data: Dict[str, Any]) -> str:
         """构建登录相关事件内容"""
         content = ""

@@ -412,7 +412,7 @@ class UnifiedNotifier:
         Returns:
             通知发送结果
         """
-        if self._in_dnd_window():
+        if self._in_dnd_window() and event_type != "NAS_PATROL_REPORT":
             # 勿扰时段内：logger_data.db3 事件靠 DB 汇总，非主日志库事件走轻量缓冲。
             self._buffer_event_for_dnd_if_needed(str(event_type))
             return NotificationResult(

@@ -20,6 +20,20 @@ def title_prefix_from_dict(d: dict, key: str = "title_prefix") -> str:
     return v.strip() if isinstance(v, str) else str(v).strip()
 
 
+def config_load_error(config_file: Path) -> str:
+    """若 config.json 不可读或 JSON 非法则返回错误说明，否则返回空串。"""
+    if not config_file.exists():
+        return ""
+    try:
+        with open(config_file, "r", encoding="utf-8") as f:
+            json.load(f)
+        return ""
+    except json.JSONDecodeError as e:
+        return f"config.json 不是合法 JSON：{e}"
+    except OSError as e:
+        return f"无法读取配置文件：{e}"
+
+
 def load_raw_config(config_file: Path) -> dict:
     if config_file.exists():
         try:

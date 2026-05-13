@@ -37,6 +37,7 @@ from monitor.scheduler_db_poller import (
 )
 from monitor.docker_events_poller import DOCKER_POLL_EVENTS, DockerEventsPoller
 from monitor.event_processor import EventProcessor
+from monitor.nas_patrol import start_nas_patrol_thread
 from notifier.unified_notifier import UnifiedNotifier
 from web.ui_app import start_ui_server_in_background
 
@@ -63,6 +64,7 @@ class Application:
         self.logger = None
         self.running = False
         self.notification_health_thread = None
+        self._nas_patrol_thread = None
         self._exit_code = 0
 
         
@@ -642,6 +644,12 @@ class Application:
                 print(f"配置 UI 已启动，线程: {ui_thread.name}")
             except Exception as e:
                 print(f"配置 UI 启动失败: {e}")
+            try:
+                self._nas_patrol_thread = start_nas_patrol_thread(self)
+                if self._nas_patrol_thread:
+                    print(f"NAS 定时巡检线程已启动: {self._nas_patrol_thread.name}")
+            except Exception as e:
+                print(f"NAS 定时巡检线程启动失败: {e}")
             if not self.notifier:
                 # 未配置推送渠道：不轮询数据库、不推送消息，仅提示用户去 Web 配置
                 print("")

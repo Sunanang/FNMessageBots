@@ -105,7 +105,7 @@ def _save_raw_config(data: dict) -> None:
 
 
 def _current_config_load_error() -> str:
-    return _config_load_error(_load_raw_config())
+    return _config_load_error(CONFIG_FILE)
 
 
 def _config_load_error_payload(err: str) -> dict:
@@ -139,33 +139,24 @@ def _mode_str(mode: int) -> str:
 def _docker_socket_access_warning(sock_path: str) -> str | None:
     """
     勾选 Docker 容器事件时，若当前进程无法使用 Engine socket 则返回一条告警文案，否则 None。
-    与「仅 Path.exists()」相比，可区分父目录在但无 socket、非 socket 文件、无读权限等情况。
+    详细步骤见常见问题 · 第11条（/faq#faq-docker-sock）。
     """
     sp = (sock_path or "").strip() or "/var/run/docker.sock"
+    hint = (
+        f"Docker：与 {sp} 相关的能力不可用。"
+        "请打开常见问题 · 第11条查看说明与挂载示例。"
+    )
     try:
         # 使用 stat 跟随符号链接（常见：/var/run/docker.sock -> /run/docker.sock）
         st = os.stat(sp)
-    except FileNotFoundError:
-        parent = Path(sp).parent
-        extra = "（已检测到父目录在，但无 socket 文件：多为 Compose 未挂到本服务、或改 volume 后未重建容器。）" if parent.exists() else ""
-        return (
-            f"Docker: 容器内不存在 {sp}。{extra} "
-            "请确认：① volume 写在**实际运行本应用**的 `service` 下，且为 "
-            "`- /var/run/docker.sock:/var/run/docker.sock`（或把右侧改为你配的 `docker_socket_path`）；"
-            "② 修改 Compose 后已执行 `docker compose up -d` 重建容器；"
-            "③ `config.json` 中 `docker_socket_path` 与挂载冒号右侧路径一致。"
-        )
-    except PermissionError:
-        return f"Docker: 无法访问 {sp}（stat 被拒绝），请检查挂载与权限。"
+    except (FileNotFoundError, PermissionError):
+        return hint
 
     if not stat.S_ISSOCK(st.st_mode):
-        return f"Docker: {sp} 存在但不是 Unix socket，请确认挂载的是宿主机的 docker.sock 而非普通目录。"
+        return hint
 
     if not os.access(sp, os.R_OK):
-        return (
-            f"Docker: 当前进程无法读取 {sp}，请将运行用户加入 docker 组，"
-            "或在 Compose 中设置 `user`/`group_add` 使进程有权访问 socket（勿随意 chmod 777）。"
-        )
+        return hint
     return None
 
 
@@ -205,7 +196,7 @@ def _check_db_access_issue(db_path: str, probe_sql: str = "SELECT 1") -> str:
                 f" 建议 `chmod 644 '{p}'`，或 `chown/chmod 640` 给服务用户。"
             )
     except FileNotFoundError:
-        return f"{path}: 数据库文件不存在 `{p}`。"
+        return f"{path}数据库文件不存在。"
     except PermissionError:
         return f"{path}: 当前进程无权限访问数据库文件 `{p}`。"
     except Exception as e:
@@ -257,26 +248,26 @@ def _collect_external_db_access_warnings(raw_cfg: dict, events: list[str]) -> li
     if monitor_events & (trimmedia_events | media_events):
         trim_media_db_path = (raw_cfg.get("trim_media_db_path") or "").strip()
         if not trim_media_db_path:
-            warnings.append("trimmedia 库: 未配置 trim_media_db_path，无法轮询影视相关数据库事件。")
+            warnings.append("影视库: 未配置 trim_media_db_path，无法轮询影视相关数据库事件。")
         else:
             issue = _check_db_access_issue(
                 trim_media_db_path,
                 "SELECT guid FROM item LIMIT 1",
             )
             if issue:
-                warnings.append(f"trimmedia 库: {issue}")
+                warnings.append(f"影视库: {issue}")
 
     if monitor_events & (trimactivity_events | media_events):
         trim_activity_db_path = (raw_cfg.get("trim_activity_db_path") or "").strip()
         if not trim_activity_db_path:
-            warnings.append("trimactivity 库: 未配置 trim_activity_db_path，无法轮询影视相关数据库事件。")
+            warnings.append("影视库: 未配置 trim_activity_db_path，无法轮询影视相关数据库事件。")
         else:
             issue = _check_db_access_issue(
                 trim_activity_db_path,
                 "SELECT token FROM user_token LIMIT 1",
             )
             if issue:
-                warnings.append(f"trimactivity 库: {issue}")
+                warnings.append(f"影视库: {issue}")
 
     if monitor_events & photo_events:
         photo_db_path = (raw_cfg.get("photo_db_path") or "").strip()
@@ -518,6 +509,12 @@ def create_app(on_config_saved=None) -> Flask:
                     continue
                 channels.append({"type": ch_type, "url": url})
 
+        try:
+            _npm = int(raw.get("nas_patrol_interval_minutes", 720))
+        except (TypeError, ValueError):
+            _npm = 720
+        _npm = max(5, min(10080, _npm))
+
         data = {
             "title": "FnMessageBot",
             "subtitle": "飞牛日志消息推送机器人",
@@ -535,6 +532,8 @@ def create_app(on_config_saved=None) -> Flask:
             "web_password_enabled": as_bool(raw.get("web_password_enabled", True), True),
             "poll_batch_summary_enabled": as_bool(raw.get("poll_batch_summary_enabled", False), False),
             "minimal_push_enabled": as_bool(raw.get("minimal_push_enabled", False), False),
+            "nas_patrol_enabled": as_bool(raw.get("nas_patrol_enabled", False), False),
+            "nas_patrol_interval_minutes": _npm,
             "channel_options": CHANNEL_OPTIONS,
         }
         db_access_warnings = _collect_external_db_access_warnings(raw, monitor_events)
@@ -557,6 +556,11 @@ def create_app(on_config_saved=None) -> Flask:
         web_password_enabled = as_bool(payload.get("web_password_enabled", True), True)
         poll_batch_summary_enabled = as_bool(payload.get("poll_batch_summary_enabled", False), False)
         minimal_push_enabled = as_bool(payload.get("minimal_push_enabled", False), False)
+        nas_patrol_enabled = as_bool(payload.get("nas_patrol_enabled", False), False)
+        try:
+            nas_patrol_interval_minutes = int(payload.get("nas_patrol_interval_minutes", 720))
+        except (TypeError, ValueError):
+            nas_patrol_interval_minutes = 720
         title_prefix = _title_prefix_from_dict(payload)
         if title_prefix and len(title_prefix) > 20:
             return jsonify({"ok": False, "message": "标题前缀过长（最多 20 个字符）。"}), 400
@@ -569,6 +573,9 @@ def create_app(on_config_saved=None) -> Flask:
                 return jsonify({"ok": False, "message": "勿扰开始时间格式不正确，请使用 HH:MM（如 22:00）。"}), 400
             if not re.match(r"^([01]?\d|2[0-3]):[0-5]\d$", dnd_end_time):
                 return jsonify({"ok": False, "message": "勿扰结束时间格式不正确，请使用 HH:MM（如 07:00）。"}), 400
+
+        if nas_patrol_interval_minutes < 5 or nas_patrol_interval_minutes > 10080:
+            return jsonify({"ok": False, "message": "巡检间隔须在 5～10080 分钟之间。"}), 400
 
         # 不允许选择内部保留事件
         if EVENT_IDS_HIDDEN_IN_UI & set(events):
@@ -691,6 +698,8 @@ def create_app(on_config_saved=None) -> Flask:
                 "web_password_enabled": web_password_enabled,
                 "poll_batch_summary_enabled": poll_batch_summary_enabled,
                 "minimal_push_enabled": minimal_push_enabled,
+                "nas_patrol_enabled": nas_patrol_enabled,
+                "nas_patrol_interval_minutes": nas_patrol_interval_minutes,
                 "title_prefix": title_prefix,
                 "bark_icon": bark_icon,
             }

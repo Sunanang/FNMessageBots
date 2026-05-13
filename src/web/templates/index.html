@@ -414,13 +414,13 @@
     }
     .warning-panel {
       margin-top: 10px;
-      padding: 10px 12px;
+      padding: 14px 16px 16px;
       border-radius: 10px;
       border: 1px solid #fecaca;
       background: #fef2f2;
       color: #991b1b;
       font-size: 12px;
-      line-height: 1.6;
+      line-height: 1.75;
       display: none;
     }
     .warning-panel.show {
@@ -428,12 +428,32 @@
     }
     .warning-panel-title {
       font-weight: 700;
-      margin-bottom: 4px;
+      margin: 0 0 12px 0;
+      line-height: 1.5;
     }
     .warning-panel-item {
       word-break: break-word;
       white-space: pre-wrap;
-      margin: 2px 0;
+      margin: 0 0 12px 0;
+      line-height: 1.7;
+    }
+    .warning-panel-item:last-of-type {
+      margin-bottom: 0;
+    }
+    .warning-panel-item a {
+      color: #2563eb;
+      text-decoration: underline;
+    }
+    .warning-panel-faq-link {
+      margin: 18px 0 0 0;
+      padding-top: 4px;
+      font-size: 12px;
+      line-height: 1.7;
+      color: inherit;
+    }
+    .warning-panel-faq-link a {
+      color: #2563eb;
+      text-decoration: underline;
     }
     .toast-container {
       position: fixed;
@@ -569,6 +589,10 @@
       color: #e5e7eb;
       border-bottom-color: #374151;
     }
+    html[data-theme="dark"] .dnd-section,
+    html[data-theme="dark"] .nas-patrol-section {
+      border-top-color: #374151;
+    }
     html[data-theme="dark"] .stats-label { color: #d1d5db; }
     html[data-theme="dark"] .event-item span { color: #e5e7eb; }
     html[data-theme="dark"] .header-sub,
@@ -631,6 +655,17 @@
       background: #1f2937;
     }
     html[data-theme="dark"] .auth-page { background: #111827; }
+    html[data-theme="dark"] .warning-panel {
+      border-color: #991b1b;
+      background: rgba(127, 29, 29, 0.25);
+      color: #fecaca;
+    }
+    html[data-theme="dark"] .warning-panel-faq-link a {
+      color: #93c5fd;
+    }
+    html[data-theme="dark"] .warning-panel-item a {
+      color: #93c5fd;
+    }
     html[data-theme="dark"] .auth-card {
       background: rgba(17,24,39,0.95);
       border-color: rgba(75,85,99,0.55);
@@ -865,6 +900,20 @@
             </div>
           </div>
         </div>
+        <div class="nas-patrol-section" style="margin-top: 16px; padding-top: 16px; border-top: 1px solid #e5e7eb;">
+          <div class="field-label" style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
+            <input type="checkbox" id="input-nas-patrol-enabled" />
+            <span>巡检任务</span>
+          </div>
+          <div class="field-helper" style="margin-bottom: 10px;">按设定间隔采集本机 CPU、内存与磁盘状态并推送；标题为「事件标题前缀-巡检任务完成」，与勿扰可同时开启（巡检不受勿扰拦截）。</div>
+          <div class="system-grid" style="grid-template-columns: 1fr 2fr;">
+            <div>
+              <div class="field-label">巡检间隔（分钟）</div>
+              <input id="input-nas-patrol-interval" type="number" min="5" max="10080" step="1" value="720" />
+              <div class="field-helper">默认 720 分钟，范围 5～10080。</div>
+            </div>
+          </div>
+        </div>
       </div>
 
       <div class="footer-actions">
@@ -1053,18 +1102,57 @@
     }
 
     function renderPersistentWarnings(warnings) {
+      if (!warningPanel) return;
       const list = Array.isArray(warnings) ? warnings.filter(Boolean) : [];
       if (!list.length) {
         warningPanel.classList.remove("show");
         warningPanel.innerHTML = "";
         return;
       }
-      warningPanel.classList.add("show");
-      const lines = list.map(function(item) {
-        return '<div class="warning-panel-item">- ' + item + "</div>";
+      function isMediaOrPhotoDbLine(s) {
+        return /^(影视库|相册库):/.test(String(s));
+      }
+      function escapeHtml(s) {
+        return String(s)
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;");
+      }
+      function formatWarningItemHtml(item) {
+        var s = String(item);
+        var marker = "常见问题 · 第11条";
+        if (s.indexOf("Docker：") === 0 && s.indexOf(marker) >= 0) {
+          var i = s.indexOf(marker);
+          var before = escapeHtml(s.slice(0, i));
+          var after = escapeHtml(s.slice(i + marker.length));
+          return (
+            before +
+            '<a href="/faq#faq-docker-sock" target="_blank" rel="noopener noreferrer">' +
+            marker +
+            "</a>" +
+            after
+          );
+        }
+        return escapeHtml(s);
+      }
+      const mediaPhotoLines = list.filter(isMediaOrPhotoDbLine);
+      const otherLines = list.filter(function(s) { return !isMediaOrPhotoDbLine(s); });
+      const ordered = otherLines.concat(mediaPhotoLines);
+      const lines = ordered.map(function(item) {
+        return '<div class="warning-panel-item">- ' + formatWarningItemHtml(item) + "</div>";
       }).join("");
+      var faq10 = "";
+      if (mediaPhotoLines.length) {
+        faq10 =
+          '<p class="warning-panel-faq-link">' +
+          '影视 / 相册数据库路径、挂载与权限说明请查看 ' +
+          '<a href="/faq#faq-external-db" target="_blank" rel="noopener noreferrer">常见问题 · 第10条</a>。' +
+          "</p>";
+      }
+      warningPanel.classList.add("show");
       warningPanel.innerHTML =
-        '<div class="warning-panel-title">数据库路径权限告警（保存后检测）</div>' + lines;
+        '<div class="warning-panel-title">数据库路径权限告警（保存后检测）</div>' + lines + faq10;
     }
 
     const PUSHPLUS_PLACEHOLDER = '{"token":"你的token","title":"{title}","content":"消息内容","template":"html","channel":"wechat"}';
@@ -1483,6 +1571,19 @@
           document.getElementById("input-dnd-end").disabled = !en;
         };
 
+        const patrolIv = Math.max(5, Math.min(10080, parseInt(data.nas_patrol_interval_minutes, 10) || 720));
+        const nasEn = document.getElementById("input-nas-patrol-enabled");
+        const nasIv = document.getElementById("input-nas-patrol-interval");
+        if (nasEn) nasEn.checked = !!data.nas_patrol_enabled;
+        if (nasIv) nasIv.value = String(patrolIv);
+        function syncNasPatrolInputs() {
+          const enEl = document.getElementById("input-nas-patrol-enabled");
+          const ivEl = document.getElementById("input-nas-patrol-interval");
+          if (ivEl && enEl) ivEl.disabled = !enEl.checked;
+        }
+        if (nasEn) nasEn.onchange = syncNasPatrolInputs;
+        syncNasPatrolInputs();
+
         // 配置已从服务端加载成功即可测推送，不必再次点「保存配置」。
         testBtn.disabled = false;
         setStatus(false, "");
@@ -1563,6 +1664,8 @@
         dnd_enabled: document.getElementById("input-dnd-enabled").checked,
         dnd_start_time: document.getElementById("input-dnd-start").value || "22:00",
         dnd_end_time: document.getElementById("input-dnd-end").value || "07:00",
+        nas_patrol_enabled: document.getElementById("input-nas-patrol-enabled").checked,
+        nas_patrol_interval_minutes: document.getElementById("input-nas-patrol-interval").value,
         bark_icon: (document.getElementById("input-bark-icon").value || "").trim(),
       };
 

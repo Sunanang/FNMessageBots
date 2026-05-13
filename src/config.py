@@ -85,6 +85,10 @@ class Config:
     dnd_start_time: str = "22:00"  # HH:MM，如 22:00
     dnd_end_time: str = "07:00"   # HH:MM，如 07:00（跨日则到次日该时间结束）
 
+    # NAS 定时巡检（按间隔采集本机 CPU/内存/磁盘状态并推送，不参与日志事件勾选）
+    nas_patrol_enabled: bool = False
+    nas_patrol_interval_minutes: int = 720  # 5～10080
+
     # 高级配置
     max_log_age: int = 7  # 应用运行日志 monitor_*.log 保留天数
     notification_restart_enabled: bool = True
@@ -202,6 +206,13 @@ class Config:
             self.dnd_start_time = data["dnd_start_time"].strip()
         if "dnd_end_time" in data and isinstance(data["dnd_end_time"], str):
             self.dnd_end_time = data["dnd_end_time"].strip()
+        if "nas_patrol_enabled" in data:
+            self.nas_patrol_enabled = as_bool(data["nas_patrol_enabled"], False)
+        if "nas_patrol_interval_minutes" in data and data["nas_patrol_interval_minutes"] is not None:
+            try:
+                self.nas_patrol_interval_minutes = int(data["nas_patrol_interval_minutes"])
+            except (TypeError, ValueError):
+                pass
         if "poll_batch_summary_enabled" in data:
             self.poll_batch_summary_enabled = as_bool(data["poll_batch_summary_enabled"], False)
         if not env_skip("media_lib_logger_enabled") and "media_lib_logger_enabled" in data:
@@ -444,8 +455,12 @@ class Config:
         self.monitor_events = filter_monitor_events(self.monitor_events)
         if not self.monitor_events:
             raise ValueError("必须配置至少一个监控事件")
-        
 
+        try:
+            _iv = int(self.nas_patrol_interval_minutes)
+        except (TypeError, ValueError):
+            _iv = 720
+        self.nas_patrol_interval_minutes = max(5, min(10080, _iv))
     
     def _ensure_directories(self):
         """确保目录存在"""
