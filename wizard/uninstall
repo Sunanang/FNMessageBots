@@ -1,0 +1,33 @@
+[
+    {
+        "stepTitle": "确认卸载",
+        "items": [
+            {
+                "type": "tips",
+                "helpText": "请选择卸载时的数据处理方式。"
+            },
+            {
+                "type": "radio",
+                "field": "wizard_data_action",
+                "label": "数据处理",
+                "initValue": "keep",
+                "options": [
+                    {
+                        "label": "保留数据（推荐）",
+                        "value": "keep"
+                    },
+                    {
+                        "label": "删除所有应用数据（不可恢复）",
+                        "value": "delete"
+                    }
+                ],
+                "rules": [
+                    {
+                        "required": true,
+                        "message": "请选择数据处理方式"
+                    }
+                ]
+            }
+        ]
+    }
+]
