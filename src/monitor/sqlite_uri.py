@@ -50,10 +50,16 @@ def connect_readonly_with_fallback(
     timeout: float = 5.0,
     *,
     table_probe_sql: Optional[str] = None,
+    prefer_immutable: bool = False,
 ) -> sqlite3.Connection:
-    """依次尝试 mode=ro 与 immutable 只读连接；可选执行表级探测（WAL 库在只读挂载上常需 immutable）。"""
+    """依次尝试只读连接；可选执行表级探测（WAL 库在只读挂载上常需 immutable）。"""
     last_err: Optional[sqlite3.Error] = None
-    for make_uri in (sqlite_readonly_uri, sqlite_readonly_immutable_uri):
+    uri_builders = (
+        (sqlite_readonly_immutable_uri, sqlite_readonly_uri)
+        if prefer_immutable
+        else (sqlite_readonly_uri, sqlite_readonly_immutable_uri)
+    )
+    for make_uri in uri_builders:
         conn: Optional[sqlite3.Connection] = None
         try:
             conn = sqlite3.connect(make_uri(db_path), uri=True, timeout=timeout)

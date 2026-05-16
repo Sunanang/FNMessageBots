@@ -1670,7 +1670,11 @@ class MultiPlatformNotifier:
                 name_cols = ["username", "nickname", "name", "account", "user_name"]
 
                 for db_path in db_paths:
-                    conn = connect_readonly_with_fallback(db_path, timeout=3.0)
+                    conn = connect_readonly_with_fallback(
+                        db_path,
+                        timeout=3.0,
+                        prefer_immutable=True,
+                    )
                     try:
                         tables = []
                         for (tname,) in conn.execute("SELECT name FROM sqlite_master WHERE type='table'"):
@@ -1719,7 +1723,11 @@ class MultiPlatformNotifier:
         now = time.time()
         if now - self._nas_uid_name_cache_loaded_at > 60:
             try:
-                conn = connect_readonly_with_fallback(self.logger_user_lookup_db_path, timeout=3.0)
+                conn = connect_readonly_with_fallback(
+                    self.logger_user_lookup_db_path,
+                    timeout=3.0,
+                    prefer_immutable=True,
+                )
                 cur = conn.execute(
                     "SELECT uid, uname FROM log WHERE uid IS NOT NULL AND uname IS NOT NULL "
                     "AND TRIM(uname) != '' ORDER BY id DESC LIMIT 20000"
