@@ -20,6 +20,7 @@ from typing import Any, Callable, Dict, List, Optional, Set
 from zoneinfo import ZoneInfo
 
 from .models import JournalEntry
+from .sqlite_uri import connect_readonly_with_fallback
 
 PHOTO_SHARE_CREATED = "PHOTO_SHARE_CREATED"
 PHOTO_SHARE_EXPIRED = "PHOTO_SHARE_EXPIRED"
@@ -77,6 +78,8 @@ class PhotoDBPoller:
         self.cursor_dir = Path(cursor_dir)
         self.poll_interval = max(1, int(poll_interval or 10))
         self.monitor_events = set(monitor_events or [])
+        self.poll_batch_summary_enabled = False
+        self.summary_batch_enqueue: Optional[Callable[[List[Dict[str, Any]]], None]] = None
         self.event_handlers: Dict[str, Callable] = {}
         self.running = False
         self._thread: Optional[threading.Thread] = None
@@ -104,6 +107,14 @@ class PhotoDBPoller:
             self.poll_interval = max(1, int(poll_interval))
         if db_path is not None:
             self.db_path = (db_path or "").strip()
+
+    def set_poll_batch_summary(
+        self,
+        enabled: bool,
+        enqueue: Optional[Callable[[List[Dict[str, Any]]], None]],
+    ) -> None:
+        self.poll_batch_summary_enabled = bool(enabled)
+        self.summary_batch_enqueue = enqueue
 
     def _load_state(self) -> Dict[str, Any]:
         default: Dict[str, Any] = {
@@ -158,7 +169,7 @@ class PhotoDBPoller:
 
     def _connect(self) -> sqlite3.Connection:
         # 仅做轮询读取，使用只读连接避免要求数据库目录可写（WAL/journal 权限）
-        conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True, timeout=10.0)
+        conn = connect_readonly_with_fallback(self.db_path, timeout=10.0)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -197,7 +208,23 @@ class PhotoDBPoller:
             original_line=raw_log,
         )
         try:
-            handler(event_data, entry)
+            if self.poll_batch_summary_enabled and self.summary_batch_enqueue:
+                rid = hash(fp) & 0x7FFFFFFF
+                self.summary_batch_enqueue(
+                    [
+                        {
+                            "row_id": rid,
+                            "db_event_id": event_type,
+                            "event_type": event_type,
+                            "event_data": event_data,
+                            "entry": entry,
+                            "handler": handler,
+                            "source": "photo_db",
+                        }
+                    ]
+                )
+            else:
+                handler(event_data, entry)
             self._dedup_seen[fp] = now
         except Exception as e:
             self.logger.error("处理相册事件失败 %s: %s", event_type, e, exc_info=True)

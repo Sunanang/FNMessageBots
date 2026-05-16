@@ -1,5 +1,5 @@
 {
-  "wechat_webhook_url": "https://222",
+  "wechat_webhook_url": "",
   "dingtalk_webhook_url": "",
   "feishu_webhook_url": "",
   "bark_url": "",
@@ -29,29 +29,7 @@
     "APP_UPDATE_FAILED",
     "BACKUP_TASK_SUCCESS",
     "BACKUP_TASK_FAILED",
-    "BACKUP_TASK_PARTIAL_SUCCESS",
-    "MEDIA_LOGIN_SUCC",
-    "MEDIA_LOGOUT",
-    "MEDIA_USER_CREATED",
-    "TRIM_RESOURCE_ADDED",
-    "TRIM_SCRAPE_SUCCESS",
-    "PHOTO_SHARE_CREATED",
-    "PHOTO_SHARE_EXPIRED",
-    "PHOTO_DEVICE_REGISTERED",
-    "FACE_RECOGNITION_UPDATED",
-    "SCHEDULER_TASK_SUCCESS",
-    "SCHEDULER_TASK_FAILED",
-    "SCHEDULER_TASK_CONDITION_FAILED",
-    "DOCKER_CONTAINER_CREATE",
-    "DOCKER_CONTAINER_START",
-    "DOCKER_CONTAINER_STOP",
-    "DOCKER_CONTAINER_DIE",
-    "DOCKER_CONTAINER_OOM",
-    "DOCKER_CONTAINER_KILL",
-    "DOCKER_CONTAINER_PAUSE",
-    "DOCKER_CONTAINER_UNPAUSE",
-    "DOCKER_CONTAINER_RESTART",
-    "DOCKER_CONTAINER_DESTROY"
+    "BACKUP_TASK_PARTIAL_SUCCESS"
   ],
   "log_level": "INFO",
   "log_dir": "./data/logs",
@@ -86,7 +64,5 @@
   "title_prefix": "飞牛NAS",
   "minimal_push_enabled": false,
   "nas_patrol_enabled": false,
-  "nas_patrol_interval_minutes": 720,
-  "web_password_salt": "ed8a6a654aafb9b009475ed10693c037",
-  "web_password_hash": "5f03da90029c217197a442704b1c1af1a6f6c6491af0f76e23e892a8714c522d"
+  "nas_patrol_interval_minutes": 720
 }

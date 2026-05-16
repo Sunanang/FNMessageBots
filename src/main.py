@@ -10,6 +10,7 @@ from pathlib import Path
 import threading
 import sqlite3
 import stat
+from typing import Any, Callable, Dict, List, Optional
 
 # 添加src目录到Python路径，解决模块导入问题
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -38,6 +39,7 @@ from monitor.scheduler_db_poller import (
 from monitor.docker_events_poller import DOCKER_POLL_EVENTS, DockerEventsPoller
 from monitor.event_processor import EventProcessor
 from monitor.nas_patrol import start_nas_patrol_thread
+from monitor.sqlite_uri import probe_readonly_sqlite
 from notifier.unified_notifier import UnifiedNotifier
 from web.ui_app import start_ui_server_in_background
 
@@ -66,8 +68,11 @@ class Application:
         self.notification_health_thread = None
         self._nas_patrol_thread = None
         self._exit_code = 0
+        self._unified_batch_buf: List[Dict[str, Any]] = []
+        self._unified_batch_lock = threading.Lock()
+        self._unified_flush_stop = threading.Event()
+        self._unified_flush_thread: Optional[threading.Thread] = None
 
-        
     def _print_banner(self):
         """打印启动横幅"""
         banner = f"""
@@ -78,21 +83,100 @@ class Application:
         """
         print(banner)
 
-    def _dispatch_batch_events(self, batch_events):
-        """适配 DBLogPoller 批处理回调签名（忽略返回值）。"""
-        if self.event_processor:
-            self.event_processor.process_batch_events(batch_events)
+    def _enqueue_unified_batch_items(self, items: List[Dict[str, Any]]) -> None:
+        """影视/相册/Docker/备份/任务计划 等先入队，在主日志下一轮汇总时或定时刷盘时合并推送。"""
+        if not items:
+            return
+        with self._unified_batch_lock:
+            self._unified_batch_buf.extend(items)
+
+    def _dispatch_batch_events(self, batch_events: List[Dict[str, Any]]) -> None:
+        """主日志轮询汇总：与队列中已等待的外部库事件（含备份/任务计划）合并为一次 POLL_BATCH_SUMMARY。"""
+        if not self.event_processor:
+            return
+        for it in batch_events:
+            if isinstance(it, dict) and "source" not in it:
+                it["source"] = "db"
+        pending: List[Dict[str, Any]] = []
+        with self._unified_batch_lock:
+            if self._unified_batch_buf:
+                pending = self._unified_batch_buf
+                self._unified_batch_buf = []
+        pending.extend(batch_events)
+        if pending:
+            self.event_processor.process_batch_events(pending)
+
+    def _flush_unified_batch_pending_only(self) -> None:
+        """仅刷出队列中外部库事件（无主日志本轮时由定时线程调用）。"""
+        if not self.event_processor:
+            return
+        buf: List[Dict[str, Any]] = []
+        with self._unified_batch_lock:
+            if self._unified_batch_buf:
+                buf = self._unified_batch_buf
+                self._unified_batch_buf = []
+        if not buf:
+            return
+        try:
+            self.event_processor.process_batch_events(buf)
+        except Exception as e:
+            if self.logger:
+                self.logger.error("轮询汇总（外部库队列）推送失败: %s", e, exc_info=True)
+
+    def _unified_batch_flush_loop(self) -> None:
+        while True:
+            if self._unified_flush_stop.is_set() or not self.running:
+                break
+            interval = max(1, int(getattr(self.config, "logger_poll_interval", 5) or 5))
+            if self._unified_flush_stop.wait(timeout=float(interval)):
+                break
+            self._flush_unified_batch_pending_only()
+
+    def _start_unified_batch_flush_thread(self) -> None:
+        if self._unified_flush_thread and self._unified_flush_thread.is_alive():
+            return
+        if not getattr(self.config, "poll_batch_summary_enabled", False):
+            return
+        if not self.event_processor:
+            return
+        self._unified_flush_stop.clear()
+        t = threading.Thread(target=self._unified_batch_flush_loop, name="UnifiedPollBatchFlush", daemon=True)
+        self._unified_flush_thread = t
+        t.start()
+
+    def _stop_unified_batch_flush_thread(self) -> None:
+        self._unified_flush_stop.set()
+        if self._unified_flush_thread and self._unified_flush_thread.is_alive():
+            join_secs = max(8, int(getattr(self.config, "logger_poll_interval", 5) or 5) + 3)
+            self._unified_flush_thread.join(timeout=float(join_secs))
+        self._unified_flush_thread = None
+
+    def _refresh_poll_batch_summary_thread(self) -> None:
+        """按配置启动或停止外部库汇总队列的定时刷盘线程。"""
+        if not self.config or not self.event_processor:
+            self._stop_unified_batch_flush_thread()
+            self._flush_unified_batch_pending_only()
+            return
+        if getattr(self.config, "poll_batch_summary_enabled", False):
+            self._start_unified_batch_flush_thread()
+        else:
+            self._stop_unified_batch_flush_thread()
+            self._flush_unified_batch_pending_only()
 
 
-    def _probe_db_readable(self, label: str, path: str) -> bool:
-        """检查 SQLite 路径是否可读。返回是否可访问。"""
+    def _probe_db_readable(
+        self,
+        label: str,
+        path: str,
+        *,
+        table_probe_sql: Optional[str] = None,
+    ) -> bool:
+        """检查 SQLite 路径是否可读（与轮询器相同的只读/immutable 策略）。"""
         db_path = (path or "").strip()
         if not db_path:
             return False
         try:
-            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=3.0)
-            conn.execute("SELECT 1").fetchone()
-            conn.close()
+            probe_readonly_sqlite(db_path, timeout=3.0, table_probe_sql=table_probe_sql)
             print(f"✓ {label} 可访问: {db_path}")
             return True
         except Exception as e:
@@ -178,9 +262,17 @@ class Application:
         if me & BACKUP_POLL_EVENTS:
             self._probe_db_readable("备份库 basic_backup.db3", getattr(self.config, "backup_db_path", "") or "")
         if me & TRIMMEDIA_POLL_EVENTS:
-            self._probe_db_readable("影视库 trimmedia.db", getattr(self.config, "trim_media_db_path", "") or "")
+            self._probe_db_readable(
+                "影视库 trimmedia.db",
+                getattr(self.config, "trim_media_db_path", "") or "",
+                table_probe_sql="SELECT 1 FROM item LIMIT 1",
+            )
         if me & TRIMACTIVITY_POLL_EVENTS:
-            self._probe_db_readable("影视库 trimactivity.db", getattr(self.config, "trim_activity_db_path", "") or "")
+            self._probe_db_readable(
+                "影视库 trimactivity.db",
+                getattr(self.config, "trim_activity_db_path", "") or "",
+                table_probe_sql="SELECT 1 FROM user_token LIMIT 1",
+            )
         if me & PHOTO_POLL_EVENTS:
             self._probe_db_readable("相册库 photo.db", getattr(self.config, "photo_db_path", "") or "")
         if me & SCHEDULER_POLL_EVENTS:
@@ -210,7 +302,10 @@ class Application:
         )
         if getattr(self.config, "poll_batch_summary_enabled", False):
             poller.set_batch_handler(self._dispatch_batch_events)
-            print("轮询汇总模式：已开启（同一轮查询内多事件合并为一条推送）")
+            print(
+                "轮询汇总模式：已开启（主日志每轮与影视/相册/Docker/备份/任务计划 等待项合并为一条推送；"
+                "无主日志时按轮询间隔刷外部队列）"
+            )
         else:
             poller.set_batch_handler(None)
             print("轮询汇总模式：已关闭（逐条推送；事件密集时可能触发渠道限流）")
@@ -376,7 +471,15 @@ class Application:
                 self.backup_poller = None
 
         trim_media_path = getattr(self.config, "trim_media_db_path", "") or ""
-        trim_media_ok = self._probe_db_readable("影视库 trimmedia.db", trim_media_path) if (me & TRIMMEDIA_POLL_EVENTS) else False
+        trim_media_ok = (
+            self._probe_db_readable(
+                "影视库 trimmedia.db",
+                trim_media_path,
+                table_probe_sql="SELECT 1 FROM item LIMIT 1",
+            )
+            if (me & TRIMMEDIA_POLL_EVENTS)
+            else False
+        )
         if (me & TRIMMEDIA_POLL_EVENTS) and trim_media_ok:
             if self.media_db_poller is None:
                 self.media_db_poller = MediaDBPoller(
@@ -397,7 +500,15 @@ class Application:
                 self.media_db_poller = None
 
         trim_activity_path = getattr(self.config, "trim_activity_db_path", "") or ""
-        trim_activity_ok = self._probe_db_readable("影视库 trimactivity.db", trim_activity_path) if (me & TRIMACTIVITY_POLL_EVENTS) else False
+        trim_activity_ok = (
+            self._probe_db_readable(
+                "影视库 trimactivity.db",
+                trim_activity_path,
+                table_probe_sql="SELECT 1 FROM user_token LIMIT 1",
+            )
+            if (me & TRIMACTIVITY_POLL_EVENTS)
+            else False
+        )
         if (me & TRIMACTIVITY_POLL_EVENTS) and trim_activity_ok:
             if self.trim_activity_poller is None:
                 self.trim_activity_poller = TrimActivityPoller(
@@ -480,6 +591,21 @@ class Application:
             if self.docker_events_poller is not None:
                 self.docker_events_poller.stop()
                 self.docker_events_poller = None
+
+        pbs = bool(getattr(self.config, "poll_batch_summary_enabled", False)) and self.event_processor is not None
+        batch_enq = self._enqueue_unified_batch_items if pbs else None
+        if self.media_db_poller:
+            self.media_db_poller.set_poll_batch_summary(pbs, batch_enq)
+        if self.trim_activity_poller:
+            self.trim_activity_poller.set_poll_batch_summary(pbs, batch_enq)
+        if self.photo_db_poller:
+            self.photo_db_poller.set_poll_batch_summary(pbs, batch_enq)
+        if self.docker_events_poller:
+            self.docker_events_poller.set_poll_batch_summary(pbs, batch_enq)
+        if self.backup_poller:
+            self.backup_poller.set_poll_batch_summary(pbs, batch_enq)
+        if self.scheduler_db_poller:
+            self.scheduler_db_poller.set_poll_batch_summary(pbs, batch_enq)
 
     def _register_db_event_handlers(self) -> None:
         """为 logger / 备份 / 影视库 / 相册 SQLite 轮询器注册 monitor_events 中的处理器。"""
@@ -566,6 +692,7 @@ class Application:
                 self.docker_events_poller.start()
             if self.logger:
                 self.logger.info("热加载完成：监控已启动")
+            self._refresh_poll_batch_summary_thread()
         elif self.notifier is not None:
             self.notifier.reload_config()
             logger_db_path = (getattr(self.config, "logger_db_path", "") or "").strip()
@@ -609,6 +736,7 @@ class Application:
                 self.docker_events_poller.start()
             if self.logger:
                 self.logger.info("热加载完成：监控配置已更新")
+            self._refresh_poll_batch_summary_thread()
 
         # 热加载后同步「原始推送日志保留天数」到存储模块（无需重启进程）
         if self.event_processor and getattr(self.event_processor, "log_storage", None):
@@ -703,7 +831,8 @@ class Application:
                         print(f"已勾选 Docker 容器事件，但 socket 不存在: {ds}")
                     else:
                         print("Docker 容器事件依赖未就绪，跳过监听（请确认已 pip install docker）")
-            
+                self._refresh_poll_batch_summary_thread()
+
             # 设置信号处理
             signal.signal(signal.SIGINT, self._signal_handler)
             signal.signal(signal.SIGTERM, self._signal_handler)
@@ -838,6 +967,8 @@ class Application:
     def shutdown(self):
         """关闭应用"""
         print("\n正在关闭应用...")
+        self._stop_unified_batch_flush_thread()
+        self._flush_unified_batch_pending_only()
 
         # 发送停止通知
         if self.notifier:

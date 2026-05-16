@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, List, Optional, Set
 from zoneinfo import ZoneInfo
 
 from .models import JournalEntry
+from .sqlite_uri import connect_readonly_with_fallback
 
 TRIM_RESOURCE_ADDED = "TRIM_RESOURCE_ADDED"
 TRIM_SCRAPE_SUCCESS = "TRIM_SCRAPE_SUCCESS"
@@ -60,6 +61,8 @@ class MediaDBPoller:
         self.cursor_dir = Path(cursor_dir)
         self.poll_interval = max(1, int(poll_interval or 10))
         self.monitor_events = set(monitor_events or [])
+        self.poll_batch_summary_enabled = False
+        self.summary_batch_enqueue: Optional[Callable[[List[Dict[str, Any]]], None]] = None
         self.event_handlers: Dict[str, Callable] = {}
         self.running = False
         self._thread: Optional[threading.Thread] = None
@@ -88,6 +91,14 @@ class MediaDBPoller:
             self.poll_interval = max(1, int(poll_interval))
         if db_path is not None:
             self.db_path = (db_path or "").strip()
+
+    def set_poll_batch_summary(
+        self,
+        enabled: bool,
+        enqueue: Optional[Callable[[List[Dict[str, Any]]], None]],
+    ) -> None:
+        self.poll_batch_summary_enabled = bool(enabled)
+        self.summary_batch_enqueue = enqueue
 
     def _load_state(self) -> Dict[str, Any]:
         default: Dict[str, Any] = {
@@ -150,14 +161,13 @@ class MediaDBPoller:
         self._dedup_seen = {k: v for k, v in self._dedup_seen.items() if int(v) >= now - _DEDUP_TTL}
 
     def _connect(self) -> sqlite3.Connection:
-        # 仅做轮询读取：immutable=1 可避免部分 NAS/WAL 场景下的只读打开失败
-        conn = sqlite3.connect(
-            f"file:{self.db_path}?mode=ro&immutable=1",
-            uri=True,
+        """只读 + immutable 兜底；禁止回退可写连接（只读挂载上会导致 unable to open）。"""
+        conn = connect_readonly_with_fallback(
+            self.db_path,
             timeout=10.0,
+            table_probe_sql="SELECT 1 FROM item LIMIT 1",
         )
         conn.row_factory = sqlite3.Row
-        conn.execute("SELECT 1").fetchone()
         return conn
 
     def _fingerprint(self, kind: str, key: str) -> str:
@@ -193,7 +203,23 @@ class MediaDBPoller:
             original_line=raw_log,
         )
         try:
-            handler(event_data, entry)
+            if self.poll_batch_summary_enabled and self.summary_batch_enqueue:
+                rid = hash(fp) & 0x7FFFFFFF
+                self.summary_batch_enqueue(
+                    [
+                        {
+                            "row_id": rid,
+                            "db_event_id": event_type,
+                            "event_type": event_type,
+                            "event_data": event_data,
+                            "entry": entry,
+                            "handler": handler,
+                            "source": "trim_media_db",
+                        }
+                    ]
+                )
+            else:
+                handler(event_data, entry)
             self._dedup_seen[fp] = now
         except Exception as e:
             self.logger.error("处理影视库事件失败 %s: %s", event_type, e, exc_info=True)
@@ -236,8 +262,20 @@ class MediaDBPoller:
             return
         try:
             conn = self._connect()
+            self._open_db_error_count = 0
         except Exception as e:
-            self.logger.warning("连接 trimmedia.db 失败: %s", e)
+            msg = str(e).lower()
+            if "unable to open" in msg or "readonly" in msg:
+                self._open_db_error_count += 1
+                if self._open_db_error_count == 1 or self._open_db_error_count % 12 == 0:
+                    self.logger.warning(
+                        "连接 trimmedia.db 失败: %s（已连续 %s 次，期间同类错误已节流）",
+                        e,
+                        self._open_db_error_count,
+                    )
+            else:
+                self._open_db_error_count = 0
+                self.logger.warning("连接 trimmedia.db 失败: %s", e)
             return
 
         try:
@@ -415,8 +453,15 @@ class MediaDBPoller:
             return
         try:
             state = self._load_state()
-            self._baseline(conn, state)
-            self._save_state(state)
+            try:
+                self._baseline(conn, state)
+                self._save_state(state)
+            except sqlite3.Error as e:
+                self.logger.warning(
+                    "MediaDBPoller 启动对齐失败（将在线程内重试 baseline）: %s",
+                    e,
+                    exc_info=True,
+                )
         finally:
             try:
                 conn.close()

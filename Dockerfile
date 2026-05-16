@@ -14,7 +14,7 @@ WORKDIR /app
 # 仅保留健康检查所需的 pgrep（procps）
 RUN set -ex && \
     apt-get -o Acquire::Retries=5 update && \
-    apt-get install -y --no-install-recommends procps \
+    apt-get install -y --no-install-recommends procps nut-client smartmontools \
     && rm -rf /var/lib/apt/lists/*
 
 # 复制依赖文件

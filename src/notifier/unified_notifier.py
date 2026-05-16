@@ -20,6 +20,7 @@ from config import TITLE_PREFIX_DEFAULT
 from utils.logtime_display import get_logtime_display_offset_seconds
 from .multi_platform_notifier import MultiPlatformNotifier
 from monitor.db_log_poller import DB_EVENT_ID_TO_PROJECT
+from monitor.sqlite_uri import connect_readonly_with_fallback
 
 
 def _truncate_channel_results_for_storage(channel_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -307,7 +308,7 @@ class UnifiedNotifier:
             return {}
 
         by_type: Dict[str, int] = defaultdict(int)
-        conn = sqlite3.connect(db_path, timeout=5.0)
+        conn = connect_readonly_with_fallback(db_path, timeout=5.0)
         try:
             conn.row_factory = sqlite3.Row
             cur = conn.execute(

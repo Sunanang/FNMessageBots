@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from .models import JournalEntry
 from .media_db_poller import _ms_to_str
+from .sqlite_uri import connect_readonly_with_fallback
 
 _ACTIVITY_EVENTS: Set[str] = {"MEDIA_LOGIN_SUCC", "MEDIA_LOGOUT"}
 
@@ -59,6 +60,8 @@ class TrimActivityPoller:
         self.app_name_patterns = _norm_patterns(app_name_patterns)
         self.poll_interval = max(1, int(poll_interval or 10))
         self.monitor_events = set(monitor_events or [])
+        self.poll_batch_summary_enabled = False
+        self.summary_batch_enqueue: Optional[Callable[[List[Dict[str, Any]]], None]] = None
         self.event_handlers: Dict[str, Callable] = {}
         self.running = False
         self._thread: Optional[threading.Thread] = None
@@ -90,6 +93,14 @@ class TrimActivityPoller:
             self.db_path = (db_path or "").strip()
         if app_name_patterns is not None:
             self.app_name_patterns = _norm_patterns(app_name_patterns)
+
+    def set_poll_batch_summary(
+        self,
+        enabled: bool,
+        enqueue: Optional[Callable[[List[Dict[str, Any]]], None]],
+    ) -> None:
+        self.poll_batch_summary_enabled = bool(enabled)
+        self.summary_batch_enqueue = enqueue
 
     def _load_state(self) -> Dict[str, Any]:
         default: Dict[str, Any] = {
@@ -149,14 +160,12 @@ class TrimActivityPoller:
         self._dedup_seen = {k: v for k, v in self._dedup_seen.items() if int(v) >= now - _DEDUP_TTL}
 
     def _connect(self) -> sqlite3.Connection:
-        # 仅做轮询读取：immutable=1 可避免部分 NAS/WAL 场景下的只读打开失败
-        conn = sqlite3.connect(
-            f"file:{self.db_path}?mode=ro&immutable=1",
-            uri=True,
+        conn = connect_readonly_with_fallback(
+            self.db_path,
             timeout=10.0,
+            table_probe_sql="SELECT 1 FROM user_token LIMIT 1",
         )
         conn.row_factory = sqlite3.Row
-        conn.execute("SELECT 1").fetchone()
         return conn
 
     def _status_to_int(self, value: Any) -> int:
@@ -214,7 +223,23 @@ class TrimActivityPoller:
             original_line=raw_log,
         )
         try:
-            handler(event_data, entry)
+            if self.poll_batch_summary_enabled and self.summary_batch_enqueue:
+                rid = abs(hash(fp)) % (2**31 - 1)
+                self.summary_batch_enqueue(
+                    [
+                        {
+                            "row_id": rid,
+                            "db_event_id": event_type,
+                            "event_type": event_type,
+                            "event_data": event_data,
+                            "entry": entry,
+                            "handler": handler,
+                            "source": "trimactivity_db",
+                        }
+                    ]
+                )
+            else:
+                handler(event_data, entry)
             self._dedup_seen[fp] = now
         except Exception as e:
             self.logger.error("处理 trimactivity 事件失败 %s: %s", event_type, e, exc_info=True)
@@ -255,8 +280,20 @@ class TrimActivityPoller:
             return
         try:
             conn = self._connect()
+            self._open_db_error_count = 0
         except Exception as e:
-            self.logger.warning("连接 trimactivity.db 失败: %s", e)
+            msg = str(e).lower()
+            if "unable to open" in msg or "readonly" in msg:
+                self._open_db_error_count += 1
+                if self._open_db_error_count == 1 or self._open_db_error_count % 12 == 0:
+                    self.logger.warning(
+                        "连接 trimactivity.db 失败: %s（已连续 %s 次，期间同类错误已节流）",
+                        e,
+                        self._open_db_error_count,
+                    )
+            else:
+                self._open_db_error_count = 0
+                self.logger.warning("连接 trimactivity.db 失败: %s", e)
             return
         try:
             if not state.get("initialized"):
@@ -470,8 +507,15 @@ class TrimActivityPoller:
             return
         try:
             state = self._load_state()
-            self._baseline(conn, state)
-            self._save_state(state)
+            try:
+                self._baseline(conn, state)
+                self._save_state(state)
+            except sqlite3.Error as e:
+                self.logger.warning(
+                    "TrimActivityPoller 启动对齐失败（将在线程内重试 baseline）: %s",
+                    e,
+                    exc_info=True,
+                )
         finally:
             try:
                 conn.close()

@@ -5,9 +5,9 @@
 from __future__ import annotations
 
 import re
-import sqlite3
 from typing import Any, Dict, List, Tuple
 
+from monitor.sqlite_uri import connect_readonly_with_fallback
 from valid_event_ids import MONITOR_EVENT_IDS
 
 # 事件分类（顺序即展示顺序）；不在此处的事件不会在 UI 中展示
@@ -149,18 +149,24 @@ def discover_vm_event_ids(db_path: str) -> List[str]:
     """从 logger_data.db3 读取所有包含 VM 的 eventId，按字母序返回。"""
     if not db_path:
         return []
+    conn = None
     try:
-        conn = sqlite3.connect(db_path, timeout=3.0)
+        conn = connect_readonly_with_fallback(db_path, timeout=3.0)
         cur = conn.execute(
             "SELECT DISTINCT eventId FROM log "
             "WHERE eventId IS NOT NULL AND UPPER(eventId) LIKE '%VM%' "
             "ORDER BY eventId ASC"
         )
         rows = [str(r[0]).strip() for r in cur.fetchall() if r and str(r[0]).strip()]
-        conn.close()
         return rows
     except Exception:
         return []
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def sort_vm_event_ids(event_ids: List[str]) -> List[str]:
@@ -223,4 +229,3 @@ def build_events_for_ui(
         if events:
             events_by_category.append({"id": cat_id, "name": cat_name, "events": events})
     return events_by_category, valid_event_ids, discovered_vm_event_ids
-

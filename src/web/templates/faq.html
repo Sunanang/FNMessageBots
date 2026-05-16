@@ -281,7 +281,7 @@ sudo setfacl -m u:FnMessageBot:r /usr/local/apps/@appdata/trim.media/database/tr
 
           <article id="faq-docker-sock" class="faq-item">
             <h2>11. Docker 容器事件与 docker.sock 权限</h2>
-            <p>在监控事件中勾选「Docker 容器」相关事件后，保存时若出现「无法读取 <code>/var/run/docker.sock</code>」类告警，说明<strong>当前进程</strong>无权访问 Docker Engine 的 Unix socket。若你在 <code>config.json</code> 中配置了 <code>docker_socket_path</code>，以下命令中的路径请改为与你配置一致。</p>
+            <p>在监控事件中勾选「Docker 容器」相关事件后，保存时若出现「无法访问 <code>/var/run/docker.sock</code>」类告警，说明<strong>当前进程</strong>无权读写 Docker Engine 的 Unix socket。若你在 <code>config.json</code> 中配置了 <code>docker_socket_path</code>，以下命令中的路径请改为与你配置一致。</p>
             <p><strong>安全提示：</strong>将用户加入 <code>docker</code> 组或使用 ACL 读写 <code>docker.sock</code>，等同于授予通过 Docker API 操控引擎的能力；请仅在理解风险后操作，勿随意 <code>chmod 777</code>。</p>
             <p><strong>自建 Docker / Compose：</strong>在 <code>docker-compose.yml</code> 中为运行本应用的服务挂载宿主 <code>docker.sock</code>，并通过 <code>user</code> / <code>group_add</code>（例如加入宿主 <code>docker</code> 组的 GID）使容器内进程有权访问 socket。</p>
             <p><strong>应用市场版（SSH，默认路径示例）：</strong></p>
@@ -297,7 +297,7 @@ sudo usermod -aG docker FnMessageBot
 sudo setfacl -m u:FnMessageBot:rw /var/run/docker.sock
 
 # 验证（重启进程后再执行）
-sudo -u FnMessageBot test -r /var/run/docker.sock &amp;&amp; echo OK || echo NO
+sudo -u FnMessageBot test -r /var/run/docker.sock -a -w /var/run/docker.sock &amp;&amp; echo OK || echo NO
 # 输出 OK 后再回 Web 保存配置；告警应消失。</pre>
             <p>若仍提示无权限，可用 <code>grep '^Groups:' /proc/&lt;PID&gt;/status</code> 与 <code>getent group docker</code> 对照，确认<strong>运行中的 Python 进程</strong>是否包含 docker 组的 GID；仅用户账号在 docker 组中、但进程附属组未加载时，需依赖平台行为或上述 ACL 等权宜方式。</p>
           </article>

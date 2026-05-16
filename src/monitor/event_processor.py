@@ -214,7 +214,7 @@ class EventProcessor:
                 event_data=event_data,
                 raw_log=getattr(entry, "raw_data", "{}"),
                 entry=entry,
-                source='db'
+                source=str(item.get("source") or "db"),
             )
 
         summary_event_data = {

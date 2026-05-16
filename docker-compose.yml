@@ -14,6 +14,10 @@ services:
       - /usr/local/apps/@appdata/trim.photos/db:/usr/local/apps/@appdata/trim.photos/db:ro
       # fn-scheduler 任务计划数据库（挂载后在 Web 配置页设置 scheduler_db_path）
       # - /usr/local/apps/@appdata/fn-scheduler:/usr/local/apps/@appdata/fn-scheduler:ro
+      # 可选：启用 Docker 容器事件监听需挂载宿主 docker.sock（等同授予 Docker API 访问能力）
+      # - /var/run/docker.sock:/var/run/docker.sock
       - ./config:/app/config:rw
+      # 可选：只读挂载宿主的 dpkg status，巡检可解析 trim 版本（与在 NAS 上 dpkg -s trim 一致）
+      # - /var/lib/dpkg/status:/host/dpkg/status:ro
     environment:
       - TZ=Asia/Shanghai

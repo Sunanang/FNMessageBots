@@ -461,7 +461,7 @@ class Config:
         except (TypeError, ValueError):
             _iv = 720
         self.nas_patrol_interval_minutes = max(5, min(10080, _iv))
-    
+
     def _ensure_directories(self):
         """确保目录存在"""
         Path(self.log_dir).mkdir(parents=True, exist_ok=True)

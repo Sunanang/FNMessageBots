@@ -114,6 +114,7 @@ services:
       - ./data/logs:/app/data/logs:rw       # 数据目录，可修改
       - ./data/cursor:/app/data/cursor:rw   # 数据目录，可修改
       - /usr/trim/var/eventlogger_service:/usr/trim/var/eventlogger_service:ro  # 飞牛系统 eventlogger 目录，路径勿改
+      # - /var/run/docker.sock:/var/run/docker.sock  # 可选：勾选 Docker 容器事件时启用，等同授予 Docker API 访问能力
       - ./config:/app/config:rw             # 配置目录，可修改
     environment:
       - TZ=Asia/Shanghai

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from .models import JournalEntry
+from .sqlite_uri import connect_readonly_with_fallback
 
 
 SCHEDULER_TASK_SUCCESS_EVENT = "SCHEDULER_TASK_SUCCESS"
@@ -125,6 +126,8 @@ class SchedulerDBPoller:
         self.logger = logging.getLogger(__name__)
         self.cursor_dir.mkdir(parents=True, exist_ok=True)
         self._dedup_seen: Dict[str, int] = {}
+        self.poll_batch_summary_enabled = False
+        self.summary_batch_enqueue: Optional[Callable[[List[Dict[str, Any]]], None]] = None
 
     def add_handler(self, event_type: str, handler: Callable) -> None:
         self.event_handlers[event_type] = handler
@@ -144,6 +147,14 @@ class SchedulerDBPoller:
             self.poll_interval = max(1, int(poll_interval))
         if db_path is not None:
             self.db_path = db_path
+
+    def set_poll_batch_summary(
+        self,
+        enabled: bool,
+        enqueue: Optional[Callable[[List[Dict[str, Any]]], None]],
+    ) -> None:
+        self.poll_batch_summary_enabled = bool(enabled)
+        self.summary_batch_enqueue = enqueue
 
     # ── 游标 ──────────────────────────────────────────────────────────────────
 
@@ -200,7 +211,7 @@ class SchedulerDBPoller:
     # ── 数据库 ─────────────────────────────────────────────────────────────────
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True, timeout=5.0)
+        conn = connect_readonly_with_fallback(self.db_path, timeout=5.0)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -363,7 +374,25 @@ class SchedulerDBPoller:
                 continue
 
             try:
-                handler(ev["event_data"], ev["entry"])
+                rid = int(row.get("id") or 0) or (abs(hash(fp)) % (2**31 - 1))
+                ed = ev["event_data"]
+                entry = ev["entry"]
+                if self.poll_batch_summary_enabled and self.summary_batch_enqueue:
+                    self.summary_batch_enqueue(
+                        [
+                            {
+                                "row_id": rid,
+                                "db_event_id": et,
+                                "event_type": et,
+                                "event_data": ed,
+                                "entry": entry,
+                                "handler": handler,
+                                "source": "scheduler_db",
+                            }
+                        ]
+                    )
+                else:
+                    handler(ed, entry)
                 self._dedup_seen[fp] = int(time.time())
             except Exception as e:
                 self.logger.error("处理任务计划事件失败 %s: %s", et, e, exc_info=True)

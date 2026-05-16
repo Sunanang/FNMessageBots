@@ -17,6 +17,7 @@ from typing import Callable, Dict, List, Optional, Any, Sequence
 from utils.logtime_display import get_logtime_display_offset_seconds
 
 from .models import JournalEntry
+from .sqlite_uri import connect_readonly_with_fallback
 
 
 # 数据库 eventId -> 项目内 event_type（通知/处理器使用的类型）
@@ -231,7 +232,7 @@ class DBLogPoller:
     def _get_max_log_id(self) -> int:
         """获取 log 表当前最大 id；启动时用此值作为游标，只处理此后新写入的记录。"""
         try:
-            conn = sqlite3.connect(self.db_path, timeout=5.0)
+            conn = connect_readonly_with_fallback(self.db_path, timeout=5.0)
             row = conn.execute("SELECT COALESCE(MAX(id), 0) AS mx FROM log").fetchone()
             conn.close()
             return int(row[0]) if row else 0
@@ -242,7 +243,7 @@ class DBLogPoller:
     def _fetch_new_rows(self, after_id: int) -> List[Dict[str, Any]]:
         """查询 id > after_id 的记录，按 id 升序。"""
         try:
-            conn = sqlite3.connect(self.db_path, timeout=5.0)
+            conn = connect_readonly_with_fallback(self.db_path, timeout=5.0)
             conn.row_factory = sqlite3.Row
             cur = conn.execute(
                 "SELECT id, serviceId, uid, uname, logtime, loglevel, eventId, parameter, category FROM log WHERE id > ? ORDER BY id ASC",

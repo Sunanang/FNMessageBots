@@ -54,7 +54,7 @@ def _docker_engine_event_filters(monitor_events: Optional[List[str]]) -> Dict[st
 
 _DEDUP_TTL_SECONDS = 24 * 3600
 
-# 重连时 since 与磁盘游标差过大则限制回溯窗口，避免一次补拉过多（引擎仍可能保留上限）
+# 运行中重连时 since 与磁盘游标差过大则限制回溯窗口，避免一次补拉过多（引擎仍可能保留上限）
 _SINCE_MAX_LOOKBACK_SECONDS = 86400
 
 
@@ -101,6 +101,8 @@ class DockerEventsPoller:
         self.socket_path = (socket_path or "").strip() or "/var/run/docker.sock"
         self.cursor_dir = Path(cursor_dir)
         self.monitor_events = set(monitor_events or [])
+        self.poll_batch_summary_enabled = False
+        self.summary_batch_enqueue: Optional[Callable[[List[Dict[str, Any]]], None]] = None
         self.event_handlers: Dict[str, Callable] = {}
         self.running = False
         self._thread: Optional[threading.Thread] = None
@@ -111,6 +113,8 @@ class DockerEventsPoller:
         self._events_since_dedup_flush: int = 0
         self._since_cursor_ts: int = 0
         self._since_dirty_count: int = 0
+        self._start_cutoff_ts: int = 0
+        self._start_cutoff_ns: int = 0
         self.logger = logging.getLogger(__name__)
 
     def add_handler(self, event_type: str, handler: Callable) -> None:
@@ -135,6 +139,14 @@ class DockerEventsPoller:
             except Exception:
                 pass
             self._client = None
+
+    def set_poll_batch_summary(
+        self,
+        enabled: bool,
+        enqueue: Optional[Callable[[List[Dict[str, Any]]], None]],
+    ) -> None:
+        self.poll_batch_summary_enabled = bool(enabled)
+        self.summary_batch_enqueue = enqueue
 
     def _load_dedup(self) -> None:
         try:
@@ -181,7 +193,7 @@ class DockerEventsPoller:
             return None
 
     def _save_since_cursor(self, ts: int) -> None:
-        """持久化 since 游标（供断线重连与进程重启后 client.events(since=...)）。"""
+        """持久化 since 游标（供当前进程运行中断线重连使用）。"""
         try:
             self.cursor_dir.mkdir(parents=True, exist_ok=True)
             payload = {"last_event_time": int(ts), "updated_at": int(time.time())}
@@ -189,26 +201,54 @@ class DockerEventsPoller:
         except Exception as e:
             self.logger.warning("写入 Docker events since 游标失败: %s", e)
 
+    def _align_since_cursor_to_start_time(self) -> None:
+        """每次启动对齐到当前时刻，跳过停用/停机期间积累的 Docker 事件。"""
+        now_ns = time.time_ns()
+        now_ts = max(1, now_ns // 1_000_000_000)
+        self._start_cutoff_ns = now_ns
+        self._start_cutoff_ts = now_ts
+        self._since_cursor_ts = now_ts
+        self._since_dirty_count = 0
+        self._save_since_cursor(now_ts)
+        self.logger.info(
+            "Docker events 启动水位已对齐到当前时刻 since=%s（不补发停用期间事件）",
+            now_ts,
+        )
+
     def _effective_since_for_connect(self) -> int:
-        """本次连接使用的 since：磁盘值与「当前时刻减回溯上限」取较大者；无磁盘则用当前时刻（不补历史）。"""
+        """本次连接使用的 since：不早于本次 start 水位；运行中重连再参考磁盘游标。"""
         now = int(time.time())
         stored = self._load_since_cursor()
+        floor = max(now - _SINCE_MAX_LOOKBACK_SECONDS, self._start_cutoff_ts or 0)
         if stored is None:
             self.logger.info(
                 "Docker events since 游标不存在，从当前时刻起订阅（不补发历史）",
             )
-            self._since_cursor_ts = now
-            self._save_since_cursor(now)
-            return now
-        floor = now - _SINCE_MAX_LOOKBACK_SECONDS
+            since_ts = max(now, floor)
+            self._since_cursor_ts = since_ts
+            self._save_since_cursor(since_ts)
+            return since_ts
         since_ts = max(stored, floor)
         self._since_cursor_ts = since_ts
         if since_ts > stored:
             self.logger.info(
-                "Docker events since 游标过旧，限制回溯至 %s 秒内",
-                _SINCE_MAX_LOOKBACK_SECONDS,
+                "Docker events since 游标早于本次启动水位或过旧，已对齐到 since=%s",
+                since_ts,
             )
         return since_ts
+
+    def _event_before_start_cutoff(self, ev: Dict[str, Any]) -> bool:
+        """过滤本次 start 之前的事件，防止 Docker since 秒级边界补到停用期尾巴。"""
+        if self._start_cutoff_ns <= 0 and self._start_cutoff_ts <= 0:
+            return False
+        tn = ev.get("timeNano") or ev.get("TimeNano")
+        if tn:
+            try:
+                return int(tn) < self._start_cutoff_ns
+            except (TypeError, ValueError):
+                pass
+        ts = _event_unix_seconds(ev)
+        return bool(self._start_cutoff_ts and ts < self._start_cutoff_ts)
 
     def _advance_since_from_stream_event(self, ev: Dict[str, Any]) -> None:
         """根据流里每条事件推进内存游标并节流写盘。"""
@@ -251,21 +291,23 @@ class DockerEventsPoller:
         image = (attrs.get("image") or ev.get("from") or "").strip()
         exit_code = attrs.get("exitCode") or attrs.get("exit_code")
 
+        time_nano = ev.get("timeNano") or ev.get("TimeNano") or 0
+        try:
+            time_nano = int(time_nano)
+        except (TypeError, ValueError):
+            time_nano = 0
+
         event_data: Dict[str, Any] = {
             "container_id": _short_container_id(cid),
             "container_id_full": cid,
             "container_name": name,
             "image": image,
             "docker_action": action_raw,
+            # 供推送去重指纹区分同容器同分钟内多条引擎事件（避免误并入同一指纹）
+            "engine_time_nano": time_nano,
         }
         if exit_code is not None and str(exit_code).strip() != "":
             event_data["exit_code"] = exit_code
-
-        time_nano = ev.get("timeNano") or ev.get("TimeNano") or 0
-        try:
-            time_nano = int(time_nano)
-        except (TypeError, ValueError):
-            time_nano = 0
 
         ts_str = _parse_event_timestamp(ev)
         cursor_key = f"{cid}:{action_raw}:{time_nano}"
@@ -301,7 +343,25 @@ class DockerEventsPoller:
         if not handler:
             return
         try:
-            handler(parsed["event_data"], parsed["entry"])
+            ed = parsed["event_data"]
+            entry = parsed["entry"]
+            if self.poll_batch_summary_enabled and self.summary_batch_enqueue:
+                rid = abs(hash(dk)) % (2**31 - 1)
+                self.summary_batch_enqueue(
+                    [
+                        {
+                            "row_id": rid,
+                            "db_event_id": et,
+                            "event_type": et,
+                            "event_data": ed,
+                            "entry": entry,
+                            "handler": handler,
+                            "source": "docker",
+                        }
+                    ]
+                )
+            else:
+                handler(ed, entry)
             self._dedup_seen[dk] = int(time.time())
         except Exception as e:
             self.logger.error("处理 Docker 事件失败 %s: %s", et, e, exc_info=True)
@@ -311,7 +371,6 @@ class DockerEventsPoller:
             self.logger.error("未安装 docker SDK，请安装依赖: pip install docker")
             return
         self._load_dedup()
-        base_url = f"unix://{self.socket_path}"
         while self.running:
             try:
                 if not DOCKER_POLL_EVENTS & set(self.monitor_events or []):
@@ -319,8 +378,10 @@ class DockerEventsPoller:
                     continue
                 since_ts = self._effective_since_for_connect()
                 ev_filters = _docker_engine_event_filters(list(self.monitor_events))
+                base_url = f"unix://{self.socket_path}"
                 self.logger.debug(
-                    "Docker events 连接 since=%s filters=%s",
+                    "Docker events 连接 socket=%s since=%s filters=%s",
+                    self.socket_path,
                     since_ts,
                     ev_filters,
                 )
@@ -346,6 +407,9 @@ class DockerEventsPoller:
                     if not self.running:
                         break
                     if not isinstance(ev, dict):
+                        continue
+                    if self._event_before_start_cutoff(ev):
+                        self._advance_since_from_stream_event(ev)
                         continue
                     self._advance_since_from_stream_event(ev)
                     self._handle_one(ev)
@@ -384,6 +448,7 @@ class DockerEventsPoller:
         if not Path(self.socket_path).exists():
             self.logger.warning("Docker socket 不存在: %s，跳过 DockerEventsPoller", self.socket_path)
             return
+        self._align_since_cursor_to_start_time()
         self.running = True
         self._thread = threading.Thread(target=self._run_loop, name="DockerEventsPoller", daemon=True)
         self._thread.start()

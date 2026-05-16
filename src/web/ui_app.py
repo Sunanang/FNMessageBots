@@ -52,6 +52,7 @@ from web.push_history_service import get_stats as get_push_history_stats
 from web.push_history_service import list_records as list_push_history_records
 from web.session_service import create_session as _create_session
 from web.session_service import touch_session as _touch_session
+from monitor.sqlite_uri import connect_readonly_with_fallback
 
 # 配置页密码：会话空闲超时（秒），超时后需重新输入密码
 SESSION_IDLE_SECONDS = 300
@@ -155,7 +156,7 @@ def _docker_socket_access_warning(sock_path: str) -> str | None:
     if not stat.S_ISSOCK(st.st_mode):
         return hint
 
-    if not os.access(sp, os.R_OK):
+    if not os.access(sp, os.R_OK | os.W_OK):
         return hint
     return None
 
@@ -203,12 +204,7 @@ def _check_db_access_issue(db_path: str, probe_sql: str = "SELECT 1") -> str:
         return f"{path}: 文件检查失败 `{p}`（{e}）。"
 
     try:
-        conn = sqlite3.connect(
-            f"file:{path}?mode=ro&immutable=1",
-            uri=True,
-            timeout=2.0,
-        )
-        conn.execute(probe_sql).fetchone()
+        conn = connect_readonly_with_fallback(path, timeout=2.0, table_probe_sql=probe_sql)
         conn.close()
     except Exception as e:
         return f"{path}: 路径权限看起来正常，但数据库探测失败（{e}）。"
@@ -223,14 +219,6 @@ def _collect_external_db_access_warnings(raw_cfg: dict, events: list[str]) -> li
     backup_events = {"BACKUP_TASK_SUCCESS", "BACKUP_TASK_FAILED", "BACKUP_TASK_PARTIAL_SUCCESS"}
     trimmedia_events = {"TRIM_RESOURCE_ADDED", "TRIM_SCRAPE_SUCCESS"}
     trimactivity_events = {"MEDIA_LOGIN_SUCC", "MEDIA_LOGOUT"}
-    # 影视分类：勾选任一影视相关事件即检查 trimmedia / trimactivity（与 FnMessageBots 一致）
-    media_events = {
-        "MEDIA_LOGIN_SUCC",
-        "MEDIA_LOGOUT",
-        "MEDIA_USER_CREATED",
-        "TRIM_RESOURCE_ADDED",
-        "TRIM_SCRAPE_SUCCESS",
-    }
     photo_events = {"PHOTO_SHARE_CREATED", "PHOTO_SHARE_EXPIRED", "PHOTO_DEVICE_REGISTERED", "FACE_RECOGNITION_UPDATED"}
 
     if monitor_events & backup_events:
@@ -245,7 +233,7 @@ def _collect_external_db_access_warnings(raw_cfg: dict, events: list[str]) -> li
             if issue:
                 warnings.append(f"备份库: {issue}")
 
-    if monitor_events & (trimmedia_events | media_events):
+    if monitor_events & trimmedia_events:
         trim_media_db_path = (raw_cfg.get("trim_media_db_path") or "").strip()
         if not trim_media_db_path:
             warnings.append("影视库: 未配置 trim_media_db_path，无法轮询影视相关数据库事件。")
@@ -257,7 +245,7 @@ def _collect_external_db_access_warnings(raw_cfg: dict, events: list[str]) -> li
             if issue:
                 warnings.append(f"影视库: {issue}")
 
-    if monitor_events & (trimactivity_events | media_events):
+    if monitor_events & trimactivity_events:
         trim_activity_db_path = (raw_cfg.get("trim_activity_db_path") or "").strip()
         if not trim_activity_db_path:
             warnings.append("影视库: 未配置 trim_activity_db_path，无法轮询影视相关数据库事件。")

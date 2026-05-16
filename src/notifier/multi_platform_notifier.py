@@ -21,6 +21,7 @@ from email.message import EmailMessage
 from email.header import Header
 from email.utils import formataddr
 
+from monitor.sqlite_uri import connect_readonly_with_fallback
 from .connection_pool import ConnectionPool
 
 # PushPlus 固定接口地址
@@ -1219,9 +1220,14 @@ class MultiPlatformNotifier:
             if total >= 1 and len(by_type) == 1:
                 title_event_type = str(next(iter(by_type.keys())))
 
-        title = self._with_title_prefix(
-            self.EVENT_TITLES.get(title_event_type, self._fallback_event_title(title_event_type))
-        )
+        if event_type == "NAS_PATROL_REPORT":
+            # 与 _build_nas_patrol_content 原首行一致；正文不再重复标题（merged_plain_text 会拼接 title）
+            pfx = (self.title_prefix or "").strip()
+            title = f"{pfx}-巡检任务完成" if pfx else "飞牛NAS-巡检任务完成"
+        else:
+            title = self._with_title_prefix(
+                self.EVENT_TITLES.get(title_event_type, self._fallback_event_title(title_event_type))
+            )
         content = self._build_content(event_type, event_data, timestamp, raw_log)
         
         return MultiPlatformMessage(title=title, content=content)
@@ -1501,23 +1507,103 @@ class MultiPlatformNotifier:
         return result
 
     def _build_nas_patrol_content(self, event_data: Dict[str, Any]) -> str:
-        """NAS 定时巡检正文：三行固定格式，全角竖线分隔。"""
-        fw_bar = "\uff5c"  # ｜
-        cpu = str(event_data.get("cpu_percent") or "—")
-        mem = str(event_data.get("mem_percent") or "—")
-        disk_gb = str(event_data.get("disk_free_gb") or "—")
-        ct = str(event_data.get("cpu_temp_c") or "—")
-        dt = str(event_data.get("disk_temp_c") or "—")
+        """NAS 定时巡检正文：标题由 MultiPlatformMessage.title 提供，此处仅分组版式。"""
 
-        def fmt_temp(t: str) -> str:
-            if t == "—":
-                return "—"
-            return f"{t}℃"
+        def _v(key: str, default: str = "--") -> str:
+            s = str(event_data.get(key) or "").strip()
+            return s if s else default
 
-        line1 = f"CPU 使用率：{cpu}%{fw_bar}温度：{fmt_temp(ct)}"
-        line2 = f"内存 使用率：{mem}%"
-        line3 = f"硬盘 剩余空间：{disk_gb} GB{fw_bar}温度：{fmt_temp(dt)}"
-        return f"{line1}\n{line2}\n{line3}"
+        def _pct(v: str) -> str:
+            if v in {"--", "—"}:
+                return "--"
+            return f"{v}%"
+
+        def _temp(v: str) -> str:
+            if v in {"--", "—"}:
+                return "--"
+            return f"{v}℃"
+
+        def _size(v: str) -> str:
+            if v in {"--", "—"}:
+                return "--"
+            try:
+                gb = float(v)
+            except (TypeError, ValueError):
+                return "--"
+            if gb >= 1024:
+                return f"{gb / 1024:.1f}TB"
+            return f"{gb:.1f}GB"
+
+        host = _v("hostname")
+        lan_ip = _v("lan_ip")
+        wan_ip = _v("wan_ip")
+        user = _v("execute_user")
+        sys_ver = _v("system_version")
+        fnos_ver = _v("fnos_version")
+        uptime = _v("uptime_text")
+        startup = _v("startup_time")
+
+        cpu = _pct(_v("cpu_percent"))
+        cpu_t = _temp(_v("cpu_temp_c"))
+        mem = _pct(_v("mem_percent"))
+
+        lines: List[str] = []
+        lines.append("基础信息")
+        lines.append(f"主机名称: {host}")
+        lines.append(f"内网IP: {lan_ip}")
+        lines.append(f"外网IP: {wan_ip}")
+        lines.append(f"执行用户: {user}")
+        lines.append(f"系统版本: {sys_ver}")
+        lines.append(f"飞牛版本: {fnos_ver}")
+        lines.append(f"运行时间: {uptime}")
+        lines.append(f"启动时间: {startup}")
+        lines.append("")
+
+        ups_raw = event_data.get("ups")
+        ups_info: Dict[str, Any] = ups_raw if isinstance(ups_raw, dict) else {}
+        lines.append("UPS")
+        if not ups_info or not bool(ups_info.get("present")):
+            lines.append("设备名: 无")
+            lines.append("供电状态: 无")
+        else:
+            lines.append(f"设备名: {str(ups_info.get('device') or '--')}")
+            lines.append(f"供电状态: {str(ups_info.get('power_status') or '--')}")
+        lines.append("")
+
+        lines.append("系统资源")
+        lines.append(f"CPU使用率: {cpu}")
+        lines.append(f"CPU温度: {cpu_t}")
+        lines.append(f"内存使用率: {mem}")
+        lines.append("")
+
+        disks_raw = event_data.get("disks")
+        disks: List[Dict[str, Any]] = disks_raw if isinstance(disks_raw, list) else []
+        if disks:
+            lines.append("硬盘状态")
+            n = len(disks)
+            for i, d in enumerate(disks):
+                dev = str(d.get("device") or d.get("name") or "unknown")
+                free_gb = str(d.get("free_gb") or "--")
+                free_text = _size(free_gb)
+                size_text = _size(str(d.get("size_gb") or "--"))
+                temp_c = _temp(str(d.get("temp_c") or "--"))
+                status = str(d.get("status") or "--")
+                if status == "健康":
+                    status = "正常"
+                lines.append(f"{dev}:")
+                if free_text != "--" and size_text != "--":
+                    lines.append(f"剩余空间: {free_text} / {size_text}")
+                elif free_text != "--":
+                    lines.append(f"剩余空间: {free_text}")
+                elif size_text != "--":
+                    lines.append(f"总容量: {size_text}")
+                else:
+                    lines.append("剩余空间: -- / --")
+                lines.append(f"温度: {temp_c}")
+                lines.append(f"健康状态: {status}")
+                if i < n - 1:
+                    lines.append("----------------")
+        return "\n".join(lines)
 
     def _build_login_content(self, event_data: Dict[str, Any]) -> str:
         """构建登录相关事件内容"""
@@ -1584,11 +1670,7 @@ class MultiPlatformNotifier:
                 name_cols = ["username", "nickname", "name", "account", "user_name"]
 
                 for db_path in db_paths:
-                    conn = sqlite3.connect(
-                        f"file:{db_path}?mode=ro&immutable=1",
-                        uri=True,
-                        timeout=3.0,
-                    )
+                    conn = connect_readonly_with_fallback(db_path, timeout=3.0)
                     try:
                         tables = []
                         for (tname,) in conn.execute("SELECT name FROM sqlite_master WHERE type='table'"):
@@ -1637,11 +1719,7 @@ class MultiPlatformNotifier:
         now = time.time()
         if now - self._nas_uid_name_cache_loaded_at > 60:
             try:
-                conn = sqlite3.connect(
-                    f"file:{self.logger_user_lookup_db_path}?mode=ro&immutable=1",
-                    uri=True,
-                    timeout=3.0,
-                )
+                conn = connect_readonly_with_fallback(self.logger_user_lookup_db_path, timeout=3.0)
                 cur = conn.execute(
                     "SELECT uid, uname FROM log WHERE uid IS NOT NULL AND uname IS NOT NULL "
                     "AND TRIM(uname) != '' ORDER BY id DESC LIMIT 20000"
