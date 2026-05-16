@@ -4,6 +4,7 @@
 
 import logging
 import json
+import hashlib
 from typing import Dict, Any, Callable, Optional, List
 from datetime import datetime
 from threading import Timer
@@ -182,11 +183,21 @@ class EventProcessor:
         preview_items: List[Dict[str, str]] = []
         grouped_events: Dict[str, List[Dict[str, Any]]] = {}
         raw_for_storage: List[Dict[str, Any]] = []
+        source_keys: List[str] = []
 
         for item in batch_events:
             event_type = str(item.get("event_type") or "unknown")
             event_data = item.get("event_data") or {}
             entry = item.get("entry")
+            source = str(item.get("source") or event_data.get("_source") or "db")
+            source_cursor = str(
+                item.get("row_id")
+                or event_data.get("_source_cursor")
+                or getattr(entry, "cursor", "")
+                or ""
+            )
+            if source_cursor:
+                source_keys.append(f"{source}:{event_type}:{source_cursor}")
             by_type[event_type] = by_type.get(event_type, 0) + 1
             grouped_events.setdefault(event_type, []).append({
                 "timestamp": getattr(entry, "timestamp", timestamp),
@@ -223,6 +234,10 @@ class EventProcessor:
             "items": preview_items,
             "grouped_events": grouped_events,
         }
+        if source_keys:
+            source_sig = "|".join(source_keys)
+            summary_event_data["_source"] = "poll_batch_summary"
+            summary_event_data["_source_key"] = hashlib.md5(source_sig.encode()).hexdigest()
         raw_log = json.dumps(raw_for_storage, ensure_ascii=False)[:6000]
         self.logger.info("轮询批量汇总推送：count=%s, types=%s", len(batch_events), len(by_type))
         self.notifier.send_notification(

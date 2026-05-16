@@ -305,6 +305,9 @@ class DockerEventsPoller:
             "docker_action": action_raw,
             # 供推送去重指纹区分同容器同分钟内多条引擎事件（避免误并入同一指纹）
             "engine_time_nano": time_nano,
+            "_source": "docker",
+            "_source_cursor": f"{cid}:{action_raw}:{time_nano}",
+            "_source_event_id": event_type,
         }
         if exit_code is not None and str(exit_code).strip() != "":
             event_data["exit_code"] = exit_code

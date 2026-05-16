@@ -280,6 +280,9 @@ class DBLogPoller:
                 row.get("uname"),
                 row.get("uid"),
             )
+            event_data.setdefault("_source", "logger_db")
+            event_data.setdefault("_source_cursor", str(row_id))
+            event_data.setdefault("_source_event_id", db_event_id)
             entry = _row_to_entry(row)
             batch_events.append({
                 "row_id": row_id,

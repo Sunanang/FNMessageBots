@@ -49,6 +49,14 @@ def _failure_summary_from_channel_results(channel_results: List[Dict[str, Any]])
     return "; ".join(parts)[:800] if parts else ""
 
 
+def _channel_results_skipped(channel_results: List[Dict[str, Any]]) -> str:
+    for cr in channel_results or []:
+        skipped = str(cr.get("skipped") or "").strip()
+        if skipped:
+            return skipped
+    return ""
+
+
 def _event_summary(event_type: str, event_data: Dict[str, Any]) -> str:
     """从 event_data 生成一条简短摘要，用于推送记录列表展示。"""
     data = event_data.get("data") if isinstance(event_data.get("data"), dict) else {}
@@ -425,6 +433,13 @@ class UnifiedNotifier:
         success, channel_results = self.multi_platform_notifier.send_notification(
             event_type, event_data, raw_log, timestamp
         )
+        skipped = _channel_results_skipped(channel_results)
+        if skipped == "duplicate":
+            return NotificationResult(
+                success=True,
+                method="duplicate_skipped",
+                details={"event_type": event_type, "skipped": skipped},
+            )
         try:
             from utils.push_stats import record as record_push
             record_push(success)
@@ -450,7 +465,7 @@ class UnifiedNotifier:
                 if fs:
                     detail["failure_summary"] = fs
                 elif not channel_results:
-                    detail["failure_summary"] = "未配置推送渠道或事件被去重跳过"
+                    detail["failure_summary"] = "未配置推送渠道"
             if event_type == "POLL_BATCH_SUMMARY":
                 by_type = event_data.get("by_type") if isinstance(event_data.get("by_type"), dict) else {}
                 render_meta = event_data.get("batch_render_meta") if isinstance(event_data.get("batch_render_meta"), dict) else {}

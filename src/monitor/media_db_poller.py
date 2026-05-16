@@ -189,6 +189,10 @@ class MediaDBPoller:
         handler = self.event_handlers.get(event_type)
         if not handler:
             return
+        event_data = dict(event_data)
+        event_data.setdefault("_source", "trim_media_db")
+        event_data.setdefault("_source_cursor", fp)
+        event_data.setdefault("_source_event_id", event_type)
         raw_log = json.dumps(raw_obj, ensure_ascii=False)
         ts = _ms_to_str(ts_field_ms)
         entry = JournalEntry(

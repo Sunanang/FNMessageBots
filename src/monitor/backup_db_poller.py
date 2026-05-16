@@ -263,6 +263,9 @@ class BackupDBPoller:
             "storage_address": row.get("storage_address") or "",
             "target_path": row.get("target_path") or "",
             "source_paths": row.get("source_paths") or "",
+            "_source": "backup_db",
+            "_source_cursor": str(row.get("id") or ""),
+            "_source_event_id": event_type,
         }
         timestamp = _ts_to_str(row.get("finished_time") or row.get("start_time"))
         entry = JournalEntry(

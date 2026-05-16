@@ -192,6 +192,10 @@ class PhotoDBPoller:
         handler = self.event_handlers.get(event_type)
         if not handler:
             return
+        event_data = dict(event_data)
+        event_data.setdefault("_source", "photo_db")
+        event_data.setdefault("_source_cursor", fp)
+        event_data.setdefault("_source_event_id", event_type)
         raw_log = json.dumps(raw_obj, ensure_ascii=False)
         ts = _sec_to_local_str(ts_sec) if ts_sec else datetime.now(ZoneInfo("Asia/Shanghai")).strftime(
             "%Y-%m-%d %H:%M:%S"

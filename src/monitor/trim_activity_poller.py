@@ -209,6 +209,10 @@ class TrimActivityPoller:
         handler = self.event_handlers.get(event_type)
         if not handler:
             return
+        event_data = dict(event_data)
+        event_data.setdefault("_source", "trimactivity_db")
+        event_data.setdefault("_source_cursor", fp)
+        event_data.setdefault("_source_event_id", event_type)
         raw_log = json.dumps(raw, ensure_ascii=False)
         ts = _ms_to_str(ts_ms)
         entry = JournalEntry(

@@ -738,7 +738,15 @@ class MultiPlatformNotifier:
         # 检查去重
         if self._is_duplicate(event_fingerprint):
             self.logger.debug(f"跳过重复事件: {event_type}")
-            return False, []
+            return False, [
+                {
+                    "channel": "推送去重",
+                    "success": False,
+                    "response": None,
+                    "error": None,
+                    "skipped": "duplicate",
+                }
+            ]
         
         # 构建消息
         message = self._build_message(event_type, event_data, timestamp, raw_log)
@@ -1075,8 +1083,21 @@ class MultiPlatformNotifier:
         any_ok = any(r.get("success") for r in results)
         return any_ok, self._channel_result("SMTP邮件", results)
     
+    def _source_fingerprint_key(self, event_type: str, event_data: Dict[str, Any]) -> str:
+        """源记录级指纹：同一源记录只推一次，不合并不同数据库行。"""
+        for key in ("_source_key", "_source_cursor", "_source_row_id"):
+            value = event_data.get(key)
+            if value not in (None, ""):
+                source = str(event_data.get("_source") or "db").strip() or "db"
+                return f"{source}:{event_type}:{value}"
+        return ""
+
     def _generate_fingerprint(self, event_type: str, event_data: Dict[str, Any]) -> str:
         """生成事件指纹（用于去重）"""
+        source_key = self._source_fingerprint_key(event_type, event_data)
+        if source_key:
+            return hashlib.md5(source_key.encode()).hexdigest()
+
         # 根据不同事件类型生成不同的指纹
         
         if event_type == 'FoundDisk':
