@@ -16,6 +16,199 @@ _lock = threading.Lock()
 _db_path: str = ""
 MAX_RECORDS = 10000
 DELETE_BATCH = 3000
+MAX_DETAIL_CHARS = 5000
+
+
+def _truncate_text(value: Any, max_chars: int) -> str:
+    text = str(value or "")
+    if len(text) <= max_chars:
+        return text
+    return text[: max(0, max_chars - 3)] + "..."
+
+
+def _compact_json_value(
+    value: Any,
+    *,
+    depth: int = 3,
+    max_str: int = 400,
+    max_items: int = 20,
+    max_keys: int = 80,
+) -> Any:
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return _truncate_text(value, max_str)
+    if depth <= 0:
+        if isinstance(value, dict):
+            return f"<dict {len(value)} keys>"
+        if isinstance(value, (list, tuple)):
+            return f"<list {len(value)} items>"
+        return _truncate_text(value, max_str)
+    if isinstance(value, dict):
+        out: Dict[str, Any] = {}
+        for i, (k, v) in enumerate(value.items()):
+            if i >= max_keys:
+                out["_truncated_keys"] = max(0, len(value) - max_keys)
+                break
+            out[_truncate_text(k, 80)] = _compact_json_value(
+                v,
+                depth=depth - 1,
+                max_str=max_str,
+                max_items=max_items,
+                max_keys=max_keys,
+            )
+        return out
+    if isinstance(value, (list, tuple)):
+        items = [
+            _compact_json_value(
+                v,
+                depth=depth - 1,
+                max_str=max_str,
+                max_items=max_items,
+                max_keys=max_keys,
+            )
+            for v in list(value)[:max_items]
+        ]
+        if len(value) > max_items:
+            items.append({"_truncated_items": len(value) - max_items})
+        return items
+    return _truncate_text(value, max_str)
+
+
+def _compact_channel_results(value: Any, *, response_chars: int = 800) -> List[Dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    for item in value[:20]:
+        if not isinstance(item, dict):
+            out.append({"channel": "未知渠道", "success": False, "error": _truncate_text(item, 200)})
+            continue
+        row: Dict[str, Any] = {
+            "channel": _truncate_text(item.get("channel") or "未知渠道", 40),
+            "success": bool(item.get("success")),
+        }
+        if item.get("error") not in (None, ""):
+            row["error"] = _truncate_text(item.get("error"), 400)
+        if item.get("response") is not None:
+            row["response"] = _compact_json_value(
+                item.get("response"),
+                depth=3,
+                max_str=response_chars,
+                max_items=12,
+                max_keys=40,
+            )
+        out.append(row)
+    if len(value) > 20:
+        out.append({"channel": "更多渠道", "success": False, "error": f"已省略 {len(value) - 20} 条"})
+    return out
+
+
+def _compact_detail(detail: Any, *, response_chars: int = 800, include_event_data: bool = True) -> Any:
+    if not isinstance(detail, dict):
+        return {"detail_preview": _truncate_text(detail, 1000)}
+
+    out: Dict[str, Any] = {}
+    for key in ("kind", "event_type", "timestamp", "failure_summary"):
+        if detail.get(key) not in (None, ""):
+            out[key] = _compact_json_value(detail.get(key), depth=1, max_str=800)
+    if "channel_results" in detail:
+        out["channel_results"] = _compact_channel_results(
+            detail.get("channel_results"),
+            response_chars=response_chars,
+        )
+    for key in (
+        "batch_total",
+        "batch_type_count",
+        "batch_render_meta",
+        "grouped_events_preview",
+        "additional_info",
+    ):
+        if key in detail:
+            out[key] = _compact_json_value(detail.get(key), depth=3, max_str=300, max_items=10, max_keys=40)
+    if include_event_data and "event_data" in detail:
+        out["event_data"] = _compact_json_value(
+            detail.get("event_data"),
+            depth=3,
+            max_str=300,
+            max_items=15,
+            max_keys=60,
+        )
+    for key, value in detail.items():
+        if key in out or key in {"channel_results", "event_data"}:
+            continue
+        out[key] = _compact_json_value(value, depth=2, max_str=300, max_items=8, max_keys=30)
+    return out
+
+
+def _minimal_detail(detail: Any) -> Dict[str, Any]:
+    if not isinstance(detail, dict):
+        return {"detail_preview": _truncate_text(detail, 1000), "storage_note": "detail_compacted"}
+    out: Dict[str, Any] = {"storage_note": "detail_compacted"}
+    for key in ("kind", "event_type", "timestamp", "failure_summary"):
+        if detail.get(key) not in (None, ""):
+            out[key] = _truncate_text(detail.get(key), 600)
+    out["channel_results"] = _compact_channel_results(
+        detail.get("channel_results"),
+        response_chars=300,
+    )
+    event_data = detail.get("event_data")
+    if isinstance(event_data, dict):
+        preview: Dict[str, Any] = {}
+        for key in ("count", "by_type", "message", "user", "IP", "name"):
+            if key in event_data:
+                preview[key] = _compact_json_value(event_data.get(key), depth=2, max_str=200, max_items=5, max_keys=20)
+        if preview:
+            out["event_data_preview"] = preview
+    return out
+
+
+def _serialize_detail(detail: Optional[Dict[str, Any]]) -> Optional[str]:
+    if detail is None:
+        return None
+    candidates = [
+        detail,
+        _compact_detail(detail, response_chars=800, include_event_data=True),
+        _compact_detail(detail, response_chars=500, include_event_data=False),
+        _minimal_detail(detail),
+    ]
+    for candidate in candidates:
+        detail_str = json.dumps(candidate, ensure_ascii=False, default=str, separators=(",", ":"))
+        if len(detail_str) <= MAX_DETAIL_CHARS:
+            return detail_str
+    minimal = _minimal_detail(detail)
+    for row in minimal.get("channel_results", []):
+        if isinstance(row, dict) and "response" in row:
+            row["response"] = _truncate_text(json.dumps(row["response"], ensure_ascii=False, default=str), 120)
+        if isinstance(row, dict) and "error" in row:
+            row["error"] = _truncate_text(row["error"], 160)
+    detail_str = json.dumps(minimal, ensure_ascii=False, default=str, separators=(",", ":"))
+    if len(detail_str) <= MAX_DETAIL_CHARS:
+        return detail_str
+    if isinstance(minimal.get("channel_results"), list):
+        minimal["channel_results"] = [
+            {
+                "channel": row.get("channel"),
+                "success": bool(row.get("success")),
+                "error": _truncate_text(row.get("error"), 120),
+            }
+            for row in minimal["channel_results"]
+            if isinstance(row, dict)
+        ]
+    detail_str = json.dumps(minimal, ensure_ascii=False, default=str, separators=(",", ":"))
+    if len(detail_str) <= MAX_DETAIL_CHARS:
+        return detail_str
+    return json.dumps(
+        {
+            "storage_note": "detail_compacted",
+            "failure_summary": _truncate_text(
+                detail.get("failure_summary") if isinstance(detail, dict) else detail,
+                1000,
+            ),
+        },
+        ensure_ascii=False,
+        default=str,
+        separators=(",", ":"),
+    )
 
 
 def init(cursor_dir: str) -> None:
@@ -67,10 +260,7 @@ def add_record(
     if not _db_path:
         return
     created_at = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
-    detail_str = json.dumps(detail, ensure_ascii=False) if detail else None
-    if detail_str and len(detail_str) > 5000:
-        # 截断可能导致无效 JSON，前端需容错（如 try/catch JSON.parse）
-        detail_str = detail_str[:4997] + "..."
+    detail_str = _serialize_detail(detail)
     if summary and len(summary) > 500:
         summary = summary[:497] + "..."
     with _lock:
@@ -110,9 +300,7 @@ def bulk_insert(records: List[Dict[str, Any]]) -> None:
         if len(str(r.get("summary", ""))) > 500:
             summary = summary[:497] + "..."
         detail = r.get("detail")
-        detail_str = json.dumps(detail, ensure_ascii=False) if detail is not None else None
-        if detail_str and len(detail_str) > 5000:
-            detail_str = detail_str[:4997] + "..."  # 截断后可能非合法 JSON，前端需容错
+        detail_str = _serialize_detail(detail)
         rows.append((created_at, event_type, success, summary or "", detail_str))
     with _lock:
         conn = _conn()

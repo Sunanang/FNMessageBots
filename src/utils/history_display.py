@@ -156,4 +156,6 @@ def format_push_history_row(row: Dict[str, Any]) -> Dict[str, Any]:
     et = str(out.get("event_type") or "")
     out["event_type_label"] = resolve_event_type_label(et, detail)
     out["summary"] = clean_summary_for_list(out.get("summary") or "", et, detail)
+    if detail is not None:
+        out["detail"] = detail
     return out

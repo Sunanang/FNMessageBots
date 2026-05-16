@@ -117,11 +117,13 @@
       vertical-align: middle;
     }
     .channel-results {
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+      white-space: normal;
+      overflow: visible;
+      text-overflow: clip;
       vertical-align: middle;
       font-size: 12px;
+      line-height: 1.45;
+      word-break: break-word;
     }
     .empty { padding: 24px; text-align: center; color: #9ca3af; font-size: 13px; }
     .link { color: #2563eb; cursor: pointer; }
@@ -215,6 +217,24 @@
   var offset = 0;
   var pageSize = 30;
   var currentFilter = "";
+  function stringifyDetailValue(value) {
+    if (value === null || value === undefined || value === "") return "";
+    if (typeof value === "string") return value;
+    try { return JSON.stringify(value); } catch (e) { return String(value); }
+  }
+  function shortenText(text, maxLen) {
+    text = text || "";
+    return text.length > maxLen ? text.slice(0, Math.max(0, maxLen - 1)) + "…" : text;
+  }
+  function buildChannelExtra(c) {
+    if (!c || c.success) return "";
+    var parts = [];
+    var err = stringifyDetailValue(c.error);
+    var resp = stringifyDetailValue(c.response);
+    if (err) parts.push("错误: " + err);
+    if (resp) parts.push("返回: " + resp);
+    return parts.join("；") || "无返回详情";
+  }
   function loadList(reset) {
     if (reset) { offset = 0; document.getElementById("tbody").innerHTML = ""; }
     var params = "limit=" + pageSize + "&offset=" + offset;
@@ -245,25 +265,21 @@
               var parts = [];
               var fullParts = [];
               detail.channel_results.forEach(function(c){
+                c = c || {};
                 var status = c.success ? "成功" : "失败";
-                var extra = "";
-                if (!c.success) {
-                  if (c.response != null && typeof c.response === "object") {
-                    extra = JSON.stringify(c.response);
-                  } else if (typeof c.response === "string") {
-                    extra = c.response;
-                  }
-                  if (!extra && c.error) extra = c.error;
-                  if (!extra) extra = "无返回详情";
-                }
-                var extraShort = extra ? (extra.length > 28 ? extra.slice(0, 28) + "…" : extra) : "";
-                var short = c.channel + ": " + status + (extraShort ? " (" + extraShort + ")" : "");
+                var extra = buildChannelExtra(c);
+                var extraShort = extra ? shortenText(extra, 72) : "";
+                var name = c.channel || "未知渠道";
+                var short = name + ": " + status + (extraShort ? " (" + extraShort + ")" : "");
                 parts.push(short);
                 var fullExtra = extra ? " — " + extra : "";
-                fullParts.push(c.channel + ": " + status + fullExtra);
+                fullParts.push(name + ": " + status + fullExtra);
               });
               channelText = parts.join("; ");
               channelTitle = fullParts.join(String.fromCharCode(10));
+            } else if (detail && detail.failure_summary) {
+              channelText = stringifyDetailValue(detail.failure_summary);
+              channelTitle = channelText;
             }
           } catch (e) {
             channelText = "详情解析失败";
