@@ -37,6 +37,7 @@ from monitor.scheduler_db_poller import (
     SCHEDULER_TASK_CONDITION_FAILED_EVENT,
 )
 from monitor.docker_events_poller import DOCKER_POLL_EVENTS, DockerEventsPoller
+from monitor.docker_socket_access import check_docker_socket_access
 from monitor.event_processor import EventProcessor
 from monitor.nas_patrol import start_nas_patrol_thread
 from monitor.sqlite_uri import probe_readonly_sqlite
@@ -83,12 +84,27 @@ class Application:
         """
         print(banner)
 
+    def _take_unified_batch_buf(self) -> List[Dict[str, Any]]:
+        """取出并清空外部库汇总队列（拷贝列表，避免与 extend 并发共享同一 list 引用）。"""
+        with self._unified_batch_lock:
+            if not self._unified_batch_buf:
+                return []
+            taken = list(self._unified_batch_buf)
+            self._unified_batch_buf = []
+            return taken
+
     def _enqueue_unified_batch_items(self, items: List[Dict[str, Any]]) -> None:
         """影视/相册/Docker/备份/任务计划 等先入队，在主日志下一轮汇总时或定时刷盘时合并推送。"""
         if not items:
             return
+        from monitor.batch_dedupe import dedupe_poll_batch_items
+
+        merged = dedupe_poll_batch_items(list(items))
+        if not merged:
+            return
         with self._unified_batch_lock:
-            self._unified_batch_buf.extend(items)
+            self._unified_batch_buf.extend(merged)
+            self._unified_batch_buf = dedupe_poll_batch_items(self._unified_batch_buf)
 
     def _dispatch_batch_events(self, batch_events: List[Dict[str, Any]]) -> None:
         """主日志轮询汇总：与队列中已等待的外部库事件（含备份/任务计划）合并为一次 POLL_BATCH_SUMMARY。"""
@@ -97,11 +113,7 @@ class Application:
         for it in batch_events:
             if isinstance(it, dict) and "source" not in it:
                 it["source"] = "db"
-        pending: List[Dict[str, Any]] = []
-        with self._unified_batch_lock:
-            if self._unified_batch_buf:
-                pending = self._unified_batch_buf
-                self._unified_batch_buf = []
+        pending = self._take_unified_batch_buf()
         pending.extend(batch_events)
         if pending:
             self.event_processor.process_batch_events(pending)
@@ -110,11 +122,7 @@ class Application:
         """仅刷出队列中外部库事件（无主日志本轮时由定时线程调用）。"""
         if not self.event_processor:
             return
-        buf: List[Dict[str, Any]] = []
-        with self._unified_batch_lock:
-            if self._unified_batch_buf:
-                buf = self._unified_batch_buf
-                self._unified_batch_buf = []
+        buf = self._take_unified_batch_buf()
         if not buf:
             return
         try:
@@ -424,8 +432,9 @@ class Application:
                 print(f"Docker 容器事件监听已启用（socket: {ds}）")
             else:
                 if set(self.config.monitor_events or []) & set(DOCKER_POLL_EVENTS):
-                    if not Path(ds).exists():
-                        print(f"已勾选 Docker 容器事件，但 socket 不存在: {ds}（请挂载 docker.sock）")
+                    sock_issue = check_docker_socket_access(ds)
+                    if sock_issue:
+                        print(f"已勾选 Docker 容器事件，但未启动监听：{sock_issue}")
                     else:
                         print("Docker 容器事件：依赖未就绪或 docker SDK 不可用，未启动监听")
                 else:
@@ -574,7 +583,10 @@ class Application:
 
         docker_sock = (getattr(self.config, "docker_socket_path", "") or "").strip() or "/var/run/docker.sock"
         docker_wanted = bool(me & DOCKER_POLL_EVENTS)
-        docker_ok = Path(docker_sock).exists() if docker_wanted else False
+        docker_ok = (
+            docker_wanted
+            and check_docker_socket_access(docker_sock) is None
+        )
         if docker_wanted and docker_ok:
             if self.docker_events_poller is None:
                 self.docker_events_poller = DockerEventsPoller(
@@ -827,8 +839,9 @@ class Application:
                     self.docker_events_poller.start()
                 elif set(self.config.monitor_events or []) & set(DOCKER_POLL_EVENTS):
                     ds = (getattr(self.config, "docker_socket_path", "") or "").strip() or "/var/run/docker.sock"
-                    if not Path(ds).exists():
-                        print(f"已勾选 Docker 容器事件，但 socket 不存在: {ds}")
+                    sock_issue = check_docker_socket_access(ds)
+                    if sock_issue:
+                        print(f"已勾选 Docker 容器事件，跳过监听：{sock_issue}")
                     else:
                         print("Docker 容器事件依赖未就绪，跳过监听（请确认已 pip install docker）")
                 self._refresh_poll_batch_summary_thread()

@@ -58,10 +58,10 @@ class TrimActivityPoller:
         self.db_path = (db_path or "").strip()
         self.cursor_dir = Path(cursor_dir)
         self.app_name_patterns = _norm_patterns(app_name_patterns)
-        if not self.app_name_patterns:
-            self.app_name_patterns = ["影视"]
         self.poll_interval = max(1, int(poll_interval or 10))
         self.monitor_events = set(monitor_events or [])
+        self.poll_batch_summary_enabled = False
+        self.summary_batch_enqueue: Optional[Callable[[List[Dict[str, Any]]], None]] = None
         self.event_handlers: Dict[str, Callable] = {}
         self.running = False
         self._thread: Optional[threading.Thread] = None
@@ -71,10 +71,6 @@ class TrimActivityPoller:
         self.cursor_dir.mkdir(parents=True, exist_ok=True)
         self._dedup_seen: Dict[str, int] = {}
         self._open_db_error_count = 0
-        self._missing_db_warned = False
-        self._poll_batch_buffer: List[Dict[str, Any]] = []
-        self.poll_batch_summary_enabled: bool = False
-        self.poller_batch_dispatcher: Optional[Callable[[List[Dict[str, Any]]], bool]] = None
 
     def add_handler(self, event_type: str, handler: Callable) -> None:
         self.event_handlers[event_type] = handler
@@ -95,11 +91,8 @@ class TrimActivityPoller:
             self.poll_interval = max(1, int(poll_interval))
         if db_path is not None:
             self.db_path = (db_path or "").strip()
-            self._missing_db_warned = False
         if app_name_patterns is not None:
             self.app_name_patterns = _norm_patterns(app_name_patterns)
-            if not self.app_name_patterns:
-                self.app_name_patterns = ["影视"]
 
     def set_poll_batch_summary(
         self,
@@ -107,8 +100,7 @@ class TrimActivityPoller:
         enqueue: Optional[Callable[[List[Dict[str, Any]]], None]],
     ) -> None:
         self.poll_batch_summary_enabled = bool(enabled)
-        # 与当前批量分发实现字段保持一致
-        self.poller_batch_dispatcher = enqueue
+        self.summary_batch_enqueue = enqueue
 
     def _load_state(self) -> Dict[str, Any]:
         default: Dict[str, Any] = {
@@ -182,42 +174,6 @@ class TrimActivityPoller:
         except (TypeError, ValueError):
             return -1
 
-    def _flush_poll_batch_buffer(self) -> bool:
-        buf = self._poll_batch_buffer
-        self._poll_batch_buffer = []
-        if not buf:
-            return True
-        disp = getattr(self, "poller_batch_dispatcher", None)
-        if bool(getattr(self, "poll_batch_summary_enabled", False)) and disp is not None:
-            try:
-                items = [
-                    {k: v for k, v in it.items() if not str(k).startswith("_")}
-                    for it in buf
-                ]
-                disp(items)
-            except Exception as e:
-                self.logger.error("trimactivity 批量推送失败: %s", e, exc_info=True)
-                self._poll_batch_buffer = buf + self._poll_batch_buffer
-                return False
-            for it in buf:
-                fp = it.get("_dedup_fp")
-                if fp is not None:
-                    self._dedup_seen[str(fp)] = int(it.get("_dedup_now") or time.time())
-            return True
-        for it in buf:
-            et = str(it.get("event_type") or "")
-            handler = self.event_handlers.get(et)
-            if not handler:
-                continue
-            try:
-                handler(it.get("event_data") or {}, it.get("entry"))
-                fp = it.get("_dedup_fp")
-                if fp is not None:
-                    self._dedup_seen[str(fp)] = int(it.get("_dedup_now") or time.time())
-            except Exception as e:
-                self.logger.error("trimactivity 事件逐条处理失败 %s: %s", et, e, exc_info=True)
-        return True
-
     def _snapshot_tokens(self, conn: sqlite3.Connection) -> Dict[str, Dict[str, Any]]:
         """抓取当前 token 快照，用于检测“退出时直接删行”的场景。"""
         snap: Dict[str, Dict[str, Any]] = {}
@@ -253,6 +209,10 @@ class TrimActivityPoller:
         handler = self.event_handlers.get(event_type)
         if not handler:
             return
+        event_data = dict(event_data)
+        event_data.setdefault("_source", "trimactivity_db")
+        event_data.setdefault("_source_cursor", fp)
+        event_data.setdefault("_source_event_id", event_type)
         raw_log = json.dumps(raw, ensure_ascii=False)
         ts = _ms_to_str(ts_ms)
         entry = JournalEntry(
@@ -266,20 +226,24 @@ class TrimActivityPoller:
             raw_data=raw_log,
             original_line=raw_log,
         )
-        use_batch = bool(getattr(self, "poll_batch_summary_enabled", False)) and getattr(
-            self, "poller_batch_dispatcher", None
-        ) is not None
-        if use_batch:
-            self._poll_batch_buffer.append({
-                "event_type": event_type,
-                "event_data": event_data,
-                "entry": entry,
-                "_dedup_fp": fp,
-                "_dedup_now": now,
-            })
-            return
         try:
-            handler(event_data, entry)
+            if self.poll_batch_summary_enabled and self.summary_batch_enqueue:
+                rid = abs(hash(fp)) % (2**31 - 1)
+                self.summary_batch_enqueue(
+                    [
+                        {
+                            "row_id": rid,
+                            "db_event_id": event_type,
+                            "event_type": event_type,
+                            "event_data": event_data,
+                            "entry": entry,
+                            "handler": handler,
+                            "source": "trimactivity_db",
+                        }
+                    ]
+                )
+            else:
+                handler(event_data, entry)
             self._dedup_seen[fp] = now
         except Exception as e:
             self.logger.error("处理 trimactivity 事件失败 %s: %s", event_type, e, exc_info=True)
@@ -316,17 +280,8 @@ class TrimActivityPoller:
         )
 
     def _poll_once(self, state: Dict[str, Any]) -> None:
-        if not self.db_path:
+        if not self.db_path or not os.path.exists(self.db_path):
             return
-        if not os.path.exists(self.db_path):
-            if not self._missing_db_warned:
-                self.logger.warning(
-                    "trimactivity.db 路径不存在或无法访问（请核对 trim_activity_db_path，当前=%r）",
-                    self.db_path,
-                )
-                self._missing_db_warned = True
-            return
-        self._missing_db_warned = False
         try:
             conn = self._connect()
             self._open_db_error_count = 0
@@ -505,8 +460,6 @@ class TrimActivityPoller:
             state["last_create_ms"] = max_c
             state["last_update_ms"] = max(lu, max_u)
             state["token_status"] = token_status
-            if not self._flush_poll_batch_buffer():
-                raise RuntimeError("trimactivity 轮询批量推送未完成，本轮状态将不保存以便重试")
         finally:
             try:
                 conn.close()
@@ -558,15 +511,15 @@ class TrimActivityPoller:
             return
         try:
             state = self._load_state()
-            self._baseline(conn, state)
-            self._save_state(state)
-        except sqlite3.Error as e:
-            self.logger.warning(
-                "TrimActivityPoller 启动对齐失败（表结构可能与本应用预期不一致，将在线程内重试）: %s",
-                e,
-            )
-        except Exception as e:
-            self.logger.warning("TrimActivityPoller 启动对齐失败: %s", e)
+            try:
+                self._baseline(conn, state)
+                self._save_state(state)
+            except sqlite3.Error as e:
+                self.logger.warning(
+                    "TrimActivityPoller 启动对齐失败（将在线程内重试 baseline）: %s",
+                    e,
+                    exc_info=True,
+                )
         finally:
             try:
                 conn.close()
@@ -578,6 +531,9 @@ class TrimActivityPoller:
             return
         if not self.db_path:
             self.logger.info("未配置 trim_activity_db_path，跳过 TrimActivityPoller")
+            return
+        if not self.app_name_patterns:
+            self.logger.info("未配置 media_lib_app_name_patterns，跳过 TrimActivityPoller")
             return
         if not (_ACTIVITY_EVENTS & self.monitor_events):
             self.logger.info("monitor_events 未包含 MEDIA_LOGIN_SUCC/MEDIA_LOGOUT，跳过 TrimActivityPoller")

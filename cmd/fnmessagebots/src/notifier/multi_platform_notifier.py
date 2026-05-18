@@ -22,7 +22,6 @@ from email.header import Header
 from email.utils import formataddr
 
 from monitor.sqlite_uri import connect_readonly_with_fallback
-
 from .connection_pool import ConnectionPool
 
 # PushPlus 固定接口地址
@@ -65,13 +64,22 @@ class MultiPlatformMessage:
     
     title: str = ""
     content: str = ""
+
+    def merged_plain_text(self, *, blank_line_between: bool = False) -> str:
+        """标题与正文合并为一段纯文本。正文为空时不追加分隔符，避免极简模式末尾多余空行。"""
+        title = self.title or ""
+        content_raw = self.content or ""
+        if not content_raw.strip():
+            return title
+        sep = "\n\n" if blank_line_between else "\n"
+        return f"{title}{sep}{content_raw}"
     
     def to_wechat_format(self) -> Dict[str, Any]:
         """转换为企业微信格式"""
         return {
             "msgtype": "text",
             "text": {
-                "content": f"{self.title}\n{self.content}"
+                "content": self.merged_plain_text()
             }
         }
     
@@ -80,7 +88,7 @@ class MultiPlatformMessage:
         return {
             "msgtype": "text",
             "text": {
-                "content": f"{self.title}\n{self.content}"
+                "content": self.merged_plain_text()
             }
         }
     
@@ -89,7 +97,7 @@ class MultiPlatformMessage:
         return {
             "msg_type": "text",
             "content": {
-                "text": f"{self.title}\n{self.content}"
+                "text": self.merged_plain_text()
             }
         }
 
@@ -159,10 +167,14 @@ class MultiPlatformNotifier:
         'DISK_IO_ERR': '⚠️ 飞牛NAS-磁盘IO错误告警',
         'TEST_PUSH': '🧪 飞牛NAS-测试推送',
         'DND_SUMMARY': '📋 飞牛NAS-勿扰时段汇总',
+        'NAS_PATROL_REPORT': '飞牛NAS-巡检任务完成',
         'POLL_BATCH_SUMMARY': '飞牛NAS-多事件合并通知',
-        'NAS_PATROL_REPORT': '飞牛NAS-巡检任务',
         'BACKUP_TASK_SUCCESS': '✅ 飞牛NAS-备份任务完成',
         'BACKUP_TASK_FAILED': '❌ 飞牛NAS-备份任务失败',
+        'BACKUP_TASK_PARTIAL_SUCCESS': '⚠️ 飞牛NAS-备份任务部分成功',
+        'SCHEDULER_TASK_SUCCESS': '✅ 飞牛NAS-任务计划执行成功',
+        'SCHEDULER_TASK_FAILED': '❌ 飞牛NAS-任务计划执行失败',
+        'SCHEDULER_TASK_CONDITION_FAILED': '⚠️ 飞牛NAS-任务计划条件不满足',
         # 可选事件（默认不推送）
         'ARCHIVING_SUCCESS': '📦 飞牛NAS-归档成功',
         'DeleteFile': '🗑️ 飞牛NAS-文件删除',
@@ -207,6 +219,7 @@ class MultiPlatformNotifier:
         'PHOTO_SHARE_EXPIRED': '⏱️ 飞牛NAS-相册分享过期',
         'PHOTO_DEVICE_REGISTERED': '📱 飞牛NAS-相册同步设备',
         'FACE_RECOGNITION_UPDATED': '✅ 飞牛NAS-相册人脸识别',
+        # Docker 容器（Engine events）
         'DOCKER_CONTAINER_CREATE': '📦 飞牛NAS-Docker容器已创建',
         'DOCKER_CONTAINER_START': '▶️ 飞牛NAS-Docker容器已启动',
         'DOCKER_CONTAINER_STOP': '⏹️ 飞牛NAS-Docker容器已停止',
@@ -261,10 +274,14 @@ class MultiPlatformNotifier:
         'DISK_IO_ERR': '磁盘{dev}发生IO错误，错误次数{err_cnt}',
         'TEST_PUSH': '测试推送',
         'DND_SUMMARY': '勿扰时段事件汇总',
+        'NAS_PATROL_REPORT': 'NAS定时巡检',
         'POLL_BATCH_SUMMARY': '多事件合并通知',
-        'NAS_PATROL_REPORT': 'NAS 定时巡检',
         'BACKUP_TASK_SUCCESS': '备份任务完成',
         'BACKUP_TASK_FAILED': '备份任务失败',
+        'BACKUP_TASK_PARTIAL_SUCCESS': '备份任务部分成功',
+        'SCHEDULER_TASK_SUCCESS': '任务计划执行成功',
+        'SCHEDULER_TASK_FAILED': '任务计划执行失败',
+        'SCHEDULER_TASK_CONDITION_FAILED': '任务计划条件不满足',
         'ARCHIVING_SUCCESS': '归档成功',
         'DeleteFile': '文件删除',
         'MovetoTrashbin': '移到回收站',
@@ -318,7 +335,7 @@ class MultiPlatformNotifier:
         'DOCKER_CONTAINER_RESTART': 'Docker容器 {container_name} 重启',
         'DOCKER_CONTAINER_DESTROY': 'Docker容器 {container_name} 已删除',
     }
-
+    
     # 事件备注
     EVENT_NOTES = {
         'LoginSucc': '系统检测到用户登录成功，请确认是否为本人操作。',
@@ -360,10 +377,14 @@ class MultiPlatformNotifier:
         'APP_UNINSTALLED': '应用已卸载。',
         'DISK_IO_ERR': '磁盘发生IO错误，请检查硬盘健康与连接。',
         'TEST_PUSH': 'Web 配置页发送的测试消息。',
-        'POLL_BATCH_SUMMARY': '',
         'NAS_PATROL_REPORT': '',
+        'POLL_BATCH_SUMMARY': '',
         'BACKUP_TASK_SUCCESS': '备份任务执行完成。',
         'BACKUP_TASK_FAILED': '备份任务执行失败，请检查任务配置与网络状态。',
+        'BACKUP_TASK_PARTIAL_SUCCESS': '备份任务部分完成，部分文件未能成功传输。',
+        'SCHEDULER_TASK_SUCCESS': '任务计划执行完成。',
+        'SCHEDULER_TASK_FAILED': '任务计划执行失败，请检查脚本与执行日志。',
+        'SCHEDULER_TASK_CONDITION_FAILED': '任务计划触发条件不满足，任务未执行。',
         'ARCHIVING_SUCCESS': '系统完成归档任务。',
         'DeleteFile': '文件已被删除。',
         'MovetoTrashbin': '文件已移至回收站。',
@@ -417,18 +438,18 @@ class MultiPlatformNotifier:
         'DOCKER_CONTAINER_RESTART': '容器因策略或手动触发重启。',
         'DOCKER_CONTAINER_DESTROY': '容器实例已从 Docker 中删除。',
     }
-
+    
     def __init__(self, 
                  wechat_webhook_url: str = "",
                  dingtalk_webhook_url: str = "",
                  feishu_webhook_url: str = "",
                  bark_url: str = "",
+                 bark_icon: str = "",
                  pushplus_params: str = "",
                  magic_push_params: str = "",
                  smtp_params: str = "",
                  title_prefix: str = "",
                  minimal_push_enabled: bool = False,
-                 poll_batch_summary_enabled: bool = False,
                  user_lookup_db_path: str = "",
                  activity_user_lookup_db_path: str = "",
                  logger_user_lookup_db_path: str = "",
@@ -456,6 +477,7 @@ class MultiPlatformNotifier:
         self.dingtalk_webhook_url = dingtalk_webhook_url
         self.feishu_webhook_url = feishu_webhook_url
         self.bark_url = bark_url
+        self.bark_icon = (bark_icon or "").strip()
         self.pushplus_params = pushplus_params or ""
         self.magic_push_params = magic_push_params or ""
         self.smtp_params = smtp_params or ""
@@ -464,7 +486,6 @@ class MultiPlatformNotifier:
         else:
             self.title_prefix = (title_prefix or "").strip()
         self.minimal_push_enabled = bool(minimal_push_enabled)
-        self.poll_batch_summary_enabled = bool(poll_batch_summary_enabled)
         self.user_lookup_db_path = (user_lookup_db_path or "").strip()
         self.activity_user_lookup_db_path = (activity_user_lookup_db_path or "").strip()
         self.logger_user_lookup_db_path = (logger_user_lookup_db_path or "").strip()
@@ -636,17 +657,9 @@ class MultiPlatformNotifier:
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
 
-        ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        # 极简且未开轮询汇总：合并磁盘也一行标题、无正文（与各渠道一致）
-        if self._minimal_push_effective():
-            one_line = self._build_minimal_one_line(event_type, merged_data)
-            message = MultiPlatformMessage(title=one_line, content="")
-        else:
-            title = self._with_title_prefix(
-                self.EVENT_TITLES.get(event_type, self._fallback_event_title(event_type))
-            )
-            content = self._build_content(event_type, merged_data, ts, '')
-            message = MultiPlatformMessage(title=title, content=content)
+        # 与普通通知一致走 _build_message，才能应用极简推送等统一逻辑
+        ts = merged_data.get("timestamp") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        message = self._build_message(event_type, merged_data, ts, "")
 
         results: List[bool] = []
         channel_results: List[Dict[str, Any]] = []
@@ -666,20 +679,17 @@ class MultiPlatformNotifier:
             channel_results.append(cr)
             self.logger.debug("合并事件-飞书: %s", cr)
         if self.bark_url:
-            bark_message = self._build_bark_message(event_type, merged_data, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), '')
-            ok, cr = self._send_to_bark(bark_message)
+            ok, cr = self._send_to_bark(message)
             results.append(ok)
             channel_results.append(cr)
             self.logger.debug("合并事件-Bark: %s", cr)
         if self.pushplus_params:
-            pushplus_message = self._build_bark_message(event_type, merged_data, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), '')
-            ok, cr = self._send_to_pushplus(pushplus_message)
+            ok, cr = self._send_to_pushplus(message)
             results.append(ok)
             channel_results.append(cr)
             self.logger.debug("合并事件-PushPlus: %s", cr)
         if self.magic_push_params:
-            magic_message = self._build_bark_message(event_type, merged_data, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), '')
-            ok, cr = self._send_to_magic_push(magic_message)
+            ok, cr = self._send_to_magic_push(message)
             results.append(ok)
             channel_results.append(cr)
             self.logger.debug("合并事件-魔法推送: %s", cr)
@@ -722,14 +732,21 @@ class MultiPlatformNotifier:
             ok = self._handle_disk_event(event_type, event_data, raw_log, timestamp)
             return ok, []
         
-        # 生成事件指纹（用于去重）。NAS 定时巡检为按计划主动上报，不走日志风暴去重，避免误跳过或 sent_events 膨胀。
-        skip_dedup = event_type == "NAS_PATROL_REPORT"
-        event_fingerprint = ""
-        if not skip_dedup:
-            event_fingerprint = self._generate_fingerprint(event_type, event_data)
-            if self._is_duplicate(event_fingerprint):
-                self.logger.debug(f"跳过重复事件: {event_type}")
-                return False, []
+        # 生成事件指纹（用于去重）
+        event_fingerprint = self._generate_fingerprint(event_type, event_data)
+        
+        # 检查去重
+        if self._is_duplicate(event_fingerprint):
+            self.logger.debug(f"跳过重复事件: {event_type}")
+            return False, [
+                {
+                    "channel": "推送去重",
+                    "success": False,
+                    "response": None,
+                    "error": None,
+                    "skipped": "duplicate",
+                }
+            ]
         
         # 构建消息
         message = self._build_message(event_type, event_data, timestamp, raw_log)
@@ -777,8 +794,7 @@ class MultiPlatformNotifier:
             self.logger.debug("SMTP邮件通知发送结果: %s", cr)
         
         if results and any(results):  # 至少一个平台发送成功
-            if not skip_dedup and event_fingerprint:
-                self.sent_events[event_fingerprint] = time.time()
+            self.sent_events[event_fingerprint] = time.time()
             self._record_send_result(True)
             self.logger.info(f"通知发送成功: {event_type}")
             return True, channel_results
@@ -897,23 +913,31 @@ class MultiPlatformNotifier:
         any_ok = any(r.get("success") for r in results)
         return any_ok, self._channel_result("飞书", results)
 
+    def _bark_key_from_url(self, raw_url: str) -> str:
+        """从 Bark URL 中提取 key（路径最后一段）。"""
+        return raw_url.rstrip('/').rsplit('/', 1)[-1] if '/' in raw_url else raw_url
+
+    def _bark_base_url(self, raw_url: str) -> str:
+        """从 Bark URL 中提取 base URL（scheme + host）。"""
+        parts = urllib.parse.urlsplit(raw_url)
+        return f"{parts.scheme}://{parts.netloc}" if parts.scheme and parts.netloc else "https://api.day.app"
+
     def _send_to_bark(self, message: MultiPlatformMessage) -> tuple:
-        """发送到Bark。返回 (是否有任一成功, 渠道结果 dict)。"""
+        """发送到Bark（POST JSON，避免 URL 编码问题）。"""
         urls = self._iter_urls(self.bark_url)
         if not urls:
             return False, {"channel": "Bark", "success": False, "response": None, "error": "未配置"}
-        encoded_title = urllib.parse.quote(message.title, safe='')
-        encoded_content = urllib.parse.quote(message.content, safe='')
-        encoded_title_and_content = urllib.parse.quote(message.title + '\n\n' + message.content, safe='')
         results = []
         for raw_url in urls:
-            if '{title}' in raw_url and '{content}' in raw_url:
-                bark_push_url = raw_url.replace('{title}', encoded_title).replace('{content}', encoded_content)
-            elif '{content}' in raw_url:
-                bark_push_url = raw_url.replace('{content}', encoded_title_and_content)
-            else:
-                bark_push_url = f"{raw_url.rstrip('/')}/{encoded_title}/{encoded_content}"
-            results.append(self.connection_pool.get(bark_push_url))
+            push_url = f"{self._bark_base_url(raw_url)}/push"
+            payload = {
+                "device_key": self._bark_key_from_url(raw_url),
+                "title": message.title,
+                "body": message.content,
+            }
+            if self.bark_icon:
+                payload["icon"] = self.bark_icon
+            results.append(self.connection_pool.post(push_url, payload))
         any_ok = any(r.get("success") for r in results)
         return any_ok, self._channel_result("Bark", results)
 
@@ -934,7 +958,7 @@ class MultiPlatformNotifier:
                     final_content = message.content
                 else:
                     final_title = user_title or message.title
-                    final_content = message.title + '\n\n' + message.content
+                    final_content = message.merged_plain_text(blank_line_between=True)
                 payload['title'] = final_title
                 payload['content'] = final_content
                 results.append(self.connection_pool.post(PUSHPLUS_URL, payload))
@@ -1059,8 +1083,21 @@ class MultiPlatformNotifier:
         any_ok = any(r.get("success") for r in results)
         return any_ok, self._channel_result("SMTP邮件", results)
     
+    def _source_fingerprint_key(self, event_type: str, event_data: Dict[str, Any]) -> str:
+        """源记录级指纹：同一源记录只推一次，不合并不同数据库行。"""
+        for key in ("_source_key", "_source_cursor", "_source_row_id"):
+            value = event_data.get(key)
+            if value not in (None, ""):
+                source = str(event_data.get("_source") or "db").strip() or "db"
+                return f"{source}:{event_type}:{value}"
+        return ""
+
     def _generate_fingerprint(self, event_type: str, event_data: Dict[str, Any]) -> str:
         """生成事件指纹（用于去重）"""
+        source_key = self._source_fingerprint_key(event_type, event_data)
+        if source_key:
+            return hashlib.md5(source_key.encode()).hexdigest()
+
         # 根据不同事件类型生成不同的指纹
         
         if event_type == 'FoundDisk':
@@ -1129,72 +1166,11 @@ class MultiPlatformNotifier:
             minute_window = int(time.time() / 60)
             key = f"storage_degraded_{vol_key}_{minute_window}"
         elif event_type in DOCKER_CONTAINER_EVENT_TYPES:
-            cid = str(event_data.get("container_id_full") or event_data.get("container_id") or "unknown")
-            nano_raw = event_data.get("engine_time_nano") or 0
-            try:
-                nano = int(nano_raw)
-            except (TypeError, ValueError):
-                nano = 0
-            if nano > 0:
-                key = f"{event_type}_{cid}_{nano}"
-            else:
-                minute_window = int(time.time() / 60)
-                key = f"{event_type}_{cid}_{minute_window}"
-        elif event_type in ("TRIM_RESOURCE_ADDED", "TRIM_SCRAPE_SUCCESS", "MEDIA_USER_CREATED"):
-            gid = str(event_data.get("guid") or "").strip()
-            if gid:
-                key = f"{event_type}_{gid}"
-            else:
-                path = str(event_data.get("path") or "")
-                title = str(event_data.get("title") or "")
-                msg = str(event_data.get("message") or "")
-                digest = hashlib.md5(
-                    f"{path}|{title}|{msg}".encode("utf-8", errors="ignore")
-                ).hexdigest()[:20]
-                key = f"{event_type}_{digest}"
-        elif event_type in (
-            "PHOTO_SHARE_CREATED",
-            "PHOTO_SHARE_EXPIRED",
-            "PHOTO_DEVICE_REGISTERED",
-            "FACE_RECOGNITION_UPDATED",
-        ):
-            if event_type == "PHOTO_SHARE_CREATED":
-                sid = int(event_data.get("share_link_id") or 0)
-                ext = str(event_data.get("share_id") or "").strip()
-                key = f"{event_type}_{sid or ext or 'na'}"
-            elif event_type == "PHOTO_SHARE_EXPIRED":
-                key = (
-                    f"{event_type}_"
-                    f"{str(event_data.get('share_id') or '').strip()}_"
-                    f"{str(event_data.get('expired_at_str') or '')}"
-                )
-            elif event_type == "PHOTO_DEVICE_REGISTERED":
-                key = (
-                    f"{event_type}_"
-                    f"{str(event_data.get('device_id') or '').strip()}_"
-                    f"{str(event_data.get('device_uniq_name') or '').strip()}"
-                )
-            else:
-                key = f"{event_type}_{int(event_data.get('task_log_id') or 0)}"
-        elif event_type in ("BACKUP_TASK_SUCCESS", "BACKUP_TASK_FAILED", "BACKUP_TASK_PARTIAL_SUCCESS"):
-            op = event_data.get("operation_id")
-            if op is not None and str(op).strip() != "":
-                key = f"{event_type}_{op}"
-            else:
-                minute_window = int(time.time() / 60)
-                tn = str(event_data.get("task_name") or "")
-                key = f"{event_type}_{tn}_{minute_window}"
-        elif event_type in (
-            "SCHEDULER_TASK_SUCCESS",
-            "SCHEDULER_TASK_FAILED",
-            "SCHEDULER_TASK_CONDITION_FAILED",
-        ):
-            rid = event_data.get("result_id")
-            if rid is not None and str(rid).strip() != "":
-                key = f"{event_type}_{rid}"
-            else:
-                minute_window = int(time.time() / 60)
-                key = f"{event_type}_{str(event_data.get('task_name') or '')}_{minute_window}"
+            cid = str(event_data.get('container_id_full') or event_data.get('container_id') or 'unknown')
+            minute_window = int(time.time() / 60)
+            key = f"{event_type}_{cid}_{minute_window}"
+        elif event_type == "NAS_PATROL_REPORT":
+            key = f"nas_patrol_{time.time()}_{id(event_data)}"
         elif event_type in {
             'ARCHIVING_SUCCESS', 'DeleteFile', 'MovetoTrashbin', 'SHARE_EVENTID_DEL', 'SHARE_EVENTID_PUT',
             'WEBDAV_ENABLED', 'WEBDAV_DISABLED', 'SAMBA_ENABLED', 'SAMBA_DISABLED',
@@ -1223,9 +1199,6 @@ class MultiPlatformNotifier:
                 preview_sig_parts.append(f"{et}@{ts}#{brief}")
             preview_sig = "|".join(preview_sig_parts)
             key = f"{event_type}_{minute_window}_{count}_{type_count}_{by_type_sig}_{preview_sig}"
-        elif event_type == 'NAS_PATROL_REPORT':
-            # 低频计划任务：不参与默认「登录式」指纹，且在 send_notification 中跳过去重（见该处 skip_dedup）
-            key = f"{event_type}_{int(time.time())}"
         else:
             # 登录/退出：按用户、IP和时间（分钟）去重
             user = event_data.get('user', 'unknown')
@@ -1247,16 +1220,12 @@ class MultiPlatformNotifier:
                 del self.sent_events[fingerprint]
         
         return False
-
-    def _minimal_push_effective(self) -> bool:
-        """极简是否实际生效：开启轮询汇总时关闭极简；其余由调用处再排除磁盘/勿扰等。"""
-        return bool(self.minimal_push_enabled) and not bool(self.poll_batch_summary_enabled)
-
+    
     def _build_message(self, event_type: str, event_data: Dict[str, Any], 
                       timestamp: str, raw_log: str) -> MultiPlatformMessage:
         """构建多平台消息"""
-        # 轮询批量汇总、NAS 定时巡检：不受极简模式折叠为一行
-        if self._minimal_push_effective() and event_type not in ("POLL_BATCH_SUMMARY", "NAS_PATROL_REPORT"):
+        # 轮询汇总类消息优先级高于极简：始终按完整文案推送
+        if self.minimal_push_enabled and event_type not in ("POLL_BATCH_SUMMARY", "NAS_PATROL_REPORT"):
             one_line = self._build_minimal_one_line(event_type, event_data)
             return MultiPlatformMessage(title=one_line, content="")
 
@@ -1273,7 +1242,7 @@ class MultiPlatformNotifier:
                 title_event_type = str(next(iter(by_type.keys())))
 
         if event_type == "NAS_PATROL_REPORT":
-            # 与主仓库一致：标题由 title 提供，正文不再重复（merged_plain_text 会拼接 title）
+            # 与 _build_nas_patrol_content 原首行一致；正文不再重复标题（merged_plain_text 会拼接 title）
             pfx = (self.title_prefix or "").strip()
             title = f"{pfx}-巡检任务完成" if pfx else "飞牛NAS-巡检任务完成"
         else:
@@ -1281,55 +1250,39 @@ class MultiPlatformNotifier:
                 self.EVENT_TITLES.get(title_event_type, self._fallback_event_title(title_event_type))
             )
         content = self._build_content(event_type, event_data, timestamp, raw_log)
-
+        
         return MultiPlatformMessage(title=title, content=content)
-
-    def _disk_minimal_label(self, disk_info: Dict[str, Any]) -> str:
-        """单块磁盘在极简推送中的短标识（设备名优先）。"""
-        d = (disk_info.get("disk") or "").strip()
-        if d:
-            return d
-        model = (disk_info.get("model") or "").strip()
-        if model:
-            return model
-        serial = (disk_info.get("serial") or "").strip()
-        if serial:
-            return serial[:32]
-        if isinstance(disk_info.get("full_event_data"), dict):
-            fb = self._format_disk_fallback(disk_info)
-            if fb:
-                return fb[:80]
-        return ""
-
-    def _minimal_disk_body(self, event_type: str, event_data: Dict[str, Any]) -> str:
-        """磁盘唤醒/休眠极简正文（不含 title_prefix）。"""
-        verb = "磁盘唤醒" if event_type == "DiskWakeup" else "磁盘休眠"
-        merged_raw = event_data.get("merged_disks")
-        if isinstance(merged_raw, list) and merged_raw:
-            labels: List[str] = []
-            for x in merged_raw:
-                if isinstance(x, dict):
-                    lab = self._disk_minimal_label(x)
-                    if lab:
-                        labels.append(lab)
-            n = len(merged_raw)
-            if n == 1:
-                return f"{verb} {labels[0]}" if labels else verb
-            if labels:
-                joined = "、".join(labels[:5])
-                if len(labels) > 5:
-                    joined += "…"
-                if len(labels) < n or len(labels) > 5:
-                    return f"{verb}×{n} {joined}"
-                return f"{verb} {joined}"
-            return f"{verb}×{n}"
-        lab = self._disk_minimal_label(event_data) if isinstance(event_data, dict) else ""
-        return f"{verb} {lab}" if lab else verb
 
     def _build_minimal_one_line(self, event_type: str, event_data: Dict[str, Any]) -> str:
         """极简推送：仅一行核心信息。"""
         if event_type in ("DiskWakeup", "DiskSpindown"):
-            body = self._minimal_disk_body(event_type, event_data)
+            action = "磁盘唤醒" if event_type == "DiskWakeup" else "磁盘休眠"
+            merged = event_data.get("merged_disks")
+            if isinstance(merged, list) and merged:
+                names: List[str] = []
+                for item in merged:
+                    if not isinstance(item, dict):
+                        continue
+                    d = (item.get("disk") or "").strip()
+                    if d:
+                        names.append(d)
+                n = len(merged)
+                if names:
+                    head = "、".join(names[:4])
+                    if n > len(names) or n > 4:
+                        body = f"{head}{action}等共{n}块"
+                    elif n > 1:
+                        body = f"{head}{action}（{n}块）"
+                    else:
+                        body = f"{head}{action}"
+                else:
+                    body = f"{action}（{n}块）"
+                prefix = (self.title_prefix or "").strip()
+                if prefix:
+                    return f"{prefix}-{body}"
+                return body
+            disk = (event_data.get("disk") or "").strip()
+            body = f"{disk}{action}" if disk else action
             prefix = (self.title_prefix or "").strip()
             if prefix:
                 return f"{prefix}-{body}"
@@ -1366,8 +1319,8 @@ class MultiPlatformNotifier:
             or ""
         )
         app_name = (event_data.get("app_name") or "").strip()
+        task_name = (event_data.get("task_name") or "").strip()
         title = (event_data.get("title") or event_data.get("name") or "").strip()
-        backup_task_name = (event_data.get("task_name") or "").strip()
 
         action_map = {
             "LoginSucc": "登录成功",
@@ -1383,6 +1336,10 @@ class MultiPlatformNotifier:
             "APP_UPDATE_FAILED": "应用更新失败",
             "BACKUP_TASK_SUCCESS": "备份任务完成",
             "BACKUP_TASK_FAILED": "备份任务失败",
+            "BACKUP_TASK_PARTIAL_SUCCESS": "备份任务部分成功",
+            "SCHEDULER_TASK_SUCCESS": "任务计划完成",
+            "SCHEDULER_TASK_FAILED": "任务计划失败",
+            "SCHEDULER_TASK_CONDITION_FAILED": "任务计划条件不满足",
             "DOCKER_CONTAINER_CREATE": "Docker容器创建",
             "DOCKER_CONTAINER_START": "Docker容器启动",
             "DOCKER_CONTAINER_STOP": "Docker容器停止",
@@ -1400,7 +1357,7 @@ class MultiPlatformNotifier:
             action = self._strip_body_emojis(fallback_title)
             action = action.replace("飞牛NAS-", "").replace("飞牛NAS", "").strip(" -")
 
-        subject = user or app_name or title or backup_task_name
+        subject = user or app_name or task_name or title
         prefix = (self.title_prefix or "").strip()
         body = f"{subject}{action}" if subject else action
         if prefix:
@@ -1493,10 +1450,12 @@ class MultiPlatformNotifier:
                 detail = self._build_disk_spindown_content(event_data)
         elif event_type == 'DISK_IO_ERR':
             detail = self._build_disk_io_err_content(event_data)
+        elif event_type in {'BACKUP_TASK_SUCCESS', 'BACKUP_TASK_FAILED', 'BACKUP_TASK_PARTIAL_SUCCESS'}:
+            detail = self._build_backup_task_content(event_data)
+        elif event_type in {'SCHEDULER_TASK_SUCCESS', 'SCHEDULER_TASK_FAILED', 'SCHEDULER_TASK_CONDITION_FAILED'}:
+            detail = self._build_scheduler_task_content(event_data)
         elif event_type in DOCKER_CONTAINER_EVENT_TYPES:
             detail = self._build_docker_container_content(event_data)
-        elif event_type in {'BACKUP_TASK_SUCCESS', 'BACKUP_TASK_FAILED'}:
-            detail = self._build_backup_task_content(event_data)
         elif event_type in {'SHUTDOWN_VM', 'STATUS_RUNNING_VM', 'DESTROY_VM'} or ("VM" in str(event_type).upper()):
             detail = self._build_vm_content(event_data)
         elif event_type in {
@@ -1526,30 +1485,9 @@ class MultiPlatformNotifier:
 
         # 备注行保留 EVENT_NOTES 中的图标（仅单事件正文；批量子块 for_batch_inner 不追加备注）
         note = self.EVENT_NOTES.get(event_type, '')
-        if note and not for_batch_inner and event_type != "NAS_PATROL_REPORT":
+        if note and not for_batch_inner:
             content = content.rstrip('\n') + f"\n{note}"
         return content
-
-    def _build_nas_patrol_content(self, event_data: Dict[str, Any]) -> str:
-        """NAS 定时巡检正文（无首行时间戳；标题见 MultiPlatformMessage.title）。"""
-        cpu_pct = event_data.get("cpu_percent", "—")
-        cpu_temp = event_data.get("cpu_temp", "—")
-        mem_pct = event_data.get("mem_percent", "—")
-        disk_gb = event_data.get("disk_free_gb", "—")
-        disk_t = event_data.get("disk_temp", "—")
-        gpu_u = str(event_data.get("gpu_util") or "").strip()
-        gpu_t = str(event_data.get("gpu_temp") or "").strip()
-        mounts_ok = bool(event_data.get("patrol_volume_mounts_ready", True))
-
-        lines: List[str] = [
-            f"CPU 使用率：{cpu_pct}%｜温度：{cpu_temp}",
-            f"内存 使用率：{mem_pct}%",
-        ]
-        if gpu_u and gpu_u != "—":
-            lines.append(f"GPU 使用率：{gpu_u}｜温度：{gpu_t if gpu_t and gpu_t != '—' else '—'}")
-        if mounts_ok:
-            lines.append(f"硬盘 剩余空间：{disk_gb} GB｜温度：{disk_t}")
-        return "\n".join(lines)
 
     def _extract_single_event_from_batch(
         self, event_data: Dict[str, Any]
@@ -1588,7 +1526,106 @@ class MultiPlatformNotifier:
         if custom_prefix:
             result = result.replace(f"{custom_prefix}-", "", 1)
         return result
-    
+
+    def _build_nas_patrol_content(self, event_data: Dict[str, Any]) -> str:
+        """NAS 定时巡检正文：标题由 MultiPlatformMessage.title 提供，此处仅分组版式。"""
+
+        def _v(key: str, default: str = "--") -> str:
+            s = str(event_data.get(key) or "").strip()
+            return s if s else default
+
+        def _pct(v: str) -> str:
+            if v in {"--", "—"}:
+                return "--"
+            return f"{v}%"
+
+        def _temp(v: str) -> str:
+            if v in {"--", "—"}:
+                return "--"
+            return f"{v}℃"
+
+        def _size(v: str) -> str:
+            if v in {"--", "—"}:
+                return "--"
+            try:
+                gb = float(v)
+            except (TypeError, ValueError):
+                return "--"
+            if gb >= 1024:
+                return f"{gb / 1024:.1f}TB"
+            return f"{gb:.1f}GB"
+
+        host = _v("hostname")
+        lan_ip = _v("lan_ip")
+        wan_ip = _v("wan_ip")
+        user = _v("execute_user")
+        sys_ver = _v("system_version")
+        fnos_ver = _v("fnos_version")
+        uptime = _v("uptime_text")
+        startup = _v("startup_time")
+
+        cpu = _pct(_v("cpu_percent"))
+        cpu_t = _temp(_v("cpu_temp_c"))
+        mem = _pct(_v("mem_percent"))
+
+        lines: List[str] = []
+        lines.append("基础信息")
+        lines.append(f"主机名称: {host}")
+        lines.append(f"内网IP: {lan_ip}")
+        lines.append(f"外网IP: {wan_ip}")
+        lines.append(f"执行用户: {user}")
+        lines.append(f"系统版本: {sys_ver}")
+        lines.append(f"飞牛版本: {fnos_ver}")
+        lines.append(f"运行时间: {uptime}")
+        lines.append(f"启动时间: {startup}")
+        lines.append("")
+
+        ups_raw = event_data.get("ups")
+        ups_info: Dict[str, Any] = ups_raw if isinstance(ups_raw, dict) else {}
+        lines.append("UPS")
+        if not ups_info or not bool(ups_info.get("present")):
+            lines.append("设备名: 无")
+            lines.append("供电状态: 无")
+        else:
+            lines.append(f"设备名: {str(ups_info.get('device') or '--')}")
+            lines.append(f"供电状态: {str(ups_info.get('power_status') or '--')}")
+        lines.append("")
+
+        lines.append("系统资源")
+        lines.append(f"CPU使用率: {cpu}")
+        lines.append(f"CPU温度: {cpu_t}")
+        lines.append(f"内存使用率: {mem}")
+        lines.append("")
+
+        disks_raw = event_data.get("disks")
+        disks: List[Dict[str, Any]] = disks_raw if isinstance(disks_raw, list) else []
+        if disks:
+            lines.append("硬盘状态")
+            n = len(disks)
+            for i, d in enumerate(disks):
+                dev = str(d.get("device") or d.get("name") or "unknown")
+                free_gb = str(d.get("free_gb") or "--")
+                free_text = _size(free_gb)
+                size_text = _size(str(d.get("size_gb") or "--"))
+                temp_c = _temp(str(d.get("temp_c") or "--"))
+                status = str(d.get("status") or "--")
+                if status == "健康":
+                    status = "正常"
+                lines.append(f"{dev}:")
+                if free_text != "--" and size_text != "--":
+                    lines.append(f"剩余空间: {free_text} / {size_text}")
+                elif free_text != "--":
+                    lines.append(f"剩余空间: {free_text}")
+                elif size_text != "--":
+                    lines.append(f"总容量: {size_text}")
+                else:
+                    lines.append("剩余空间: -- / --")
+                lines.append(f"温度: {temp_c}")
+                lines.append(f"健康状态: {status}")
+                if i < n - 1:
+                    lines.append("----------------")
+        return "\n".join(lines)
+
     def _build_login_content(self, event_data: Dict[str, Any]) -> str:
         """构建登录相关事件内容"""
         content = ""
@@ -1798,26 +1835,6 @@ class MultiPlatformNotifier:
             content += f"📋 模板: {tpl}\n"
         return content.rstrip('\n') or "（无额外详情）"
 
-    def _build_docker_container_content(self, event_data: Dict[str, Any]) -> str:
-        """Docker Engine 容器事件正文。"""
-        lines: List[str] = []
-        name = str(event_data.get("container_name") or "").strip()
-        cid = str(event_data.get("container_id") or "").strip()
-        img = str(event_data.get("image") or "").strip()
-        dact = str(event_data.get("docker_action") or "").strip()
-        if name:
-            lines.append(f"容器名称: {name}")
-        if cid:
-            lines.append(f"容器ID: {cid}")
-        if img:
-            lines.append(f"镜像: {img}")
-        if dact:
-            lines.append(f"引擎动作: {dact}")
-        ec = event_data.get("exit_code")
-        if ec is not None and str(ec).strip() != "":
-            lines.append(f"退出码: {ec}")
-        return "\n".join(lines) if lines else "（无额外详情）"
-
     def _build_vm_content(self, event_data: Dict[str, Any]) -> str:
         """虚拟机事件内容：展示 VM_TITLE、USER_NAME 等（parameter 中 data）。"""
         content = ""
@@ -2014,12 +2031,41 @@ class MultiPlatformNotifier:
         end_time = _fmt_ts(event_data.get("finished_time"))
         files_count = event_data.get("files_count")
         completed_count = event_data.get("completed_count")
-        total_size = _fmt_size(event_data.get("total_size"))
-        completed_size = _fmt_size(event_data.get("completed_size"))
-        actual_time = event_data.get("actual_time")
+        actual_count = event_data.get("actual_count")
+        actual_size = _fmt_size(event_data.get("actual_size"))
+        ignoring_files = event_data.get("ignoring_files")
         status = event_data.get("status")
         error_code = event_data.get("error_code")
         error_message = str(event_data.get("error_message") or "")
+
+        # 无变更跳过 = 已处理文件数 - 实际传输文件数
+        skipped: Optional[int] = None
+        try:
+            if completed_count is not None and actual_count is not None:
+                v = int(completed_count) - int(actual_count)
+                skipped = max(0, v)
+        except (TypeError, ValueError):
+            pass
+
+        # 耗时 = finished_time - start_time（秒）
+        elapsed_str = ""
+        try:
+            s = int(event_data.get("start_time") or 0)
+            f = int(event_data.get("finished_time") or 0)
+            if s > 10_000_000_000:
+                s = int(s / 1000)
+            if f > 10_000_000_000:
+                f = int(f / 1000)
+            if s > 0 and f > 0 and f >= s:
+                sec = f - s
+                if sec < 60:
+                    elapsed_str = f"{sec} 秒"
+                elif sec < 3600:
+                    elapsed_str = f"{sec // 60} 分 {sec % 60} 秒"
+                else:
+                    elapsed_str = f"{sec // 3600} 小时 {(sec % 3600) // 60} 分"
+        except (TypeError, ValueError):
+            pass
 
         lines: List[str] = []
         if task_name:
@@ -2039,18 +2085,79 @@ class MultiPlatformNotifier:
             lines.append(f"开始时间: {start_time}")
         if end_time:
             lines.append(f"结束时间: {end_time}")
-        if files_count not in (None, "") or completed_count not in (None, ""):
-            lines.append(f"处理文件: {completed_count or 0} / {files_count or 0}")
-        if total_size or completed_size:
-            lines.append(f"处理大小: {completed_size or '0 B'} / {total_size or '0 B'}")
-        if actual_time not in (None, ""):
-            lines.append(f"耗时: {actual_time} 秒")
+        if actual_count not in (None, ""):
+            lines.append(f"传输文件数: {actual_count}")
+        if actual_size:
+            lines.append(f"传输文件大小: {actual_size}")
+        if ignoring_files not in (None, ""):
+            lines.append(f"排除文件数: {ignoring_files}")
+        if skipped is not None:
+            lines.append(f"无变更跳过: {skipped}")
+        if files_count not in (None, ""):
+            lines.append(f"总文件数: {files_count}")
+        if elapsed_str:
+            lines.append(f"耗时: {elapsed_str}")
         if status not in (None, ""):
             lines.append(f"状态码: {status}")
         if error_code not in (None, "") and int(error_code or 0) != 0:
             lines.append(f"错误码: {error_code}")
         if error_message:
             lines.append(f"错误信息: {error_message[:300]}")
+        return "\n".join(lines) if lines else "（无额外详情）"
+
+    def _build_scheduler_task_content(self, event_data: Dict[str, Any]) -> str:
+        """构建 fn-scheduler 任务执行结果内容。"""
+        task_name = str(event_data.get("task_name") or "")
+        result_id = event_data.get("result_id")
+        account = str(event_data.get("account") or "")
+        trigger_label = str(event_data.get("trigger_reason_label") or event_data.get("trigger_reason") or "")
+        schedule_expr = str(event_data.get("schedule_expression") or "")
+        started_at = str(event_data.get("started_at") or "")
+        finished_at = str(event_data.get("finished_at") or "")
+        duration = str(event_data.get("duration") or "")
+        log_preview = str(event_data.get("log_preview") or "")
+        status = str(event_data.get("status") or "")
+
+        lines: List[str] = []
+        if task_name:
+            lines.append(f"任务名称: {task_name}")
+        if result_id not in (None, ""):
+            lines.append(f"执行ID: {result_id}")
+        if account:
+            lines.append(f"执行账户: {account}")
+        if trigger_label:
+            lines.append(f"触发方式: {trigger_label}")
+        if schedule_expr:
+            lines.append(f"计划表达式: {schedule_expr}")
+        if started_at:
+            lines.append(f"开始时间: {started_at}")
+        if finished_at:
+            lines.append(f"结束时间: {finished_at}")
+        if duration:
+            lines.append(f"耗时: {duration}")
+        if log_preview:
+            log_title = "执行结果" if status == "success" else "执行日志"
+            lines.append(f"{log_title}:\n{log_preview}")
+        return "\n".join(lines) if lines else "（无额外详情）"
+
+    def _build_docker_container_content(self, event_data: Dict[str, Any]) -> str:
+        """Docker Engine 容器事件正文。"""
+        lines: List[str] = []
+        name = str(event_data.get("container_name") or "").strip()
+        cid = str(event_data.get("container_id") or "").strip()
+        img = str(event_data.get("image") or "").strip()
+        dact = str(event_data.get("docker_action") or "").strip()
+        if name:
+            lines.append(f"容器名称: {name}")
+        if cid:
+            lines.append(f"容器ID: {cid}")
+        if img:
+            lines.append(f"镜像: {img}")
+        if dact:
+            lines.append(f"引擎动作: {dact}")
+        ec = event_data.get("exit_code")
+        if ec is not None and str(ec).strip() != "":
+            lines.append(f"退出码: {ec}")
         return "\n".join(lines) if lines else "（无额外详情）"
 
     def _batch_summary_item_lines(self, event_type: str, ed: Dict[str, Any]) -> List[str]:
@@ -2192,6 +2299,28 @@ class MultiPlatformNotifier:
                 lines.append(f"模板: {tpl}")
             return lines or ["磁盘IO错误"]
 
+        if et in ("BACKUP_TASK_SUCCESS", "BACKUP_TASK_FAILED", "BACKUP_TASK_PARTIAL_SUCCESS"):
+            backup_lines: List[str] = []
+            if ed.get("task_name"):
+                backup_lines.append(f"任务: {ed.get('task_name')}")
+            if ed.get("operation_id") is not None:
+                backup_lines.append(f"执行ID: {ed.get('operation_id')}")
+            if ed.get("actual_count") is not None or ed.get("files_count") is not None:
+                backup_lines.append(f"传输: {ed.get('actual_count', 0)}/{ed.get('files_count', 0)}")
+            if int(ed.get("error_code") or 0) != 0:
+                backup_lines.append(f"错误码: {ed.get('error_code')}")
+            return [" · ".join(backup_lines)] if backup_lines else [et]
+
+        if et in ("SCHEDULER_TASK_SUCCESS", "SCHEDULER_TASK_FAILED", "SCHEDULER_TASK_CONDITION_FAILED"):
+            sched_lines: List[str] = []
+            if ed.get("task_name"):
+                sched_lines.append(f"任务: {ed.get('task_name')}")
+            if ed.get("trigger_reason_label"):
+                sched_lines.append(str(ed.get("trigger_reason_label")))
+            if ed.get("duration"):
+                sched_lines.append(f"耗时: {ed.get('duration')}")
+            return [" · ".join(sched_lines)] if sched_lines else [et]
+
         if et in DOCKER_CONTAINER_EVENT_TYPES:
             bits: List[str] = []
             if ed.get("container_name"):
@@ -2203,18 +2332,6 @@ class MultiPlatformNotifier:
             if ed.get("exit_code") is not None and str(ed.get("exit_code")).strip() != "":
                 bits.append(f"exit={ed.get('exit_code')}")
             return [" · ".join(bits)] if bits else [et]
-
-        if et in ("BACKUP_TASK_SUCCESS", "BACKUP_TASK_FAILED"):
-            backup_lines: List[str] = []
-            if ed.get("task_name"):
-                backup_lines.append(f"任务: {ed.get('task_name')}")
-            if ed.get("operation_id") is not None:
-                backup_lines.append(f"执行ID: {ed.get('operation_id')}")
-            if ed.get("completed_count") is not None or ed.get("files_count") is not None:
-                backup_lines.append(f"文件: {ed.get('completed_count', 0)}/{ed.get('files_count', 0)}")
-            if int(ed.get("error_code") or 0) != 0:
-                backup_lines.append(f"错误码: {ed.get('error_code')}")
-            return [" · ".join(backup_lines)] if backup_lines else [et]
 
         if et in ("UPS_ONBATT", "UPS_ONBATT_LOWBATT"):
             ups_bits: List[str] = []
@@ -2725,7 +2842,8 @@ class MultiPlatformNotifier:
             additional_info: 额外信息字典
             
         Returns:
-            dict: {"success": bool, "success_count": int, "fail_count": int}
+            dict: success、success_count、fail_count、channel_results（每渠道发送明细）；
+            去重跳过时有 skipped=\"duplicate\"，channel_results 为空。
         """
         self.logger.info(f"准备发送系统事件通知: {event_type}")
         
@@ -2743,10 +2861,17 @@ class MultiPlatformNotifier:
         # 检查去重
         if self._is_duplicate(event_fingerprint):
             self.logger.debug(f"跳过重复系统事件: {event_type}")
-            return {"success": False, "success_count": 0, "fail_count": 0}
-        
-        # 构建消息（勿扰汇总始终完整文案）
-        if self._minimal_push_effective() and event_type != "DND_SUMMARY":
+            return {
+                "success": False,
+                "success_count": 0,
+                "fail_count": 0,
+                "channel_results": [],
+                "skipped": "duplicate",
+            }
+
+        # 构建消息
+        # 勿扰汇总始终走完整模式，不受极简开关影响
+        if self.minimal_push_enabled and event_type != "DND_SUMMARY":
             one_line = self._build_minimal_system_one_line(event_type, message)
             multi_msg = MultiPlatformMessage(title=one_line, content="")
         else:
@@ -2756,34 +2881,42 @@ class MultiPlatformNotifier:
             content = self._build_system_content(event_type, event_data, message)
             multi_msg = MultiPlatformMessage(title=title, content=content)
         
-        results = []
+        results: List[bool] = []
+        channel_results: List[Dict[str, Any]] = []
         if self.wechat_webhook_url:
             ok, cr = self._send_to_wechat(multi_msg)
             results.append(ok)
+            channel_results.append(cr)
             self.logger.debug("企业微信系统通知: %s", cr)
         if self.dingtalk_webhook_url:
             ok, cr = self._send_to_dingtalk(multi_msg)
             results.append(ok)
+            channel_results.append(cr)
             self.logger.debug("钉钉系统通知: %s", cr)
         if self.feishu_webhook_url:
             ok, cr = self._send_to_feishu(multi_msg)
             results.append(ok)
+            channel_results.append(cr)
             self.logger.debug("飞书系统通知: %s", cr)
         if self.bark_url:
             ok, cr = self._send_to_bark(multi_msg)
             results.append(ok)
+            channel_results.append(cr)
             self.logger.debug("Bark系统通知: %s", cr)
         if self.pushplus_params:
             ok, cr = self._send_to_pushplus(multi_msg)
             results.append(ok)
+            channel_results.append(cr)
             self.logger.debug("PushPlus系统通知: %s", cr)
         if self.magic_push_params:
             ok, cr = self._send_to_magic_push(multi_msg)
             results.append(ok)
+            channel_results.append(cr)
             self.logger.debug("魔法推送系统通知: %s", cr)
         if self.smtp_params:
             ok, cr = self._send_to_smtp(multi_msg)
             results.append(ok)
+            channel_results.append(cr)
             self.logger.debug("SMTP邮件系统通知: %s", cr)
         success_count = sum(1 for r in results if r)
         fail_count = len(results) - success_count
@@ -2795,7 +2928,12 @@ class MultiPlatformNotifier:
         else:
             self._record_send_result(False)
             self.logger.warning(f"系统事件通知发送失败: {event_type}")
-        return {"success": any_ok, "success_count": success_count, "fail_count": fail_count}
+        return {
+            "success": any_ok,
+            "success_count": success_count,
+            "fail_count": fail_count,
+            "channel_results": channel_results,
+        }
     
     def _generate_system_fingerprint(self, event_type: str, event_data: Dict[str, Any]) -> str:
         """生成系统事件指纹（用于去重）"""

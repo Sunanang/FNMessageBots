@@ -78,6 +78,8 @@ class PhotoDBPoller:
         self.cursor_dir = Path(cursor_dir)
         self.poll_interval = max(1, int(poll_interval or 10))
         self.monitor_events = set(monitor_events or [])
+        self.poll_batch_summary_enabled = False
+        self.summary_batch_enqueue: Optional[Callable[[List[Dict[str, Any]]], None]] = None
         self.event_handlers: Dict[str, Callable] = {}
         self.running = False
         self._thread: Optional[threading.Thread] = None
@@ -86,10 +88,6 @@ class PhotoDBPoller:
         self.logger = logging.getLogger(__name__)
         self.cursor_dir.mkdir(parents=True, exist_ok=True)
         self._dedup_seen: Dict[str, int] = {}
-        self._missing_db_warned = False
-        self._poll_batch_buffer: List[Dict[str, Any]] = []
-        self.poll_batch_summary_enabled: bool = False
-        self.poller_batch_dispatcher: Optional[Callable[[List[Dict[str, Any]]], bool]] = None
 
     def add_handler(self, event_type: str, handler: Callable) -> None:
         self.event_handlers[event_type] = handler
@@ -109,7 +107,6 @@ class PhotoDBPoller:
             self.poll_interval = max(1, int(poll_interval))
         if db_path is not None:
             self.db_path = (db_path or "").strip()
-            self._missing_db_warned = False
 
     def set_poll_batch_summary(
         self,
@@ -117,8 +114,7 @@ class PhotoDBPoller:
         enqueue: Optional[Callable[[List[Dict[str, Any]]], None]],
     ) -> None:
         self.poll_batch_summary_enabled = bool(enabled)
-        # 与当前批量分发实现字段保持一致
-        self.poller_batch_dispatcher = enqueue
+        self.summary_batch_enqueue = enqueue
 
     def _load_state(self) -> Dict[str, Any]:
         default: Dict[str, Any] = {
@@ -172,48 +168,13 @@ class PhotoDBPoller:
         self._dedup_seen = {k: v for k, v in self._dedup_seen.items() if int(v) >= now - _DEDUP_TTL}
 
     def _connect(self) -> sqlite3.Connection:
+        # 仅做轮询读取，使用只读连接避免要求数据库目录可写（WAL/journal 权限）
         conn = connect_readonly_with_fallback(self.db_path, timeout=10.0)
         conn.row_factory = sqlite3.Row
         return conn
 
     def _fingerprint(self, kind: str, key: str) -> str:
         return f"{kind}|{key}"
-
-    def _flush_poll_batch_buffer(self) -> bool:
-        buf = self._poll_batch_buffer
-        self._poll_batch_buffer = []
-        if not buf:
-            return True
-        disp = getattr(self, "poller_batch_dispatcher", None)
-        if bool(getattr(self, "poll_batch_summary_enabled", False)) and disp is not None:
-            try:
-                items = [
-                    {k: v for k, v in it.items() if not str(k).startswith("_")}
-                    for it in buf
-                ]
-                disp(items)
-            except Exception as e:
-                self.logger.error("相册批量推送失败: %s", e, exc_info=True)
-                self._poll_batch_buffer = buf + self._poll_batch_buffer
-                return False
-            for it in buf:
-                fp = it.get("_dedup_fp")
-                if fp is not None:
-                    self._dedup_seen[str(fp)] = int(it.get("_dedup_now") or time.time())
-            return True
-        for it in buf:
-            et = str(it.get("event_type") or "")
-            handler = self.event_handlers.get(et)
-            if not handler:
-                continue
-            try:
-                handler(it.get("event_data") or {}, it.get("entry"))
-                fp = it.get("_dedup_fp")
-                if fp is not None:
-                    self._dedup_seen[str(fp)] = int(it.get("_dedup_now") or time.time())
-            except Exception as e:
-                self.logger.error("相册事件逐条处理失败 %s: %s", et, e, exc_info=True)
-        return True
 
     def _emit(
         self,
@@ -231,6 +192,10 @@ class PhotoDBPoller:
         handler = self.event_handlers.get(event_type)
         if not handler:
             return
+        event_data = dict(event_data)
+        event_data.setdefault("_source", "photo_db")
+        event_data.setdefault("_source_cursor", fp)
+        event_data.setdefault("_source_event_id", event_type)
         raw_log = json.dumps(raw_obj, ensure_ascii=False)
         ts = _sec_to_local_str(ts_sec) if ts_sec else datetime.now(ZoneInfo("Asia/Shanghai")).strftime(
             "%Y-%m-%d %H:%M:%S"
@@ -246,20 +211,24 @@ class PhotoDBPoller:
             raw_data=raw_log,
             original_line=raw_log,
         )
-        use_batch = bool(getattr(self, "poll_batch_summary_enabled", False)) and getattr(
-            self, "poller_batch_dispatcher", None
-        ) is not None
-        if use_batch:
-            self._poll_batch_buffer.append({
-                "event_type": event_type,
-                "event_data": event_data,
-                "entry": entry,
-                "_dedup_fp": fp,
-                "_dedup_now": now,
-            })
-            return
         try:
-            handler(event_data, entry)
+            if self.poll_batch_summary_enabled and self.summary_batch_enqueue:
+                rid = hash(fp) & 0x7FFFFFFF
+                self.summary_batch_enqueue(
+                    [
+                        {
+                            "row_id": rid,
+                            "db_event_id": event_type,
+                            "event_type": event_type,
+                            "event_data": event_data,
+                            "entry": entry,
+                            "handler": handler,
+                            "source": "photo_db",
+                        }
+                    ]
+                )
+            else:
+                handler(event_data, entry)
             self._dedup_seen[fp] = now
         except Exception as e:
             self.logger.error("处理相册事件失败 %s: %s", event_type, e, exc_info=True)
@@ -302,17 +271,8 @@ class PhotoDBPoller:
         )
 
     def _poll_once(self, state: Dict[str, Any]) -> None:
-        if not self.db_path:
+        if not self.db_path or not os.path.exists(self.db_path):
             return
-        if not os.path.exists(self.db_path):
-            if not self._missing_db_warned:
-                self.logger.warning(
-                    "photo.db 路径不存在或无法访问（请核对 photo_db_path，当前=%r）",
-                    self.db_path,
-                )
-                self._missing_db_warned = True
-            return
-        self._missing_db_warned = False
         try:
             conn = self._connect()
         except Exception as e:
@@ -428,8 +388,6 @@ class PhotoDBPoller:
                     }
                     self._emit(FACE_RECOGNITION_UPDATED, ev, raw, None)
                 state["last_face_task_log_id"] = max_f
-            if not self._flush_poll_batch_buffer():
-                raise RuntimeError("相册轮询批量推送未完成，本轮状态将不保存以便重试")
         finally:
             try:
                 conn.close()
@@ -468,13 +426,6 @@ class PhotoDBPoller:
             self._baseline(conn, state)
             self._save_state(state)
             self._save_dedup()
-        except sqlite3.Error as e:
-            self.logger.warning(
-                "PhotoDBPoller 启动对齐失败（表结构可能与本应用预期不一致，将在线程内重试）: %s",
-                e,
-            )
-        except Exception as e:
-            self.logger.warning("PhotoDBPoller 启动对齐失败: %s", e)
         finally:
             try:
                 conn.close()

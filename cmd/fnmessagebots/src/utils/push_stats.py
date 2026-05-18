@@ -5,6 +5,7 @@
 import json
 import os
 import threading
+import copy
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any
@@ -33,7 +34,7 @@ def init(cursor_dir: str) -> None:
 
 def _load() -> Dict[str, Any]:
     if not _stats_path or not os.path.isfile(_stats_path):
-        return _DEFAULT.copy()
+        return copy.deepcopy(_DEFAULT)
     try:
         with open(_stats_path, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -41,7 +42,7 @@ def _load() -> Dict[str, Any]:
                 return data
     except Exception:
         pass
-    return _DEFAULT.copy()
+    return copy.deepcopy(_DEFAULT)
 
 
 def _save(data: Dict[str, Any]) -> None:

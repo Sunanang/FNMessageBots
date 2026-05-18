@@ -26,6 +26,13 @@ def _config_base_dir() -> Path:
 
 BASE_DIR = _config_base_dir()
 ASSETS_DIR = _code_base_dir() / "assets"
+
+
+def get_base_dir() -> Path:
+    """兼容 FnMessageBots 旧调用；FPK 下返回配置/数据基准目录。"""
+    return BASE_DIR
+
+
 CONFIG_FILE = BASE_DIR / "config" / "config.json"
 # 随应用数据目录存在；卸载并勾选删除数据后文件消失，重装会生成新值，用于让浏览器清除 localStorage 中的主题偏好
 DATA_DIR = BASE_DIR / "data"
@@ -34,4 +41,3 @@ ICON_FILE = ASSETS_DIR / "icons" / "app-icon.png"
 GITHUB_ICON_FILE = ASSETS_DIR / "icons" / "github.svg"
 SUPPORT_QR_DIR = ASSETS_DIR / "icons"
 SUPPORT_QR_FILENAMES = frozenset({"wechat_pay.jpg", "ali_pay.jpg"})
-

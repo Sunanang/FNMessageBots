@@ -1,12 +1,11 @@
 """
 数据库日志轮询器
-从 eventlogger 的 SQLite 数据库 log 表轮询新记录（默认 /usr/trim/var/eventlogger_service/logger_data.db3）。
+从 eventlogger 的 SQLite 数据库 log 表轮询新记录（路径由配置 logger_db_path / LOGGER_DB_PATH 指定）。
 表结构: id, serviceId, uid, uname, logtime(10位时间戳), loglevel, eventId, parameter(JSON), category
 """
 
 import json
 import logging
-import os
 import sqlite3
 import threading
 import time
@@ -15,8 +14,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 from typing import Callable, Dict, List, Optional, Any, Sequence
 
-# 推送时间显示偏移（秒）。若 NAS 存库的 logtime 比 UTC 少 8 小时，设 LOGTIME_DISPLAY_OFFSET_SECONDS=28800
-_LOGTIME_OFFSET_SECONDS = int(os.environ.get("LOGTIME_DISPLAY_OFFSET_SECONDS", "28800"))
+from utils.logtime_display import get_logtime_display_offset_seconds
 
 from .models import JournalEntry
 from .sqlite_uri import connect_readonly_with_fallback
@@ -34,7 +32,6 @@ DB_EVENT_ID_TO_PROJECT: Dict[str, str] = {
     "EjectDisk": "EjectDisk",
     "StorageBroken": "StorageBroken",
     "StorageDegraded1": "STORAGE_DEGRADED",
-    "DiskError": "DISK_IO_ERR",
     "APP_CRASH": "APP_CRASH",
     "SshdLoginSucc": "SSH_LOGIN_SUCCESS",
     "SshdLoginAuthFail": "SSH_AUTH_FAILED",
@@ -54,6 +51,8 @@ DB_EVENT_ID_TO_PROJECT: Dict[str, str] = {
     "APP_AUTO_STARTED": "APP_AUTO_STARTED",
     "APP_UNINSTALLED": "APP_UNINSTALLED",
     "DISK_IO_ERR": "DISK_IO_ERR",
+    # 部分 NAS 日志使用 DiskError + parameter.template，与 DISK_IO_ERR 同源
+    "DiskError": "DISK_IO_ERR",
     "DiskWakeup": "DiskWakeup",
     "DiskSpindown": "DiskSpindown",
     "CPU_USAGE_ALARM": "CPU_USAGE_ALARM",
@@ -81,7 +80,6 @@ DB_EVENT_ID_TO_PROJECT: Dict[str, str] = {
     "SECURITY_PORTCHANGED": "SECURITY_PORTCHANGED",
     "SHUTDOWN_VM": "SHUTDOWN_VM",
     "STATUS_RUNNING_VM": "STATUS_RUNNING_VM",
-    "STATUS_REBOOTED_VM": "STATUS_REBOOTED_VM",
     "DESTROY_VM": "DESTROY_VM",
     # 影视库 / 用户（eventId 以 NAS 实际为准，可再扩展）
     "USER_CREATE": "MEDIA_USER_CREATED",
@@ -94,7 +92,7 @@ DB_EVENT_ID_TO_PROJECT: Dict[str, str] = {
 def _logtime_to_datetime(logtime: int) -> str:
     """10 位 Unix 时间戳转 YYYY-MM-DD HH:MM:SS（Asia/Shanghai）。可设 LOGTIME_DISPLAY_OFFSET_SECONDS 修正存库偏差（如 28800=+8h）。"""
     try:
-        ts = int(logtime) + _LOGTIME_OFFSET_SECONDS
+        ts = int(logtime) + get_logtime_display_offset_seconds()
         dt = datetime.fromtimestamp(ts, tz=ZoneInfo("Asia/Shanghai"))
         return dt.strftime("%Y-%m-%d %H:%M:%S")
     except (ValueError, TypeError, OSError):
@@ -233,9 +231,6 @@ class DBLogPoller:
 
     def _get_max_log_id(self) -> int:
         """获取 log 表当前最大 id；启动时用此值作为游标，只处理此后新写入的记录。"""
-        if not (self.db_path or "").strip():
-            self.logger.warning("logger_db_path 为空，跳过获取 log 表最大 id")
-            return 0
         try:
             conn = connect_readonly_with_fallback(self.db_path, timeout=5.0)
             row = conn.execute("SELECT COALESCE(MAX(id), 0) AS mx FROM log").fetchone()
@@ -247,8 +242,6 @@ class DBLogPoller:
 
     def _fetch_new_rows(self, after_id: int) -> List[Dict[str, Any]]:
         """查询 id > after_id 的记录，按 id 升序。"""
-        if not (self.db_path or "").strip():
-            return []
         try:
             conn = connect_readonly_with_fallback(self.db_path, timeout=5.0)
             conn.row_factory = sqlite3.Row
@@ -287,6 +280,9 @@ class DBLogPoller:
                 row.get("uname"),
                 row.get("uid"),
             )
+            event_data.setdefault("_source", "logger_db")
+            event_data.setdefault("_source_cursor", str(row_id))
+            event_data.setdefault("_source_event_id", db_event_id)
             entry = _row_to_entry(row)
             batch_events.append({
                 "row_id": row_id,
@@ -296,12 +292,14 @@ class DBLogPoller:
                 "entry": entry,
                 "handler": handler,
             })
+        batch_delivery_failed = False
         if batch_events:
             if self.batch_handler:
                 try:
                     self.batch_handler(batch_events)
                 except Exception as e:
                     self.logger.error("批量处理事件失败（count=%s）: %s", len(batch_events), e, exc_info=True)
+                    batch_delivery_failed = True
             else:
                 # 兼容旧逻辑：未注册批处理时按条处理
                 for item in batch_events:
@@ -310,11 +308,14 @@ class DBLogPoller:
                     except Exception as e:
                         self.logger.error("处理事件失败 eventId=%s: %s", item["db_event_id"], e)
         if rows:
+            # 汇总模式批量投递失败时不推进游标，下次轮询重试同批 id，避免静默丢事件
+            if self.batch_handler and batch_events and batch_delivery_failed:
+                return last_id
             self._write_last_id(rows[-1].get("id", last_id))
         return last_id if not rows else rows[-1].get("id", last_id)
 
     def _run_loop(self) -> None:
-        # 启动时以当前库中最大 id 为游标，不处理历史；只推送此后新写入的记录
+        # 启动时将游标对齐到当前库最大 id：不补推历史日志，仅从启用轮询这一刻之后的新增记录开始推送
         last_id = self._get_max_log_id()
         self._write_last_id(last_id)
         self.logger.info("数据库轮询启动，仅处理 id > %s 的新记录，间隔 %s 秒", last_id, self.poll_interval)
@@ -330,6 +331,9 @@ class DBLogPoller:
 
     def start(self) -> None:
         if self.running:
+            return
+        if not (self.db_path or "").strip():
+            self.logger.info("未配置 logger_db_path，跳过 DBLogPoller")
             return
         self.running = True
         self._thread = threading.Thread(target=self._run_loop, name="DBLogPoller", daemon=False)

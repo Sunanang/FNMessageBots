@@ -340,6 +340,9 @@ class DockerEventsPoller:
             "image": image,
             "docker_action": action_raw,
             "engine_time_nano": time_nano,
+            "_source": "docker",
+            "_source_cursor": f"{cid}:{action_raw}:{time_nano}",
+            "_source_event_id": event_type,
         }
         if exit_code is not None and str(exit_code).strip() != "":
             event_data["exit_code"] = exit_code
@@ -504,6 +507,9 @@ class DockerEventsPoller:
                     time.sleep(3)
 
     def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            self.logger.warning("DockerEventsPoller 线程仍在运行，跳过重复启动")
+            return
         if self.running:
             return
         if docker is None:
@@ -531,10 +537,20 @@ class DockerEventsPoller:
             except Exception:
                 pass
             self._client = None
-        self._flush_docker_batch()
+        stuck = False
         if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=5)
+            self._thread.join(timeout=15)
+            stuck = self._thread.is_alive()
+            if stuck:
+                self.logger.warning(
+                    "DockerEventsPoller 线程未在 15s 内退出，可能仍存在重复监听；请重启应用",
+                )
+                # 保留 _thread，避免误判为已停止于是又 start() 拉出第二条监听。
+            else:
+                self._thread = None
+        else:
+            self._thread = None
         self._flush_since_cursor()
         self._save_dedup()
         self._events_since_dedup_flush = 0
-        self.logger.info("DockerEventsPoller 已停止")
+        self.logger.info("DockerEventsPoller 已停止%s", "（监听线程仍未退出）" if stuck else "")

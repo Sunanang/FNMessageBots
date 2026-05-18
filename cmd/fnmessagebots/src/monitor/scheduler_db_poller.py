@@ -311,6 +311,9 @@ class SchedulerDBPoller:
             "schedule_expression": str(row.get("schedule_expression") or ""),
             "log_preview": log_preview,
             "log_size": len(log_full),
+            "_source": "scheduler_db",
+            "_source_cursor": str(row.get("id") or ""),
+            "_source_event_id": event_type,
         }
 
         timestamp = _iso_to_display(finished_at_str) or datetime.now().strftime("%Y-%m-%d %H:%M:%S")

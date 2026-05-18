@@ -159,6 +159,7 @@ class BackupDBPoller:
         self._dedup_seen = {k: v for k, v in self._dedup_seen.items() if int(v) >= cutoff}
 
     def _connect(self) -> sqlite3.Connection:
+        # 仅做轮询读取，使用只读连接避免要求数据库目录可写（WAL/journal 权限）
         conn = connect_readonly_with_fallback(self.db_path, timeout=5.0)
         conn.row_factory = sqlite3.Row
         return conn
@@ -262,6 +263,9 @@ class BackupDBPoller:
             "storage_address": row.get("storage_address") or "",
             "target_path": row.get("target_path") or "",
             "source_paths": row.get("source_paths") or "",
+            "_source": "backup_db",
+            "_source_cursor": str(row.get("id") or ""),
+            "_source_event_id": event_type,
         }
         timestamp = _ts_to_str(row.get("finished_time") or row.get("start_time"))
         entry = JournalEntry(

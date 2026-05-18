@@ -229,4 +229,3 @@ def build_events_for_ui(
         if events:
             events_by_category.append({"id": cat_id, "name": cat_name, "events": events})
     return events_by_category, valid_event_ids, discovered_vm_event_ids
-
