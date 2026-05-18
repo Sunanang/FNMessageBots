@@ -12,10 +12,14 @@ services:
       - /usr/trim/var/backup_service:/usr/trim/var/backup_service:ro
       - /usr/local/apps/@appdata/trim.media/database:/usr/local/apps/@appdata/trim.media/database:ro
       - /usr/local/apps/@appdata/trim.photos/db:/usr/local/apps/@appdata/trim.photos/db:ro
-      # fn-scheduler 任务计划数据库（挂载后在 Web 配置页设置 scheduler_db_path）
+      # fn-scheduler 任务计划（挂载后 scheduler_db_path 可留空，程序会自动探测 scheduler.db）
+      # - /var/apps/fn-scheduler/var:/var/apps/fn-scheduler/var:ro
       # - /usr/local/apps/@appdata/fn-scheduler:/usr/local/apps/@appdata/fn-scheduler:ro
-      # 可选：启用 Docker 容器事件监听需挂载宿主 docker.sock（等同授予 Docker API 访问能力）
+      # 可选：Docker 容器事件 — 挂载 socket 后还需让容器进程能读写（常见 socket 为 root:docker 660）
       # - /var/run/docker.sock:/var/run/docker.sock
+      # 若 Web 仍报 Docker 权限告警，在 NAS 上执行 stat -c '%g' /var/run/docker.sock 得到 GID 后取消下行注释：
+      # group_add:
+      #   - "999"
       - ./config:/app/config:rw
       # 可选：只读挂载宿主的 dpkg status，巡检可解析 trim 版本（与在 NAS 上 dpkg -s trim 一致）
       # - /var/lib/dpkg/status:/host/dpkg/status:ro

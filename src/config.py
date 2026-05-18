@@ -106,6 +106,7 @@ class Config:
         self._load_from_env()
         # 然后从配置文件加载，但仅当配置项未从环境变量设置时才覆盖
         self._load_from_file_skip_if_set()
+        self._apply_discovered_db_paths()
         self.title_prefix = (self.title_prefix or "").strip()
         self._validate()
         self._ensure_directories()
@@ -147,6 +148,18 @@ class Config:
                             setattr(self, key, value)
             except Exception as e:
                 print(f"警告: 配置文件读取失败 - {e}")
+
+    def _apply_discovered_db_paths(self) -> None:
+        """配置项为空时，按 compose 常见挂载路径自动探测可读的数据库文件。"""
+        from config_db_paths import DB_PATH_CONFIG_KEYS, discover_db_path
+
+        for key in DB_PATH_CONFIG_KEYS:
+            if key in self._env_set_keys:
+                continue
+            if not str(getattr(self, key, "") or "").strip():
+                found = discover_db_path(key)
+                if found:
+                    setattr(self, key, found)
 
     def reload_from_file(self, config_path: Path) -> bool:
         """从配置文件重新加载 Web UI 可修改的项（保存时热加载用）。返回是否成功。"""
@@ -231,6 +244,7 @@ class Config:
             self.scheduler_db_path = data["scheduler_db_path"].strip()
         if not env_skip("docker_socket_path") and "docker_socket_path" in data and isinstance(data["docker_socket_path"], str):
             self.docker_socket_path = (data["docker_socket_path"] or "").strip() or "/var/run/docker.sock"
+        self._apply_discovered_db_paths()
         self.title_prefix = (self.title_prefix or "").strip()
         try:
             self._validate()

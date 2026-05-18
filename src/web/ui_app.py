@@ -46,7 +46,9 @@ from web.event_catalog import DEFAULT_SELECTED_EVENTS
 from web.event_catalog import EVENT_IDS_HIDDEN_IN_UI
 from web.event_catalog import OLD_DEFAULT_SELECTED_EVENTS_WITH_EXTRA
 from web.event_catalog import build_events_for_ui
+from config_db_paths import apply_discovered_db_paths
 from monitor.docker_events_poller import DOCKER_POLL_EVENTS
+from monitor.docker_socket_access import check_docker_socket_access
 from web.push_history_service import get_record as get_push_history_record
 from web.push_history_service import get_stats as get_push_history_stats
 from web.push_history_service import list_records as list_push_history_records
@@ -98,7 +100,9 @@ def _is_password_verification_enabled() -> bool:
 
 
 def _load_raw_config() -> dict:
-    return _load_raw_config_from_file(CONFIG_FILE)
+    raw = _load_raw_config_from_file(CONFIG_FILE)
+    merged, _ = apply_discovered_db_paths(raw)
+    return merged
 
 
 def _save_raw_config(data: dict) -> None:
@@ -138,27 +142,8 @@ def _mode_str(mode: int) -> str:
 
 
 def _docker_socket_access_warning(sock_path: str) -> str | None:
-    """
-    勾选 Docker 容器事件时，若当前进程无法使用 Engine socket 则返回一条告警文案，否则 None。
-    详细步骤见常见问题 · 第11条（/faq#faq-docker-sock）。
-    """
-    sp = (sock_path or "").strip() or "/var/run/docker.sock"
-    hint = (
-        f"Docker：与 {sp} 相关的能力不可用。"
-        "请打开常见问题 · 第11条查看说明与挂载示例。"
-    )
-    try:
-        # 使用 stat 跟随符号链接（常见：/var/run/docker.sock -> /run/docker.sock）
-        st = os.stat(sp)
-    except (FileNotFoundError, PermissionError):
-        return hint
-
-    if not stat.S_ISSOCK(st.st_mode):
-        return hint
-
-    if not os.access(sp, os.R_OK | os.W_OK):
-        return hint
-    return None
+    """勾选 Docker 容器事件时检测 socket；详见 /faq#faq-docker-sock。"""
+    return check_docker_socket_access(sock_path)
 
 
 def _check_db_access_issue(db_path: str, probe_sql: str = "SELECT 1") -> str:
@@ -224,7 +209,10 @@ def _collect_external_db_access_warnings(raw_cfg: dict, events: list[str]) -> li
     if monitor_events & backup_events:
         backup_db_path = (raw_cfg.get("backup_db_path") or "").strip()
         if not backup_db_path:
-            warnings.append("备份库: 未配置 backup_db_path，无法轮询备份事件。")
+            warnings.append(
+                "备份库: 未找到数据库（config 中 backup_db_path 为空，且容器内未探测到 basic_backup.db3；"
+                "请确认 compose 已挂载 backup_service 目录）。"
+            )
         else:
             issue = _check_db_access_issue(
                 backup_db_path,
@@ -236,7 +224,9 @@ def _collect_external_db_access_warnings(raw_cfg: dict, events: list[str]) -> li
     if monitor_events & trimmedia_events:
         trim_media_db_path = (raw_cfg.get("trim_media_db_path") or "").strip()
         if not trim_media_db_path:
-            warnings.append("影视库: 未配置 trim_media_db_path，无法轮询影视相关数据库事件。")
+            warnings.append(
+                "影视库: 未找到 trimmedia.db（请确认 compose 已挂载 trim.media/database 或填写 trim_media_db_path）。"
+            )
         else:
             issue = _check_db_access_issue(
                 trim_media_db_path,
@@ -248,7 +238,9 @@ def _collect_external_db_access_warnings(raw_cfg: dict, events: list[str]) -> li
     if monitor_events & trimactivity_events:
         trim_activity_db_path = (raw_cfg.get("trim_activity_db_path") or "").strip()
         if not trim_activity_db_path:
-            warnings.append("影视库: 未配置 trim_activity_db_path，无法轮询影视相关数据库事件。")
+            warnings.append(
+                "影视库: 未找到 trimactivity.db（请确认 compose 已挂载 trim.media/database 或填写 trim_activity_db_path）。"
+            )
         else:
             issue = _check_db_access_issue(
                 trim_activity_db_path,
@@ -260,7 +252,9 @@ def _collect_external_db_access_warnings(raw_cfg: dict, events: list[str]) -> li
     if monitor_events & photo_events:
         photo_db_path = (raw_cfg.get("photo_db_path") or "").strip()
         if not photo_db_path:
-            warnings.append("相册库: 未配置 photo_db_path，无法轮询相册数据库事件。")
+            warnings.append(
+                "相册库: 未找到 photo.db（请确认 compose 已挂载 trim.photos/db 或填写 photo_db_path）。"
+            )
         else:
             issue = _check_db_access_issue(
                 photo_db_path,
@@ -280,7 +274,10 @@ def _collect_external_db_access_warnings(raw_cfg: dict, events: list[str]) -> li
     if monitor_events & scheduler_events:
         scheduler_db_path = (raw_cfg.get("scheduler_db_path") or "").strip()
         if not scheduler_db_path:
-            warnings.append("任务计划库: 未配置 scheduler_db_path，无法轮询任务计划事件。")
+            warnings.append(
+                "任务计划库: 未找到 scheduler.db（请挂载 fn-scheduler 数据目录并在 config 填写 scheduler_db_path，"
+                "常见为 /var/apps/fn-scheduler/var/scheduler.db）。"
+            )
         else:
             issue = _check_db_access_issue(
                 scheduler_db_path,

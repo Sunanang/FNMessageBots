@@ -51,6 +51,7 @@
   "trim_media_db_path": "/usr/local/apps/@appdata/trim.media/database/trimmedia.db",
   "trim_activity_db_path": "/usr/local/apps/@appdata/trim.media/database/trimactivity.db",
   "photo_db_path": "/usr/local/apps/@appdata/trim.photos/db/photo.db",
+  "scheduler_db_path": "/var/apps/fn-scheduler/var/scheduler.db",
   "logger_poll_interval": 5,
   "poll_batch_summary_enabled": false,
   "max_log_age": 7,

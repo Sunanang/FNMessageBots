@@ -177,6 +177,12 @@ class EventProcessor:
         if not batch_events:
             return False
 
+        from monitor.batch_dedupe import dedupe_poll_batch_items
+
+        batch_events = dedupe_poll_batch_items(batch_events)
+        if not batch_events:
+            return False
+
         latest_entry = batch_events[-1].get("entry")
         timestamp = getattr(latest_entry, "timestamp", datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
         by_type: Dict[str, int] = {}

@@ -267,7 +267,7 @@ sudo setfacl -m u:FnMessageBot:rx /usr/local/apps/@appdata/trim.media/database
 sudo setfacl -m u:FnMessageBot:r /usr/local/apps/@appdata/trim.media/database/trimmedia.db
 sudo setfacl -m u:FnMessageBot:r /usr/local/apps/@appdata/trim.media/database/trimactivity.db</pre>
 若相册侧仍有权限错误，可对 <code>trim.photos/db</code> 下实际使用的 <code>.db</code> 文件按同样方式为 <code>FnMessageBot</code> 增加只读 ACL（示例：<code>sudo setfacl -m u:FnMessageBot:r &lt;文件路径&gt;</code>）。</p>
-            <p>若仍有问题，可在 <code>config.json</code> 中核对或追加如下字段（路径按 NAS 实际为准）：</p>
+            <p><strong>说明：</strong>在 compose 里挂载宿主目录，只表示容器内能访问文件；程序仍需要知道数据库文件路径。若 <code>config.json</code> 中对应字段为空，会在容器内按常见 NAS 路径自动探测；在 Web 页保存配置后，探测到的路径会写入 <code>config.json</code>。若仍提示未找到库，请核对挂载与下列字段（路径按 NAS 实际为准）：</p>
             <pre class="faq-pre">  "logger_db_path": "/usr/trim/var/eventlogger_service/logger_data.db3",
   "backup_db_path": "/usr/trim/var/backup_service/basic_backup.db3",
   "media_lib_logger_enabled": false,
@@ -275,7 +275,8 @@ sudo setfacl -m u:FnMessageBot:r /usr/local/apps/@appdata/trim.media/database/tr
   "media_lib_app_name_patterns": ["影视"],
   "trim_media_db_path": "/usr/local/apps/@appdata/trim.media/database/trimmedia.db",
   "trim_activity_db_path": "/usr/local/apps/@appdata/trim.media/database/trimactivity.db",
-  "photo_db_path": "/usr/local/apps/@appdata/trim.photos/db/photo.db"</pre>
+  "photo_db_path": "/usr/local/apps/@appdata/trim.photos/db/photo.db",
+  "scheduler_db_path": "/var/apps/fn-scheduler/var/scheduler.db"</pre>
             <p class="faq-warn-red">若命令执行以后仍然无效，可以尝试卸载重装。</p>
           </article>
 
@@ -283,7 +284,13 @@ sudo setfacl -m u:FnMessageBot:r /usr/local/apps/@appdata/trim.media/database/tr
             <h2>11. Docker 容器事件与 docker.sock 权限</h2>
             <p>在监控事件中勾选「Docker 容器」相关事件后，保存时若出现「无法访问 <code>/var/run/docker.sock</code>」类告警，说明<strong>当前进程</strong>无权读写 Docker Engine 的 Unix socket。若你在 <code>config.json</code> 中配置了 <code>docker_socket_path</code>，以下命令中的路径请改为与你配置一致。</p>
             <p><strong>安全提示：</strong>将用户加入 <code>docker</code> 组或使用 ACL 读写 <code>docker.sock</code>，等同于授予通过 Docker API 操控引擎的能力；请仅在理解风险后操作，勿随意 <code>chmod 777</code>。</p>
-            <p><strong>自建 Docker / Compose：</strong>在 <code>docker-compose.yml</code> 中为运行本应用的服务挂载宿主 <code>docker.sock</code>，并通过 <code>user</code> / <code>group_add</code>（例如加入宿主 <code>docker</code> 组的 GID）使容器内进程有权访问 socket。</p>
+            <p><strong>自建 Docker / Compose：</strong>仅挂载 <code>docker.sock</code> 不够——还需让<strong>容器内正在运行的 Python 进程</strong>对 socket 具备读写权限。宿主上常见为 <code>srw-rw---- root docker</code>（660），非 root 进程须加入 docker 组对应的 GID。在 NAS SSH 执行 <code>stat -c '%g' /var/run/docker.sock</code> 得到数字 GID，在 compose 中示例：</p>
+            <pre class="faq-pre">    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    group_add:
+      - "999"   # 改为你上一步得到的 GID
+# 修改 group_add 后须 docker compose up -d 重建容器，仅重启进程无效。</pre>
+            <p>若镜像以非 root 用户运行且无法改组，可临时 <code>user: "0:0"</code> 验证（请自行评估安全风险）。</p>
             <p><strong>应用市场版（SSH，默认路径示例）：</strong></p>
             <pre class="faq-pre"># 查看 socket 权限（SSH root）
 ls -l /var/run/docker.sock
