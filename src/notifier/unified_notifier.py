@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 
 from config import TITLE_PREFIX_DEFAULT
 from utils.logtime_display import get_logtime_display_offset_seconds
-from .multi_platform_notifier import MultiPlatformNotifier
+from .multi_platform_notifier import DOCKER_CONTAINER_EVENT_TYPES, MultiPlatformNotifier
 from monitor.db_log_poller import DB_EVENT_ID_TO_PROJECT
 from monitor.sqlite_uri import connect_readonly_with_fallback
 
@@ -87,7 +87,7 @@ class NotificationResult:
 class UnifiedNotifier:
     """统一通知器，支持多平台推送"""
     # 轻量缓冲仅覆盖“不在 logger_data.db3 log 表里”的事件，避免与 DB 汇总重复计数。
-    DND_LIGHT_BUFFER_EVENT_TYPES: Set[str] = {
+    DND_LIGHT_BUFFER_EVENT_TYPES: frozenset[str] = frozenset({
         "BACKUP_TASK_SUCCESS",
         "BACKUP_TASK_FAILED",
         "BACKUP_TASK_PARTIAL_SUCCESS",
@@ -97,8 +97,25 @@ class UnifiedNotifier:
         "PHOTO_SHARE_EXPIRED",
         "PHOTO_DEVICE_REGISTERED",
         "FACE_RECOGNITION_UPDATED",
-    }
-    
+    })
+    # 外部库轮询事件（不在 logger_data.db3）；主日志事件由 _query_dnd_events_summary 统计，勿重复计入。
+    DND_EXTERNAL_POLLER_EVENT_TYPES: frozenset[str] = (
+        DND_LIGHT_BUFFER_EVENT_TYPES
+        | frozenset(DOCKER_CONTAINER_EVENT_TYPES)
+        | frozenset({
+            "MEDIA_LOGIN_SUCC",
+            "MEDIA_LOGOUT",
+            "SCHEDULER_TASK_SUCCESS",
+            "SCHEDULER_TASK_FAILED",
+            "SCHEDULER_TASK_CONDITION_FAILED",
+        })
+    )
+    DND_MAIN_LOG_SOURCES: frozenset[str] = frozenset({"db", "logger_db"})
+    DND_SOURCE_REQUIRED_EVENT_TYPES: frozenset[str] = frozenset({
+        "MEDIA_LOGIN_SUCC",
+        "MEDIA_LOGOUT",
+    })
+
     def __init__(self, config):
         """
         初始化统一通知器
@@ -258,11 +275,28 @@ class UnifiedNotifier:
             return current >= start_m or current < end_m
         return start_m <= current < end_m
 
-    def _normalize_db_event_type(self, db_event_id: str, uname: str) -> str:
+    def _normalize_db_event_type(
+        self,
+        db_event_id: str,
+        uname: str,
+        service_id: str = "",
+        category: str = "",
+        parameter: str = "",
+    ) -> str:
         """将数据库 eventId 归一化为项目内 event_type（与轮询器一致）。"""
         et = DB_EVENT_ID_TO_PROJECT.get(db_event_id, db_event_id)
         if db_event_id == "SshdLoginAuthFail" and (uname or "").strip().lower() == "invalid":
             return "SSH_INVALID_USER"
+        if et in ("LoginSucc", "Logout") and bool(getattr(self.config, "media_lib_logger_enabled", False)):
+            patterns = [
+                str(p).strip().lower()
+                for p in (getattr(self.config, "media_lib_service_patterns", []) or [])
+                if str(p).strip()
+            ]
+            if patterns:
+                hay = f"{service_id or ''}\t{category or ''}\t{parameter or ''}".lower()
+                if any(p in hay for p in patterns):
+                    return "MEDIA_LOGIN_SUCC" if et == "LoginSucc" else "MEDIA_LOGOUT"
         return et
 
     def _calc_latest_dnd_period(self) -> Tuple[Optional[datetime], Optional[datetime]]:
@@ -320,11 +354,18 @@ class UnifiedNotifier:
         try:
             conn.row_factory = sqlite3.Row
             cur = conn.execute(
-                "SELECT eventId, uname FROM log WHERE logtime >= ? AND logtime < ? ORDER BY id ASC",
+                "SELECT eventId, uname, serviceId, category, parameter FROM log "
+                "WHERE logtime >= ? AND logtime < ? ORDER BY id ASC",
                 (start_ts, end_ts),
             )
             for row in cur.fetchall():
-                et = self._normalize_db_event_type(str(row["eventId"] or ""), str(row["uname"] or ""))
+                et = self._normalize_db_event_type(
+                    str(row["eventId"] or ""),
+                    str(row["uname"] or ""),
+                    str(row["serviceId"] or ""),
+                    str(row["category"] or ""),
+                    str(row["parameter"] or ""),
+                )
                 if et in monitor_set:
                     by_type[et] += 1
         finally:
@@ -345,12 +386,73 @@ class UnifiedNotifier:
         self.logger.info("勿扰结束，发送汇总消息（共 %s 条事件）", sum(by_type.values()))
         return "\n".join(lines)
 
-    def _buffer_event_for_dnd_if_needed(self, event_type: str) -> None:
+    def _is_external_dnd_event(self, event_type: str, event_data: Optional[Dict[str, Any]] = None) -> bool:
+        et = str(event_type or "").strip()
+        if not et or et not in self.DND_EXTERNAL_POLLER_EVENT_TYPES:
+            return False
+        if not self._dnd_event_in_monitor_set(et):
+            return False
+        data = event_data if isinstance(event_data, dict) else {}
+        source = str(data.get("_source") or "").strip()
+        if source in self.DND_MAIN_LOG_SOURCES:
+            return False
+        if source:
+            return True
+        return et not in self.DND_SOURCE_REQUIRED_EVENT_TYPES
+
+    def _buffer_event_for_dnd_if_needed(self, event_type: str, event_data: Optional[Dict[str, Any]] = None) -> None:
         """勿扰时段内轻量缓存非主日志库事件计数。"""
-        if event_type not in self.DND_LIGHT_BUFFER_EVENT_TYPES:
+        et = str(event_type or "").strip()
+        if not self._is_external_dnd_event(et, event_data):
             return
         with self._dnd_light_buffer_lock:
-            self._dnd_light_buffer_counts[event_type] = int(self._dnd_light_buffer_counts.get(event_type, 0)) + 1
+            self._dnd_light_buffer_counts[et] = int(self._dnd_light_buffer_counts.get(et, 0)) + 1
+
+    def _dnd_event_in_monitor_set(self, event_type: str) -> bool:
+        monitor_set = set(getattr(self.config, "monitor_events", []) or [])
+        return not monitor_set or event_type in monitor_set
+
+    def _buffer_dnd_poll_batch_summary(self, event_data: Dict[str, Any]) -> None:
+        """轮询批量汇总在勿扰内被拦截时，仅把外部来源事件计入轻量缓冲。"""
+        counts: Dict[str, int] = defaultdict(int)
+        grouped_raw = event_data.get("grouped_events")
+        if isinstance(grouped_raw, dict):
+            for et, rows in grouped_raw.items():
+                et_s = str(et or "").strip()
+                if not et_s or et_s == "POLL_BATCH_SUMMARY" or not isinstance(rows, list):
+                    continue
+                for row in rows:
+                    row_data = row.get("event_data") if isinstance(row, dict) else {}
+                    if self._is_external_dnd_event(et_s, row_data if isinstance(row_data, dict) else None):
+                        counts[et_s] += 1
+        if counts:
+            with self._dnd_light_buffer_lock:
+                for et_s, n in counts.items():
+                    self._dnd_light_buffer_counts[et_s] = int(self._dnd_light_buffer_counts.get(et_s, 0)) + n
+            self.logger.debug("勿扰：已从轮询批量汇总计入 %s 条外部库事件", sum(counts.values()))
+            return
+
+        by_type_raw = event_data.get("by_type")
+        if not isinstance(by_type_raw, dict):
+            return
+        merged = 0
+        with self._dnd_light_buffer_lock:
+            for et, cnt in by_type_raw.items():
+                et_s = str(et or "").strip()
+                if not et_s or et_s == "POLL_BATCH_SUMMARY":
+                    continue
+                if not self._is_external_dnd_event(et_s, None):
+                    continue
+                try:
+                    n = int(cnt)
+                except (TypeError, ValueError):
+                    continue
+                if n <= 0:
+                    continue
+                self._dnd_light_buffer_counts[et_s] = int(self._dnd_light_buffer_counts.get(et_s, 0)) + n
+                merged += n
+        if merged:
+            self.logger.debug("勿扰：已从轮询批量汇总计入 %s 条外部库事件", merged)
 
     def _snapshot_and_clear_dnd_light_buffer(self) -> Dict[str, int]:
         """获取并清空轻量缓冲。"""
@@ -389,20 +491,100 @@ class UnifiedNotifier:
                 summary,
                 {"hostname": "", "version": ""},
             )
-            success = out.get("success", False) if isinstance(out, dict) else bool(out)
-            sc = out.get("success_count", 0) if isinstance(out, dict) else 0
-            fc = out.get("fail_count", 0) if isinstance(out, dict) else 0
-            # 勿扰汇总不参与推送汇总统计，仅事件推送（send_notification）统计
-            # 再发一条短消息：勿扰汇总推送结果（成功/失败渠道数）
-            result_msg = f"本次汇总推送：成功 {sc} 个渠道，失败 {fc} 个渠道"
-            self.multi_platform_notifier.send_system_notification(
+        except Exception as e:
+            self.logger.warning("勿扰汇总推送失败: %s", e)
+            self._record_system_notification_failure(
+                "DND_SUMMARY",
+                summary,
+                {"hostname": "", "version": ""},
+                [],
+                failure_summary=f"发送异常: {e}",
+            )
+            self._save_last_dnd_summary_end(end_key)
+            return
+
+        success = out.get("success", False) if isinstance(out, dict) else bool(out)
+        sc = out.get("success_count", 0) if isinstance(out, dict) else 0
+        fc = out.get("fail_count", 0) if isinstance(out, dict) else 0
+        channel_results = out.get("channel_results") if isinstance(out, dict) else []
+        skipped = out.get("skipped") if isinstance(out, dict) else None
+        if not success and skipped != "duplicate":
+            self._record_system_notification_failure(
+                "DND_SUMMARY",
+                summary,
+                {"hostname": "", "version": ""},
+                channel_results if isinstance(channel_results, list) else [],
+            )
+        # 主汇总请求已完成就推进游标；即使全部渠道失败，也不重试勿扰期间旧事件。
+        self._save_last_dnd_summary_end(end_key)
+
+        # 勿扰汇总不参与推送汇总统计，仅事件推送（send_notification）统计
+        # 额外发送一条状态消息：该消息失败不影响汇总游标
+        result_msg = f"本次汇总推送：成功 {sc} 个渠道，失败 {fc} 个渠道"
+        try:
+            status_out = self.multi_platform_notifier.send_system_notification(
                 "DND_SUMMARY",
                 result_msg,
                 {"hostname": "", "version": ""},
             )
-            self._save_last_dnd_summary_end(end_key)
+            status_success = status_out.get("success", False) if isinstance(status_out, dict) else bool(status_out)
+            status_skipped = status_out.get("skipped") if isinstance(status_out, dict) else None
+            status_channel_results = status_out.get("channel_results") if isinstance(status_out, dict) else []
+            if not status_success and status_skipped != "duplicate":
+                self._record_system_notification_failure(
+                    "DND_SUMMARY",
+                    result_msg,
+                    {"hostname": "", "version": ""},
+                    status_channel_results if isinstance(status_channel_results, list) else [],
+                )
         except Exception as e:
-            self.logger.warning("勿扰汇总推送失败: %s", e)
+            self.logger.warning("勿扰汇总状态消息发送失败: %s", e)
+            self._record_system_notification_failure(
+                "DND_SUMMARY",
+                result_msg,
+                {"hostname": "", "version": ""},
+                [],
+                failure_summary=f"发送异常: {e}",
+            )
+
+    def _record_system_notification_failure(
+        self,
+        event_type: str,
+        message: str,
+        additional_info: Optional[Dict[str, Any]] = None,
+        channel_results: Optional[List[Dict[str, Any]]] = None,
+        *,
+        failure_summary: str = "",
+    ) -> None:
+        """系统通知失败时写入项目推送历史；仅记录，不触发重试。"""
+        try:
+            from utils.push_history import add_record as add_push_history
+            channel_results_list = channel_results if isinstance(channel_results, list) else []
+            summary = ((message or "").replace("\n", " ")).strip()[:500] or event_type
+            detail_sys: Dict[str, Any] = {
+                "kind": "system_notification",
+                "event_type": event_type,
+                "channel_results": _truncate_channel_results_for_storage(channel_results_list),
+            }
+            if additional_info:
+                detail_sys["additional_info"] = {
+                    k: additional_info.get(k)
+                    for k in ("hostname", "version")
+                    if additional_info.get(k) is not None
+                }
+            fs = (failure_summary or "").strip() or _failure_summary_from_channel_results(channel_results_list)
+            if fs:
+                detail_sys["failure_summary"] = fs
+            else:
+                detail_sys["failure_summary"] = "未配置任何推送渠道或全部渠道发送失败"
+            add_push_history(
+                success=False,
+                event_type=event_type,
+                summary=summary,
+                detail=detail_sys,
+            )
+        except Exception:
+            pass
 
     def send_notification(self, 
                          event_type: str,
@@ -422,8 +604,11 @@ class UnifiedNotifier:
             通知发送结果
         """
         if self._in_dnd_window() and event_type != "NAS_PATROL_REPORT":
-            # 勿扰时段内：logger_data.db3 事件靠 DB 汇总，非主日志库事件走轻量缓冲。
-            self._buffer_event_for_dnd_if_needed(str(event_type))
+            # 勿扰时段内：logger_data.db3 事件靠 DB 汇总；外部库走轻量缓冲；批量汇总需展开 by_type。
+            if str(event_type) == "POLL_BATCH_SUMMARY":
+                self._buffer_dnd_poll_batch_summary(event_data)
+            else:
+                self._buffer_event_for_dnd_if_needed(str(event_type), event_data)
             return NotificationResult(
                 success=True,
                 method="dnd_skipped",
@@ -561,37 +746,12 @@ class UnifiedNotifier:
         skipped = out.get("skipped") if isinstance(out, dict) else None
         # 系统通知失败时写入 push_history（与事件推送同一库），便于 Web「推送记录」查看原因；不去重跳过入库以免刷屏
         if not success and skipped != "duplicate":
-            try:
-                from utils.push_history import add_record as add_push_history
-                summary = ((message or "").replace("\n", " ")).strip()[:500] or event_type
-                detail_sys: Dict[str, Any] = {
-                    "kind": "system_notification",
-                    "event_type": event_type,
-                    "channel_results": _truncate_channel_results_for_storage(
-                        channel_results if isinstance(channel_results, list) else []
-                    ),
-                }
-                if additional_info:
-                    detail_sys["additional_info"] = {
-                        k: additional_info.get(k)
-                        for k in ("hostname", "version")
-                        if additional_info.get(k) is not None
-                    }
-                fs = _failure_summary_from_channel_results(
-                    channel_results if isinstance(channel_results, list) else []
-                )
-                if fs:
-                    detail_sys["failure_summary"] = fs
-                else:
-                    detail_sys["failure_summary"] = "未配置任何推送渠道或全部渠道发送失败"
-                add_push_history(
-                    success=False,
-                    event_type=event_type,
-                    summary=summary,
-                    detail=detail_sys,
-                )
-            except Exception:
-                pass
+            self._record_system_notification_failure(
+                event_type,
+                message,
+                additional_info,
+                channel_results if isinstance(channel_results, list) else [],
+            )
         # 系统通知（APP_START/APP_STOP/勿扰汇总等）不参与推送汇总统计，仅事件推送（send_notification）统计
 
         # 确定实际使用的方法（检查哪些平台真正发送了）
