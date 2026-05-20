@@ -36,6 +36,8 @@ RETRY_BACKOFF_MAX_SEC = 3600
 
 # NUT upsd 默认端口（仅从系统自动探测连接，不提供应用层配置项）
 _NUT_UPSD_DEFAULT_PORT = 3493
+# 巡检 UPS 仅当 compose 挂载该文件时采集（/etc/nut/ups.conf:/etc/nut/ups.conf:ro）
+_NUT_UPS_CONF_MOUNT_PATH = "/etc/nut/ups.conf"
 
 # psutil disk_partitions(all=True) 时按 fstype 排除的伪/容器文件系统（路径上仍会再挡 Docker）
 _PATROL_PSUTIL_NOISE_FSTYPES: frozenset = frozenset(
@@ -223,6 +225,79 @@ def _run_cmd_any(candidates: List[List[str]], timeout: float = 2.0) -> str:
         if out:
             return out
     return ""
+
+
+def _run_upsc_cmd(args: List[str], timeout: float = 2.0) -> str:
+    """仅采纳 upsc 成功时的 stdout，避免把帮助/版本 stderr 当成 UPS 数据。"""
+    try:
+        cmd = list(args)
+        if cmd:
+            cmd[0] = _resolve_cmd(cmd[0])
+        p = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except Exception:
+        return ""
+    if p.returncode != 0:
+        return ""
+    return (p.stdout or "").strip()
+
+
+_UPSC_KNOWN_VAR_PREFIXES: Tuple[str, ...] = (
+    "ups.",
+    "battery.",
+    "input.",
+    "output.",
+    "device.",
+    "driver.",
+    "upsmon.",
+)
+
+
+def _upsc_text_is_error_or_help(text: str) -> bool:
+    if not (text or "").strip():
+        return True
+    low = text.lower()
+    if any(
+        m in low
+        for m in (
+            "network ups tools",
+            "display this help",
+            "usage:",
+            "error:",
+            "connection refused",
+            "driver not connected",
+            "unknown argument",
+            "can't connect",
+            "cannot connect",
+            "no such host",
+            "timed out",
+        )
+    ):
+        return True
+    first = text.splitlines()[0].strip()
+    return bool(first.startswith("-") and " " in first)
+
+
+def _upsc_is_plausible_device_name(name: str) -> bool:
+    s = (name or "").strip()
+    if not s or len(s) > 128 or _upsc_text_is_error_or_help(s):
+        return False
+    if " " in s or s.startswith("-"):
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9_.-]+", s))
+
+
+def _upsc_kv_has_ups_vars(kv: Dict[str, str]) -> bool:
+    for k in kv:
+        kl = k.lower()
+        if any(kl.startswith(p) for p in _UPSC_KNOWN_VAR_PREFIXES):
+            return True
+    return False
 
 
 def _safe_path_exists(p: Path) -> bool:
@@ -637,6 +712,79 @@ def _read_update_status() -> str:
     return "不检查"
 
 
+def _nut_ups_conf_is_mounted() -> bool:
+    """是否已挂载 ups.conf（容器内 /etc/nut/ups.conf 存在且可读）。"""
+    p = Path(_NUT_UPS_CONF_MOUNT_PATH)
+    try:
+        return p.is_file() and os.access(str(p), os.R_OK)
+    except OSError:
+        return False
+
+
+def _read_nut_ups_conf_text() -> str:
+    """读取已挂载的 ups.conf（未挂载时返回空，不通过 sudo/cat 探测宿主机）。"""
+    if not _nut_ups_conf_is_mounted():
+        return ""
+    try:
+        return Path(_NUT_UPS_CONF_MOUNT_PATH).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _upsc_query_var(upsc_bin: str, nutpfx: List[str], device_id: str, var: str) -> str:
+    """查询单个 upsc 变量（如 device.product）。"""
+    out = _run_upsc_cmd([upsc_bin] + list(nutpfx) + [device_id, var], timeout=2.0)
+    if not out or _upsc_text_is_error_or_help(out):
+        return ""
+    return out.strip().splitlines()[-1].strip()
+
+
+def _parse_nut_ups_conf_sections(text: str) -> Dict[str, Dict[str, str]]:
+    """解析 ups.conf：{节名(与 upsc -l 一致): {键: 值}}。"""
+    sections: Dict[str, Dict[str, str]] = {}
+    current: Optional[str] = None
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        m_sec = re.match(r"^\[([^\]]+)\]\s*$", line)
+        if m_sec:
+            current = m_sec.group(1).strip()
+            sections.setdefault(current, {})
+            continue
+        if current is None or "=" not in line:
+            continue
+        key, val = line.split("=", 1)
+        k = key.strip().lower()
+        v = val.strip().strip('"').strip("'")
+        if k:
+            sections[current][k] = v
+    return sections
+
+
+def _ups_device_display_name(
+    device_id: str,
+    conf_sections: Dict[str, Dict[str, str]],
+    upsc_kv: Dict[str, str],
+    upsc_bin: str = "",
+    nutpfx: Optional[List[str]] = None,
+) -> str:
+    """设备名优先 ups.conf 的 product，其次 upsc device.product，最后节名。"""
+    sec = conf_sections.get(device_id) or {}
+    product = (sec.get("product") or "").strip()
+    if product:
+        return product
+    from_upsc = (upsc_kv.get("device.product") or "").strip()
+    if from_upsc:
+        return from_upsc
+    if upsc_bin and device_id:
+        nutpfx_list = list(nutpfx or [])
+        fetched = _upsc_query_var(upsc_bin, nutpfx_list, device_id, "device.product")
+        if fetched:
+            return fetched
+    return device_id
+
+
 def _parse_ups_status_text(v: str) -> str:
     raw = (v or "").strip().upper()
     if not raw:
@@ -653,21 +801,27 @@ def _parse_ups_status_text(v: str) -> str:
 
 def _upsc_list_device_names(upsc_bin: str, nut_host: Optional[str], port: int) -> List[str]:
     if not nut_host:
-        raw = _run_cmd([upsc_bin, "-l"], timeout=1.8) or _run_cmd([upsc_bin, "-L"], timeout=1.8)
+        raw = _run_upsc_cmd([upsc_bin, "-l"], timeout=1.8) or _run_upsc_cmd([upsc_bin, "-L"], timeout=1.8)
     else:
-        raw = _run_cmd([upsc_bin, "-h", nut_host, "-p", str(port), "-l"], timeout=1.8) or _run_cmd(
+        raw = _run_upsc_cmd([upsc_bin, "-h", nut_host, "-p", str(port), "-l"], timeout=1.8) or _run_upsc_cmd(
             [upsc_bin, "-h", nut_host, "-p", str(port), "-L"], timeout=1.8
         )
+    if _upsc_text_is_error_or_help(raw):
+        return []
     names: List[str] = []
     for line in (raw or "").splitlines():
         s = line.strip()
         if not s or s.lower().startswith("error"):
             continue
-        names.append(s)
+        if _upsc_is_plausible_device_name(s):
+            names.append(s)
     return names
 
 
 def _collect_ups_info() -> Dict[str, Any]:
+    if not _nut_ups_conf_is_mounted():
+        return {"present": False}
+
     upsc_bin = _resolve_cmd("upsc")
     port = _NUT_UPSD_DEFAULT_PORT
 
@@ -702,10 +856,8 @@ def _collect_ups_info() -> Dict[str, Any]:
         nutpfx = ["-h", chosen_host, "-p", str(port)]
 
     dev = names[0]
-    out = _run_cmd([upsc_bin] + nutpfx + [dev], timeout=2.0)
-    if not out or (
-        out.splitlines()[0].strip().lower().startswith("error:") if out else False
-    ):
+    out = _run_upsc_cmd([upsc_bin] + nutpfx + [dev], timeout=2.0)
+    if _upsc_text_is_error_or_help(out):
         return {"present": False}
 
     kv: Dict[str, str] = {}
@@ -715,20 +867,32 @@ def _collect_ups_info() -> Dict[str, Any]:
         k, v = line.split(":", 1)
         kv[k.strip().lower()] = v.strip()
 
+    if not _upsc_kv_has_ups_vars(kv):
+        return {"present": False}
+
     def _pick_key(keys: List[str]) -> str:
         for k in keys:
             if kv.get(k):
                 return str(kv.get(k))
         for k in keys:
-            one = _run_cmd([upsc_bin] + nutpfx + [dev, k], timeout=2.0)
-            if one and "Error:" not in one:
+            one = _run_upsc_cmd([upsc_bin] + nutpfx + [dev, k], timeout=2.0)
+            if one and not _upsc_text_is_error_or_help(one):
                 return one.strip().splitlines()[-1].strip()
         return "--"
 
-    power_status = _parse_ups_status_text(_pick_key(["ups.status", "input.status", "output.status"]))
+    power_raw = _pick_key(["ups.status", "input.status", "output.status"])
+    if power_raw == "--" or _upsc_text_is_error_or_help(power_raw):
+        return {"present": False}
+
+    power_status = _parse_ups_status_text(power_raw)
+    conf_sections = _parse_nut_ups_conf_sections(_read_nut_ups_conf_text())
+    display_name = _ups_device_display_name(dev, conf_sections, kv, upsc_bin, nutpfx)
+    if _upsc_text_is_error_or_help(display_name):
+        return {"present": False}
     return {
         "present": True,
-        "device": dev,
+        "device": display_name,
+        "device_id": dev,
         "power_status": power_status,
     }
 
@@ -1539,12 +1703,7 @@ def _patrol_mounts_to_probe_for_physical() -> List[str]:
     ordered: List[str] = []
     seen: Set[str] = set()
     for p in (
-        "/vol1",
-        "/vol2",
-        "/vol3",
-        "/vol4",
-        "/vol5",
-        "/vol6",
+        *_patrol_visible_fn_vol_mount_roots(),
         "/volume1",
         "/volume2",
         "/volume3",
@@ -1734,9 +1893,9 @@ def _patrol_free_gb_via_findmnt_for_disk(dev_base: str) -> str:
 
 
 def _patrol_scan_vol_space_by_physical() -> Dict[str, Dict[str, str]]:
-    """正向扫描 /vol1–/vol6：每卷的 df/用量映射到底层整盘（小写），含剩余与文件系统总容量。"""
+    """正向扫描容器内可见的 /volN：每卷的 df/用量映射到底层整盘，含剩余与文件系统总容量。"""
     out: Dict[str, Dict[str, float]] = {}
-    for vol in ("/vol1", "/vol2", "/vol3", "/vol4", "/vol5", "/vol6"):
+    for vol in _patrol_visible_fn_vol_mount_roots():
         try:
             if not Path(vol).exists():
                 continue
@@ -2096,22 +2255,51 @@ def _patrol_vol_row_health_temp(dev_open: str, physicals: List[str]) -> Tuple[st
     return health, temp, health_reason, temp_reason
 
 
-def _patrol_fn_compose_vol_mounts_ready() -> bool:
-    """compose 需挂载 /vol1、/vol2、/vol3（只读）后进程内才可见；缺一不采集/不展示硬盘状态。"""
-    for p in ("/vol1", "/vol2", "/vol3"):
+def _patrol_vol_mount_sort_key(mpath: str) -> int:
+    m = re.search(r"/vol(\d+)$", str(mpath).strip(), re.I)
+    return int(m.group(1)) if m else 0
+
+
+def _patrol_discover_fn_vol_mount_root_paths() -> List[str]:
+    """扫描容器根目录下所有 /volN（N 为任意正整数，不限于 vol1～vol6）。"""
+    found: List[str] = []
+    try:
+        for entry in Path("/").iterdir():
+            if not entry.is_dir():
+                continue
+            if re.fullmatch(r"vol\d+", entry.name, re.I):
+                found.append(f"/{entry.name}")
+    except OSError:
+        pass
+    return sorted(found, key=_patrol_vol_mount_sort_key)
+
+
+def _patrol_visible_fn_vol_mount_roots() -> List[str]:
+    """容器内可见的飞牛存储卷挂载点（compose 挂几个算几个）。"""
+    visible: List[str] = []
+    for p in _patrol_discover_fn_vol_mount_root_paths():
         try:
-            if not Path(p).is_dir():
-                return False
+            if Path(p).is_dir():
+                visible.append(p)
         except OSError:
-            return False
-    return True
+            continue
+    return visible
+
+
+def _patrol_has_any_fn_vol_mount_in_container() -> bool:
+    return bool(_patrol_visible_fn_vol_mount_roots())
+
+
+def _patrol_fn_compose_vol_mounts_ready() -> bool:
+    """兼容旧名：任一 /volN 在容器内可见即视为已挂载存储卷。"""
+    return _patrol_has_any_fn_vol_mount_in_container()
 
 
 def _collect_disk_items() -> List[Dict[str, str]]:
     items: List[Dict[str, str]] = []
     if not psutil:
         return items
-    if not _patrol_fn_compose_vol_mounts_ready():
+    if not _patrol_has_any_fn_vol_mount_in_container():
         return items
     mappings = _patrol_collect_disk_partitions()
 
@@ -2141,11 +2329,7 @@ def _collect_disk_items() -> List[Dict[str, str]]:
             if mk and mk not in by_mount:
                 by_mount[mk] = d
 
-        def _vol_sort_key(mpath: str) -> int:
-            mo = re.search(r"/vol(\d+)$", str(mpath).strip(), re.I)
-            return int(mo.group(1)) if mo else 0
-
-        mounts_sorted = sorted(by_mount.keys(), key=_vol_sort_key)
+        mounts_sorted = sorted(by_mount.keys(), key=_patrol_vol_mount_sort_key)
         for mnt in mounts_sorted:
             dev_raw = by_mount[mnt]
             dev_open = _patrol_block_dev_for_inspection(dev_raw)
@@ -2418,7 +2602,7 @@ def _collect_patrol_payload(_cfg: Any, _state: Dict[str, Any]) -> Dict[str, Any]
         missing.append("CPU温度")
     if str(mem_pct) == "—":
         missing.append("内存使用率")
-    if not disks and _patrol_fn_compose_vol_mounts_ready():
+    if not disks and _patrol_has_any_fn_vol_mount_in_container():
         missing.append("硬盘状态")
     if disks:
         if all(str(d.get("temp_c") or "--") in {"--", "—"} for d in disks):

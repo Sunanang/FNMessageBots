@@ -53,10 +53,6 @@ EVENT_CATEGORIES = [
         "PHOTO_DEVICE_REGISTERED",
         "FACE_RECOGNITION_UPDATED",
     ]),
-    # 任务计划三类不在 DEFAULT_SELECTED_EVENTS 中，安装/重置默认后需用户在界面手动勾选
-    ("scheduler", "任务计划", [
-        "SCHEDULER_TASK_SUCCESS", "SCHEDULER_TASK_FAILED", "SCHEDULER_TASK_CONDITION_FAILED",
-    ]),
     ("docker", "Docker 容器", [
         "DOCKER_CONTAINER_CREATE",
         "DOCKER_CONTAINER_START",
@@ -68,6 +64,14 @@ EVENT_CATEGORIES = [
         "DOCKER_CONTAINER_UNPAUSE",
         "DOCKER_CONTAINER_RESTART",
         "DOCKER_CONTAINER_DESTROY",
+    ]),
+]
+
+# 三方应用事件（独立配置区；当前仅任务计划）
+THIRD_PARTY_EVENT_CATEGORIES = [
+    # 任务计划三类不在 DEFAULT_SELECTED_EVENTS 中，安装/重置默认后需用户在界面手动勾选
+    ("scheduler", "任务计划", [
+        "SCHEDULER_TASK_SUCCESS", "SCHEDULER_TASK_FAILED", "SCHEDULER_TASK_CONDITION_FAILED",
     ]),
 ]
 
@@ -184,34 +188,19 @@ def sort_vm_event_ids(event_ids: List[str]) -> List[str]:
     return preferred + rest
 
 
-def build_events_for_ui(
-    logger_db_path: str,
-    backup_db_path: str,
-    trim_media_db_path: str,
-    trim_activity_db_path: str,
-    photo_db_path: str,
-    scheduler_db_path: str = "",
-    titles: Dict[str, str] = None,
-    notes: Dict[str, str] = None,
-) -> Tuple[List[Dict[str, Any]], set, List[str]]:
-    """构建配置页事件分类与可选事件集合。"""
-    if titles is None:
-        titles = {}
-    if notes is None:
-        notes = {}
-    discovered_vm_event_ids = discover_vm_event_ids(logger_db_path)
-    if not discovered_vm_event_ids:
-        discovered_vm_event_ids = list(VM_EVENT_PREFERRED_ORDER)
-    discovered_vm_event_ids = sort_vm_event_ids(discovered_vm_event_ids)
-
-    valid_event_ids = set(VALID_EVENT_IDS) | set(discovered_vm_event_ids)
-
+def _build_events_by_category_list(
+    category_defs: List[Tuple[str, str, List[str]]],
+    discovered_vm_event_ids: List[str],
+    titles: Dict[str, str],
+    notes: Dict[str, str],
+) -> List[Dict[str, Any]]:
     events_by_category: List[Dict[str, Any]] = []
-    for cat_id, cat_name, event_ids in EVENT_CATEGORIES:
+    for cat_id, cat_name, event_ids in category_defs:
+        ids = list(event_ids)
         if cat_id == "vm":
-            event_ids = discovered_vm_event_ids
+            ids = discovered_vm_event_ids
         events = []
-        for key in event_ids:
+        for key in ids:
             if key in EVENT_IDS_HIDDEN_IN_UI:
                 continue
             raw_title = titles.get(key)
@@ -228,4 +217,35 @@ def build_events_for_ui(
             })
         if events:
             events_by_category.append({"id": cat_id, "name": cat_name, "events": events})
-    return events_by_category, valid_event_ids, discovered_vm_event_ids
+    return events_by_category
+
+
+def build_events_for_ui(
+    logger_db_path: str,
+    backup_db_path: str,
+    trim_media_db_path: str,
+    trim_activity_db_path: str,
+    photo_db_path: str,
+    scheduler_db_path: str = "",
+    titles: Dict[str, str] = None,
+    notes: Dict[str, str] = None,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], set, List[str]]:
+    """构建配置页事件分类（系统事件 + 三方应用事件）与可选事件集合。"""
+    if titles is None:
+        titles = {}
+    if notes is None:
+        notes = {}
+    discovered_vm_event_ids = discover_vm_event_ids(logger_db_path)
+    if not discovered_vm_event_ids:
+        discovered_vm_event_ids = list(VM_EVENT_PREFERRED_ORDER)
+    discovered_vm_event_ids = sort_vm_event_ids(discovered_vm_event_ids)
+
+    valid_event_ids = set(VALID_EVENT_IDS) | set(discovered_vm_event_ids)
+
+    events_by_category = _build_events_by_category_list(
+        EVENT_CATEGORIES, discovered_vm_event_ids, titles, notes
+    )
+    third_party_events_by_category = _build_events_by_category_list(
+        THIRD_PARTY_EVENT_CATEGORIES, discovered_vm_event_ids, titles, notes
+    )
+    return events_by_category, third_party_events_by_category, valid_event_ids, discovered_vm_event_ids

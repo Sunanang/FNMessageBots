@@ -23,5 +23,7 @@ services:
       - ./config:/app/config:rw
       # 可选：只读挂载宿主的 dpkg status，巡检可解析 trim 版本（与在 NAS 上 dpkg -s trim 一致）
       # - /var/lib/dpkg/status:/host/dpkg/status:ro
+      # 可选：UPS 巡检（未挂载则不推送 UPS 段；挂载后读 product 如 Smart-UPS）
+      # - /etc/nut/ups.conf:/etc/nut/ups.conf:ro
     environment:
       - TZ=Asia/Shanghai
