@@ -810,6 +810,13 @@
       </div>
 
       <div class="section">
+        <div class="section-title">
+          <span>三方应用事件 <small>非NAS系统相关的三方类型相关事件</small></span>
+        </div>
+        <div class="events-by-category" id="third-party-events-container"></div>
+      </div>
+
+      <div class="section">
         <div class="channels-header">
           <div class="section-title">
             <span>推送渠道 <small>支持为同一渠道配置多个 Webhook</small></span>
@@ -989,6 +996,7 @@
     }
 
     const eventsContainer = document.getElementById("events-container");
+    const thirdPartyEventsContainer = document.getElementById("third-party-events-container");
     const channelsBody = document.getElementById("channels-body");
     const addChannelBtn = document.getElementById("add-channel-btn");
     const saveBtn = document.getElementById("save-btn");
@@ -1434,6 +1442,82 @@
       channelsBody.appendChild(tr);
     }
 
+    function renderEventCategories(container, categories, selected) {
+      if (!container) return;
+      container.innerHTML = "";
+      for (const cat of categories || []) {
+        const catBlock = document.createElement("div");
+        catBlock.className = "event-category";
+
+        const catHeader = document.createElement("div");
+        catHeader.className = "event-category-title";
+        const catTitleSpan = document.createElement("span");
+        catTitleSpan.textContent = cat.name || "";
+        catHeader.appendChild(catTitleSpan);
+
+        const catToggleLabel = document.createElement("label");
+        catToggleLabel.style.fontSize = "13px";
+        catToggleLabel.style.cursor = "pointer";
+        catToggleLabel.style.flexShrink = "0";
+        const catToggle = document.createElement("input");
+        catToggle.type = "checkbox";
+        catToggle.style.marginRight = "4px";
+        catToggleLabel.appendChild(catToggle);
+        const catToggleText = document.createElement("span");
+        catToggleText.textContent = "全选";
+        catToggleLabel.appendChild(catToggleText);
+        catHeader.appendChild(catToggleLabel);
+
+        catBlock.appendChild(catHeader);
+
+        const grid = document.createElement("div");
+        grid.className = "events-grid";
+
+        function updateCatToggle() {
+          const boxes = grid.querySelectorAll("input[type=checkbox]");
+          if (!boxes.length) {
+            catToggle.checked = false;
+            return;
+          }
+          catToggle.checked = Array.from(boxes).every(b => b.checked);
+        }
+
+        for (const ev of cat.events || []) {
+          const div = document.createElement("div");
+          div.className = "event-item";
+          const cb = document.createElement("input");
+          cb.type = "checkbox";
+          cb.value = ev.id;
+          if (selected.has(ev.id)) cb.checked = true;
+          cb.addEventListener("change", () => updateCatToggle());
+
+          const label = document.createElement("div");
+          const title = document.createElement("span");
+          title.textContent = ev.title || ev.id;
+          label.appendChild(title);
+          if (ev.note) {
+            const helper = document.createElement("div");
+            helper.className = "field-helper";
+            helper.textContent = ev.note;
+            label.appendChild(helper);
+          }
+          div.appendChild(cb);
+          div.appendChild(label);
+          grid.appendChild(div);
+        }
+
+        catToggle.addEventListener("change", () => {
+          const boxes = grid.querySelectorAll("input[type=checkbox]");
+          const target = catToggle.checked;
+          boxes.forEach(b => { b.checked = target; });
+        });
+
+        updateCatToggle();
+        catBlock.appendChild(grid);
+        container.appendChild(catBlock);
+      }
+    }
+
     async function loadConfig() {
       try {
         const res = await fetch("/api/config", fetchOpts);
@@ -1457,87 +1541,9 @@
         document.getElementById("input-bark-icon").value =
           typeof data.bark_icon === "string" ? data.bark_icon : "";
 
-        // 按分类渲染事件
-        eventsContainer.innerHTML = "";
         const selected = new Set(data.selected_events || []);
-        const categories = data.events_by_category || [];
-        for (const cat of categories) {
-          const catBlock = document.createElement("div");
-          catBlock.className = "event-category";
-
-          // 分类标题 + 全选
-          const catHeader = document.createElement("div");
-          catHeader.className = "event-category-title";
-          const catTitleSpan = document.createElement("span");
-          catTitleSpan.textContent = cat.name || "";
-          catHeader.appendChild(catTitleSpan);
-
-          const catToggleLabel = document.createElement("label");
-          catToggleLabel.style.fontSize = "13px";
-          catToggleLabel.style.cursor = "pointer";
-          catToggleLabel.style.flexShrink = "0";
-          const catToggle = document.createElement("input");
-          catToggle.type = "checkbox";
-          catToggle.style.marginRight = "4px";
-          catToggleLabel.appendChild(catToggle);
-          const catToggleText = document.createElement("span");
-          catToggleText.textContent = "全选";
-          catToggleLabel.appendChild(catToggleText);
-          catHeader.appendChild(catToggleLabel);
-
-          catBlock.appendChild(catHeader);
-
-          const grid = document.createElement("div");
-          grid.className = "events-grid";
-
-          function updateCatToggle() {
-            const boxes = grid.querySelectorAll("input[type=checkbox]");
-            if (!boxes.length) {
-              catToggle.checked = false;
-              return;
-            }
-            catToggle.checked = Array.from(boxes).every(b => b.checked);
-          }
-
-          for (const ev of cat.events || []) {
-            const div = document.createElement("div");
-            div.className = "event-item";
-            const cb = document.createElement("input");
-            cb.type = "checkbox";
-            cb.value = ev.id;
-            if (selected.has(ev.id)) cb.checked = true;
-
-            cb.addEventListener("change", () => {
-              updateCatToggle();
-            });
-
-            const label = document.createElement("div");
-            const title = document.createElement("span");
-            title.textContent = ev.title || ev.id;
-            label.appendChild(title);
-            if (ev.note) {
-              const helper = document.createElement("div");
-              helper.className = "field-helper";
-              helper.textContent = ev.note;
-              label.appendChild(helper);
-            }
-            div.appendChild(cb);
-            div.appendChild(label);
-            grid.appendChild(div);
-          }
-
-          // 分类全选/反选：用 change 事件，让复选框先自然切换，再根据其新状态同步子项
-          catToggle.addEventListener("change", () => {
-            const boxes = grid.querySelectorAll("input[type=checkbox]");
-            const target = catToggle.checked;
-            boxes.forEach(b => { b.checked = target; });
-          });
-
-          updateCatToggle();
-
-          catBlock.appendChild(grid);
-          eventsContainer.appendChild(catBlock);
-        }
+        renderEventCategories(eventsContainer, data.events_by_category || [], selected);
+        renderEventCategories(thirdPartyEventsContainer, data.third_party_events_by_category || [], selected);
 
         // 渲染渠道
         channelsBody.innerHTML = "";
@@ -1618,8 +1624,11 @@
     saveBtn.addEventListener("click", async () => {
       setStatus(false, "");
       const events = [];
-      eventsContainer.querySelectorAll("input[type=checkbox]").forEach(cb => {
-        if (cb.checked) events.push(cb.value);
+      [eventsContainer, thirdPartyEventsContainer].forEach(el => {
+        if (!el) return;
+        el.querySelectorAll("input[type=checkbox]").forEach(cb => {
+          if (cb.checked) events.push(cb.value);
+        });
       });
 
       const channels = [];

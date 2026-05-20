@@ -60,6 +60,8 @@ _SINCE_MAX_LOOKBACK_SECONDS = 86400
 # Docker 守护进程不可用时写入；下次成功连接 /events 前若存在此文件，则 since 取当前时刻，避免回放停机前积压事件
 DOCKER_EVENTS_SKIP_HISTORY_FLAG = "docker_events_poller_skip_history.flag"
 
+_DOCKER_BATCH_FLUSH_SIZE = 40
+
 
 def touch_docker_events_skip_history_flag(cursor_dir: str | Path) -> None:
     """标记「Docker 曾不可用」：下次订阅 events 时不要用磁盘上的旧 since 回放历史。"""
@@ -129,8 +131,9 @@ class DockerEventsPoller:
         self._start_cutoff_ts: int = 0
         self._start_cutoff_ns: int = 0
         self.logger = logging.getLogger(__name__)
+        self._docker_batch_buf: List[Dict[str, Any]] = []
         self.poll_batch_summary_enabled: bool = False
-        self.summary_batch_enqueue: Optional[Callable[[List[Dict[str, Any]]], None]] = None
+        self.poller_batch_dispatcher: Optional[Callable[[List[Dict[str, Any]]], bool]] = None
 
     def add_handler(self, event_type: str, handler: Callable) -> None:
         self.event_handlers[event_type] = handler
@@ -161,7 +164,8 @@ class DockerEventsPoller:
         enqueue: Optional[Callable[[List[Dict[str, Any]]], None]],
     ) -> None:
         self.poll_batch_summary_enabled = bool(enabled)
-        self.summary_batch_enqueue = enqueue
+        # 与当前批量分发实现字段保持一致
+        self.poller_batch_dispatcher = enqueue
 
     def _load_dedup(self) -> None:
         try:
@@ -363,6 +367,38 @@ class DockerEventsPoller:
             "dedup_key": cursor_key,
         }
 
+    def _flush_docker_batch(self) -> None:
+        buf = self._docker_batch_buf
+        self._docker_batch_buf = []
+        if not buf:
+            return
+        disp = getattr(self, "poller_batch_dispatcher", None)
+        if bool(getattr(self, "poll_batch_summary_enabled", False)) and disp is not None:
+            try:
+                items = [
+                    {"event_type": x["event_type"], "event_data": x["event_data"], "entry": x["entry"]}
+                    for x in buf
+                ]
+                disp(items)
+            except Exception as e:
+                self.logger.error("Docker 批量推送失败: %s", e, exc_info=True)
+                self._docker_batch_buf = buf + self._docker_batch_buf
+                return
+            now = int(time.time())
+            for x in buf:
+                self._dedup_seen[x["dedup_key"]] = now
+            return
+        for x in buf:
+            et = x["event_type"]
+            handler = self.event_handlers.get(et)
+            if not handler:
+                continue
+            try:
+                handler(x["event_data"], x["entry"])
+                self._dedup_seen[x["dedup_key"]] = int(time.time())
+            except Exception as e:
+                self.logger.error("Docker 事件逐条处理失败 %s: %s", et, e, exc_info=True)
+
     def _handle_one(self, ev: Dict[str, Any]) -> None:
         parsed = self._event_to_internal(ev)
         if not parsed:
@@ -376,26 +412,23 @@ class DockerEventsPoller:
         handler = self.event_handlers.get(et)
         if not handler:
             return
+        use_batch = bool(getattr(self, "poll_batch_summary_enabled", False)) and getattr(
+            self, "poller_batch_dispatcher", None
+        ) is not None
+        if use_batch:
+            self._docker_batch_buf.append(
+                {
+                    "event_type": et,
+                    "event_data": parsed["event_data"],
+                    "entry": parsed["entry"],
+                    "dedup_key": dk,
+                }
+            )
+            if len(self._docker_batch_buf) >= _DOCKER_BATCH_FLUSH_SIZE:
+                self._flush_docker_batch()
+            return
         try:
-            ed = parsed["event_data"]
-            entry = parsed["entry"]
-            if self.poll_batch_summary_enabled and self.summary_batch_enqueue:
-                rid = abs(hash(dk)) % (2**31 - 1)
-                self.summary_batch_enqueue(
-                    [
-                        {
-                            "row_id": rid,
-                            "db_event_id": et,
-                            "event_type": et,
-                            "event_data": ed,
-                            "entry": entry,
-                            "handler": handler,
-                            "source": "docker",
-                        }
-                    ]
-                )
-            else:
-                handler(ed, entry)
+            handler(parsed["event_data"], parsed["entry"])
             self._dedup_seen[dk] = int(time.time())
         except Exception as e:
             self.logger.error("处理 Docker 事件失败 %s: %s", et, e, exc_info=True)
@@ -460,6 +493,7 @@ class DockerEventsPoller:
                 if self.running:
                     self.logger.warning("Docker events 流异常，将重试: %s", e, exc_info=True)
             finally:
+                self._flush_docker_batch()
                 self._flush_since_cursor()
                 if self._client:
                     try:

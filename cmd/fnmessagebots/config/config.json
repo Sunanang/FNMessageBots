@@ -3,7 +3,6 @@
   "dingtalk_webhook_url": "",
   "feishu_webhook_url": "",
   "bark_url": "",
-  "bark_icon": "",
   "magic_push_params": "",
   "smtp_params": "",
   "monitor_events": [
@@ -26,10 +25,7 @@
     "UPS_ONBATT_LOWBATT",
     "UPS_ONLINE",
     "APP_CRASH",
-    "APP_UPDATE_FAILED",
-    "BACKUP_TASK_SUCCESS",
-    "BACKUP_TASK_FAILED",
-    "BACKUP_TASK_PARTIAL_SUCCESS"
+    "APP_UPDATE_FAILED"
   ],
   "log_level": "INFO",
   "log_dir": "./data/logs",
@@ -51,7 +47,6 @@
   "trim_media_db_path": "/usr/local/apps/@appdata/trim.media/database/trimmedia.db",
   "trim_activity_db_path": "/usr/local/apps/@appdata/trim.media/database/trimactivity.db",
   "photo_db_path": "/usr/local/apps/@appdata/trim.photos/db/photo.db",
-  "scheduler_db_path": "/var/apps/fn-scheduler/var/scheduler.db",
   "logger_poll_interval": 5,
   "poll_batch_summary_enabled": false,
   "max_log_age": 7,
@@ -61,9 +56,9 @@
   "dnd_end_time": "07:00",
   "pushplus_params": "",
   "user_display_map": {},
-  "web_password_enabled": true,
-  "title_prefix": "飞牛NAS",
   "minimal_push_enabled": false,
+  "web_password_enabled": false,
+  "title_prefix": "飞牛NAS",
   "nas_patrol_enabled": false,
-  "nas_patrol_interval_minutes": 720
+  "nas_patrol_interval_minutes": 360
 }

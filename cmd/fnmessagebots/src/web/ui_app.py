@@ -472,7 +472,7 @@ def create_app(on_config_saved=None) -> Flask:
             monitor_events = DEFAULT_SELECTED_EVENTS
 
         # 与保存接口一致：剔除已下线的事件 ID（如历史配置中的 LISTEN_PORT_INBOUND），避免前端勾选状态与可选列表不一致
-        events_by_category, valid_event_ids, _ = _events_catalog_bundle()
+        events_by_category, third_party_events_by_category, valid_event_ids, _ = _events_catalog_bundle()
         if isinstance(monitor_events, list):
             monitor_events = [e for e in monitor_events if e in valid_event_ids]
         if not monitor_events:
@@ -505,6 +505,7 @@ def create_app(on_config_saved=None) -> Flask:
             "subtitle": "飞牛日志消息推送机器人",
             "version": "2.3.0",
             "events_by_category": events_by_category,
+            "third_party_events_by_category": third_party_events_by_category,
             "selected_events": monitor_events,
             "channels": channels,
             "title_prefix": _title_prefix_from_dict(raw),
@@ -528,7 +529,7 @@ def create_app(on_config_saved=None) -> Flask:
     def save_config():
         payload = request.get_json(force=True, silent=True) or {}
 
-        _, valid_event_ids, _ = _events_catalog_bundle()
+        _, _, valid_event_ids, _ = _events_catalog_bundle()
         events = payload.get("events") or []
         # 只保留后端认可的事件 ID，避免写入非法值导致热加载或重启异常
         events = [e for e in events if e in valid_event_ids]
