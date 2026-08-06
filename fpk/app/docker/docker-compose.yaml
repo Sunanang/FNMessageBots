@@ -1,0 +1,41 @@
+services:
+  fn-message-bot:
+    image: sunanang/fn-message-bots:2.4.0
+    container_name: fn-message-bot
+    restart: unless-stopped
+    ports:
+      - "${TRIM_SERVICE_PORT}:18080"
+    volumes:
+      # 应用数据
+      - ${TRIM_PKGVAR}/config:/app/config:rw
+      - ${TRIM_PKGVAR}/data/logs:/app/data/logs:rw
+      - ${TRIM_PKGVAR}/data/cursor:/app/data/cursor:rw
+      # 主事件 + 常用业务库 / Docker / 常见卷（须写死在包内；飞牛侧运行时改 compose 不可靠）
+      - /usr/trim/var/eventlogger_service:/usr/trim/var/eventlogger_service:ro
+      - /usr/trim/var/backup_service:/usr/trim/var/backup_service:ro
+      - /usr/local/apps/@appdata/trim.media/database:/usr/local/apps/@appdata/trim.media/database:ro
+      - /usr/local/apps/@appdata/trim.photos/db:/usr/local/apps/@appdata/trim.photos/db:ro
+      - /var/apps/fn-scheduler/var:/var/apps/fn-scheduler/var:ro
+      - /usr/local/apps/@appdata/fn-scheduler:/usr/local/apps/@appdata/fn-scheduler:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /vol1:/vol1:ro
+      - /vol2:/vol2:ro
+      - /vol3:/vol3:ro
+      - /vol4:/vol4:ro
+      # 假 /volN（Docker 为空路径建的目录）由巡检代码按 @appdata 等特征过滤，不推送
+      # 挂目录而非单文件：宿主无 /etc/nut 时 Docker 建空目录，容器仍可启动；无 ups.conf 则巡检跳过 UPS
+      - /etc/nut:/etc/nut:ro
+      - /var/lib/dpkg/status:/host/dpkg/status:ro
+      # 宿主主机名（巡检读取 /host/etc/hostname，避免显示容器 ID）
+      - /etc/hostname:/host/etc/hostname:ro
+      # 仅追加极少见项（API socket、/vol5+）；主挂载勿再指望运行时探测
+      # FNMB_OPTIONAL_VOLUMES_BEGIN
+      # FNMB_OPTIONAL_VOLUMES_END
+    environment:
+      - TZ=Asia/Shanghai
+      - APP_HOME=/app
+      - UI_PORT=18080
+      - TRIM_APPNAME=${TRIM_APPNAME:-FnMessageBot}
+      - TRIM_API_TOKEN=${TRIM_API_TOKEN:-}
+      - TRIM_SYS_VERSION=${TRIM_SYS_VERSION:-}
+      - TRIM_OPEN_GATEWAY_SOCKET=/var/run/trim_open_gateway_apiscope.socket

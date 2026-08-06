@@ -1,4 +1,6 @@
-FROM python:3.11-slim
+# 可通过 --build-arg BASE_IMAGE=... 使用国内镜像源，避免直连 Docker Hub 超时
+ARG BASE_IMAGE=python:3.11-slim
+FROM ${BASE_IMAGE}
 
 # 设置环境变量
 ENV PYTHONUNBUFFERED=1 \

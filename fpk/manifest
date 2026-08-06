@@ -1,0 +1,14 @@
+appname               = FnMessageBot
+version               = 2.4.0
+display_name          = 日志推送
+desc                  = 飞牛日志监控机器人，专注于实时监控系统事件，精准捕捉关键动态，确保异常与重要信息不遗漏。支持邮箱、企业微信、钉钉、飞书、Bark、PushPlus、魔法推送 等多种渠道灵活推送通知，让系统消息实时触达、一目了然，帮助您随时随地掌握系统运行状态。<br /> 本版本以 Docker 容器运行；若安装或拉取镜像失败，请前往飞牛社区按教程安装 Docker 版<a href="https://club.fnnas.com/forum.php?mod=viewthread&tid=57252" target="_blank">FnMessageBot</a>
+changelog             = 应用更新日志<br />1.Docker 运行时；2.备份/影视/相册/任务计划/docker.sock 等常用路径写死在 compose；额外 /volN 与 ups.conf 启动时探测；3.镜像 2.4.0；端口 18230。<br />
+platform              = all
+source                = thirdparty
+maintainer            = Lando
+distributor           = Lando
+desktop_uidir         = ui
+desktop_applaunchname = FnMessageBot.Application
+service_port          = 18230
+checkport             = false
+ctl_stop              = true

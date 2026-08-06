@@ -21,9 +21,17 @@ services:
       # group_add:
       #   - "999"
       - ./config:/app/config:rw
-      # 可选：只读挂载宿主的 dpkg status，巡检可解析 trim 版本（与在 NAS 上 dpkg -s trim 一致）
+      # 可选：飞牛开放 API 网关（商店/FPK 环境；用于巡检读取飞牛版本）
+      # - /var/run/trim_open_gateway_apiscope.socket:/var/run/trim_open_gateway_apiscope.socket
+      # 可选：只读挂载宿主的 dpkg status，巡检可解析 trim 版本（API 不可用时的回退）
       # - /var/lib/dpkg/status:/host/dpkg/status:ro
-      # 可选：UPS 巡检（未挂载则不推送 UPS 段；挂载后读 product 如 Smart-UPS）
-      # - /etc/nut/ups.conf:/etc/nut/ups.conf:ro
+      # 可选：宿主主机名（巡检用，避免显示容器 ID）
+      # - /etc/hostname:/host/etc/hostname:ro
+      # 可选：UPS 巡检（挂 /etc/nut 目录；无 ups.conf 时跳过 UPS，不导致启动失败）
+      # - /etc/nut:/etc/nut:ro
     environment:
       - TZ=Asia/Shanghai
+      # 飞牛开放 API（FPK 安装时由系统注入；手装可按需填写）
+      # - TRIM_API_TOKEN=
+      # - TRIM_APPNAME=FnMessageBot
+      # - TRIM_SYS_VERSION=

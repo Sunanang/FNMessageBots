@@ -19,7 +19,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 import ipaddress
-import getpass
 import urllib.request
 
 try:
@@ -36,7 +35,7 @@ RETRY_BACKOFF_MAX_SEC = 3600
 
 # NUT upsd 默认端口（仅从系统自动探测连接，不提供应用层配置项）
 _NUT_UPSD_DEFAULT_PORT = 3493
-# 巡检 UPS 仅当 compose 挂载该文件时采集（/etc/nut/ups.conf:/etc/nut/ups.conf:ro）
+# 巡检 UPS：compose 挂载 /etc/nut 目录；仅当其中存在可读 ups.conf 时才采集
 _NUT_UPS_CONF_MOUNT_PATH = "/etc/nut/ups.conf"
 
 # psutil disk_partitions(all=True) 时按 fstype 排除的伪/容器文件系统（路径上仍会再挡 Docker）
@@ -614,6 +613,16 @@ def _read_hostname(logger_db_hostname: str = "") -> str:
 
 
 def _read_fnos_version(logger_db_fnos: str = "") -> str:
+    """飞牛版本：优先开放 API / TRIM_SYS_VERSION，再回退本地探测（手装 Docker 等环境）。"""
+    try:
+        from utils.fnos_platform import resolve_fnos_version_via_api
+
+        via_api = resolve_fnos_version_via_api()
+        if via_api:
+            return via_api[:160]
+    except Exception:
+        pass
+
     vlog = (logger_db_fnos or "").strip()
     if vlog:
         return vlog[:160]
@@ -1541,6 +1550,38 @@ def _patrol_is_fn_vol_mount(mnt: str) -> bool:
     return bool(re.fullmatch(r"/vol\d+", str(mnt or "").strip(), re.I))
 
 
+# compose 预挂不存在的 /volN 时，Docker 会在宿主建空目录再 bind；内容上不像真实存储空间
+_FN_VOL_REAL_NAME_MARKERS = frozenset(
+    {
+        "@appdata",
+        "@homes",
+        "@home",
+        "@share",
+        "@shares",
+        "@thumbnail",
+        "@tmp",
+        "@database",
+        "homes",
+        "Users",
+    }
+)
+
+
+def _patrol_fn_vol_looks_like_real_storage(mnt: str) -> bool:
+    """真实飞牛存储卷应含 @appdata 等目录；排除 Docker 为缺失 /volN 创建的空/假 bind。"""
+    p = Path(str(mnt or "").strip())
+    try:
+        if not p.is_dir():
+            return False
+        for entry in p.iterdir():
+            name = entry.name
+            if name in _FN_VOL_REAL_NAME_MARKERS or name.startswith("@"):
+                return True
+        return False
+    except OSError:
+        return False
+
+
 def _patrol_findmnt_block_mounts() -> List[Tuple[str, str]]:
     """用 findmnt 补全 psutil 未列出的块设备挂载（Linux 飞牛宿主机常见）。"""
     fm = _resolve_cmd("findmnt")
@@ -2275,11 +2316,11 @@ def _patrol_discover_fn_vol_mount_root_paths() -> List[str]:
 
 
 def _patrol_visible_fn_vol_mount_roots() -> List[str]:
-    """容器内可见的飞牛存储卷挂载点（compose 挂几个算几个）。"""
+    """容器内可见且看起来像真实存储的 /volN（排除 Docker 空 bind 伪卷）。"""
     visible: List[str] = []
     for p in _patrol_discover_fn_vol_mount_root_paths():
         try:
-            if Path(p).is_dir():
+            if Path(p).is_dir() and _patrol_fn_vol_looks_like_real_storage(p):
                 visible.append(p)
         except OSError:
             continue
@@ -2308,6 +2349,8 @@ def _collect_disk_items() -> List[Dict[str, str]]:
         if not _patrol_is_fn_vol_mount(mount):
             continue
         if _patrol_mount_is_file_bind_noise(mount):
+            continue
+        if not _patrol_fn_vol_looks_like_real_storage(mount):
             continue
         dp = str(dev_path or "").strip()
         if not dp.startswith("/dev/"):
@@ -2570,7 +2613,6 @@ def _collect_patrol_payload(_cfg: Any, _state: Dict[str, Any]) -> Dict[str, Any]
     hostname = _read_hostname(log_hint_h)
     lan_ip = _pick_lan_ip()
     wan_ip = _pick_wan_ip()
-    user_name = getpass.getuser() or "--"
     system_version = _read_system_version()
     fnos_version = _read_fnos_version(log_hint_v)
     has_update = _read_update_status()
@@ -2586,8 +2628,6 @@ def _collect_patrol_payload(_cfg: Any, _state: Dict[str, Any]) -> Dict[str, Any]
         missing.append("内网IP")
     if wan_ip == "--":
         missing.append("外网IP")
-    if user_name == "--":
-        missing.append("执行用户")
     if system_version == "--":
         missing.append("系统版本")
     if fnos_version == "--":
@@ -2614,7 +2654,6 @@ def _collect_patrol_payload(_cfg: Any, _state: Dict[str, Any]) -> Dict[str, Any]
         "hostname": hostname,
         "lan_ip": lan_ip,
         "wan_ip": wan_ip,
-        "execute_user": user_name,
         "system_version": system_version,
         "fnos_version": fnos_version,
         "has_update": has_update,

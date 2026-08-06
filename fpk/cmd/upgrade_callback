@@ -1,0 +1,16 @@
+#!/bin/bash
+
+### Called after the user upgrades the application.
+### 确保数据目录存在，不覆盖用户已有 config.json；刷新存储卷 override。
+
+set -euo pipefail
+
+if [ -n "${TRIM_PKGVAR:-}" ]; then
+  mkdir -p "${TRIM_PKGVAR}/config" "${TRIM_PKGVAR}/data/logs" "${TRIM_PKGVAR}/data/cursor"
+fi
+
+# shellcheck source=lib_vol_override.sh
+. "$(cd -P "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/lib_vol_override.sh"
+fnmb_write_compose_override || true
+
+exit 0

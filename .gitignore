@@ -48,3 +48,8 @@ Thumbs.db
 .env.production
 config/*.json
 !config/config.json
+
+# FPK build artifacts
+dist-fpk/
+*.fpk
+fpk/app/docker/docker-compose.override.yml

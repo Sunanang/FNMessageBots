@@ -1,0 +1,12 @@
+#!/bin/bash
+
+### Called after the user change environment variables in application setting page.
+### 刷新存储卷 override（用户新增存储空间后可在此触发）。
+
+set -euo pipefail
+
+# shellcheck source=lib_vol_override.sh
+. "$(cd -P "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/lib_vol_override.sh"
+fnmb_write_compose_override || true
+
+exit 0

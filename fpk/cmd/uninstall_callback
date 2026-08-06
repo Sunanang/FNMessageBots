@@ -1,0 +1,54 @@
+#!/bin/bash
+
+### This script is called after the user uninstalls the application.
+
+# 默认保留数据，只有用户在卸载向导中选择 delete 才执行清理。
+# 兼容不同环境变量命名（wizard_data_action / WIZARD_DATA_ACTION）。
+set -u
+
+LOG_FILE="${TRIM_PKGTMP:-/tmp}/uninstall_callback.log"
+
+log_msg() {
+    printf "%s %s\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >> "${LOG_FILE}" 2>/dev/null || true
+}
+
+remove_path() {
+    local p="$1"
+    [ -z "${p}" ] && return 0
+    [ -e "${p}" ] || return 0
+    rm -rf "${p}" 2>/dev/null || log_msg "remove failed: ${p}"
+}
+
+ACTION="${wizard_data_action:-${WIZARD_DATA_ACTION:-keep}}"
+log_msg "uninstall action=${ACTION}"
+
+if [ "${ACTION}" = "delete" ]; then
+    # 1) 清理应用私有持久化目录（@appdata/<appname>）
+    remove_path "${TRIM_PKGVAR:-}"
+
+    # 2) 清理旧版本可能存在的数据共享目录（若有）
+    if [ -n "${TRIM_DATA_SHARE_PATHS:-}" ]; then
+        OLD_IFS="$IFS"
+        IFS=':'
+        for p in ${TRIM_DATA_SHARE_PATHS}; do
+            remove_path "${p}"
+        done
+        IFS="$OLD_IFS"
+    fi
+
+    # 3) 兜底清理：旧包可能创建过这两个目录
+    for d in \
+        /vol*/@appshare/FnMessageBot \
+        /vol*/@appshare/FnMessageBot/data \
+        /vol*/@appshare/FnMessageBots \
+        /vol*/@appshare/FnMessageBots/data
+    do
+        remove_path "${d}"
+    done
+
+    log_msg "data cleaned"
+else
+    log_msg "data kept"
+fi
+
+exit 0

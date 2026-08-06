@@ -30,9 +30,16 @@ FULL_IMAGE="${IMAGE_NAME}:${TAG_ARCH}"
 echo "Image: $FULL_IMAGE"
 echo ""
 
+# 国内拉取 base 镜像易超时，默认使用 DaoCloud 镜像源；海外可设 USE_DOCKER_HUB_MIRROR=0
+BASE_IMAGE_ARG=""
+if [ "${USE_DOCKER_HUB_MIRROR:-1}" = "1" ]; then
+    BASE_IMAGE_ARG="--build-arg BASE_IMAGE=docker.m.daocloud.io/library/python:3.11-slim"
+    echo "Using China mirror for base image (set USE_DOCKER_HUB_MIRROR=0 to use Docker Hub)"
+fi
+
 # 构建并推送 AMD64 镜像（仅 tag-amd64）
 echo "Building AMD64 image..."
-docker build --platform linux/amd64 -t "$FULL_IMAGE" .
+docker build --platform linux/amd64 $BASE_IMAGE_ARG -t "$FULL_IMAGE" .
 
 # 推送（带重试，国内访问 Docker Hub 易出现 EOF/超时）
 push_with_retry() {
