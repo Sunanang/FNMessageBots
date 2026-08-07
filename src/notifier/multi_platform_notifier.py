@@ -194,6 +194,7 @@ class MultiPlatformNotifier:
         'FW_ENABLE': '🔥 飞牛NAS-防火墙已开启',
         'FW_DISABLE': '🔥 飞牛NAS-防火墙已关闭',
         'SECURITY_PORTCHANGED': '🔒 飞牛NAS-安全/端口变更',
+        'WAN_IP_CHANGED': '🌐 飞牛NAS-外网IP变化',
         'CREATE_VM': '🖥️ 飞牛NAS-创建虚拟机',
         'START_VM': '🖥️ 飞牛NAS-操作虚拟机开机',
         'STATUS_SHUTOFF_VM': '🖥️ 飞牛NAS-虚拟机已关机',
@@ -300,6 +301,7 @@ class MultiPlatformNotifier:
         'FW_ENABLE': '防火墙已开启',
         'FW_DISABLE': '防火墙已关闭',
         'SECURITY_PORTCHANGED': '安全/端口变更',
+        'WAN_IP_CHANGED': '外网IP变化 {old_wan_ip}→{new_wan_ip}',
         'CREATE_VM': '创建虚拟机{vm_title}',
         'START_VM': '用户{user}操作虚拟机{vm_title}开机',
         'STATUS_SHUTOFF_VM': '虚拟机{vm_title}切换到关机状态',
@@ -403,6 +405,7 @@ class MultiPlatformNotifier:
         'FW_ENABLE': '防火墙已开启。',
         'FW_DISABLE': '防火墙已关闭。',
         'SECURITY_PORTCHANGED': '安全或端口设置已变更。',
+        'WAN_IP_CHANGED': '检测到外网出口 IP 发生变化，请确认是否为宽带重拨或网络切换。',
         'CREATE_VM': '用户已创建虚拟机。',
         'START_VM': '用户已操作虚拟机开机。',
         'STATUS_SHUTOFF_VM': '虚拟机当前为关机状态。',
@@ -426,7 +429,7 @@ class MultiPlatformNotifier:
         'PHOTO_SHARE_CREATED': '相册库新增了对外分享链接。',
         'PHOTO_SHARE_EXPIRED': '该相册分享已超过有效期。',
         'PHOTO_DEVICE_REGISTERED': '相册库已登记新的同步设备。',
-        'FACE_RECOGNITION_UPDATED': '相册人脸识别有新的任务记录。',
+        'FACE_RECOGNITION_UPDATED': '相册人脸识别告一段落，以下为本次汇总。',
         'DOCKER_CONTAINER_CREATE': 'Docker 引擎上报容器已创建。',
         'DOCKER_CONTAINER_START': 'Docker 引擎上报容器已开始运行。',
         'DOCKER_CONTAINER_STOP': 'Docker 引擎上报容器停止信号。',
@@ -984,7 +987,11 @@ class MultiPlatformNotifier:
         return any_ok, self._channel_result("PushPlus", results)
 
     def _send_to_magic_push(self, message: MultiPlatformMessage) -> tuple:
-        """魔法推送：POST {base_url}/api/push，Bearer token，JSON body title/content。"""
+        """魔法推送：POST {base}/api/push/{token}，JSON body title/content/type。
+
+        使用官方「方式一」（token 在路径）而非 Bearer 头：飞牛反代域名下，
+        容器经公网回环访问时 Authorization 常被拦成 403；路径令牌与可用 curl 更一致。
+        """
         param_list = self._iter_urls(self.magic_push_params)
         if not param_list:
             return False, {"channel": "魔法推送", "success": False, "response": None, "error": "未配置"}
@@ -1003,7 +1010,6 @@ class MultiPlatformNotifier:
                 if not base.startswith("http"):
                     results.append({"success": False, "response": None, "error": "base_url 须为 http(s) 地址"})
                     continue
-                url = f"{base}/api/push"
                 custom_title = (cfg.get("title") or "").strip()
                 if custom_title:
                     # 用户显式填写标题时：同样应用事件标题前缀（与事件标题一致的体验）
@@ -1016,9 +1022,46 @@ class MultiPlatformNotifier:
                 api_content = (message.content or "").strip()
                 if not api_content and message.title:
                     api_content = (message.title or "").strip()
-                payload = {"title": api_title, "content": api_content}
-                hdrs = {"Authorization": f"Bearer {token}"}
-                results.append(self.connection_pool.post(url, payload, headers=hdrs))
+                # content 为必填；type 默认 text（与官方文档一致）
+                if not api_content:
+                    results.append({"success": False, "response": None, "error": "消息内容为空"})
+                    continue
+                payload = {
+                    "title": (api_title or "")[:200],
+                    "content": api_content[:5000],
+                    "type": "text",
+                }
+                # 方式一：token 在路径（避免反代剥离/拒绝 Authorization）
+                token_q = urllib.parse.quote(token, safe="")
+                url = f"{base}/api/push/{token_q}"
+                hdrs = {
+                    # 与可用 curl 对齐；覆盖 session 默认的 charset / FN-Log-Monitor UA
+                    "Content-Type": "application/json",
+                    "Accept": "*/*",
+                    "User-Agent": "curl/8.7.1",
+                }
+                result = self.connection_pool.post(url, payload, headers=hdrs)
+                # 文档：HTTP 200 且 success=true 为成功；部分环境可能 200 但业务失败
+                if result.get("success"):
+                    body = result.get("response")
+                    if isinstance(body, dict) and body.get("success") is False:
+                        msg = str(body.get("message") or "推送失败")[:120]
+                        result = {
+                            "success": False,
+                            "response": body,
+                            "error": msg,
+                        }
+                elif "403" in str(result.get("error") or ""):
+                    # 公网反代域名从 NAS 容器回环常见；建议改局域网 IP:端口
+                    err = str(result.get("error") or "HTTP 403")
+                    result = {
+                        **result,
+                        "error": (
+                            f"{err}（若基础 URL 为反代域名，请改为魔法推送局域网地址"
+                            f"如 http://192.168.x.x:818）"
+                        ),
+                    }
+                results.append(result)
             except json.JSONDecodeError:
                 results.append({"success": False, "response": None, "error": "参数 JSON 解析失败"})
             except Exception as e:
@@ -1254,6 +1297,10 @@ class MultiPlatformNotifier:
         }:
             minute_window = int(time.time() / 60)
             key = f"{event_type}_{minute_window}"
+        elif event_type == 'WAN_IP_CHANGED':
+            old_ip = str(event_data.get('old_wan_ip') or event_data.get('previous_wan_ip') or '')
+            new_ip = str(event_data.get('new_wan_ip') or event_data.get('wan_ip') or '')
+            key = f"{event_type}_{old_ip}_{new_ip}"
         elif event_type == 'POLL_BATCH_SUMMARY':
             minute_window = int(time.time() / 60)
             count = int(event_data.get('count') or 0)
@@ -1404,6 +1451,15 @@ class MultiPlatformNotifier:
                 self.EVENT_TITLES.get(event_type, "").replace("飞牛NAS-", "").replace("飞牛NAS", "").strip(" -")
             ) or event_type
             body = f"{label} {verb}".strip()
+            prefix = (self.title_prefix or "").strip()
+            if prefix:
+                return f"{prefix}-{body}"
+            return body
+
+        if event_type == "WAN_IP_CHANGED":
+            old_ip = event_data.get("old_wan_ip") or event_data.get("previous_wan_ip") or "?"
+            new_ip = event_data.get("new_wan_ip") or event_data.get("wan_ip") or "?"
+            body = f"外网IP变化 {old_ip}→{new_ip}"
             prefix = (self.title_prefix or "").strip()
             if prefix:
                 return f"{prefix}-{body}"
@@ -1562,6 +1618,8 @@ class MultiPlatformNotifier:
             'FW_ENABLE', 'FW_DISABLE', 'SECURITY_PORTCHANGED',
         }:
             detail = self._build_simple_content(event_data)
+        elif event_type == 'WAN_IP_CHANGED':
+            detail = self._build_wan_ip_changed_content(event_data)
         elif event_type in ('MEDIA_LOGIN_SUCC', 'MEDIA_LOGOUT'):
             detail = self._build_media_login_content(event_data)
         elif event_type in ('MEDIA_USER_CREATED', 'TRIM_RESOURCE_ADDED', 'TRIM_SCRAPE_SUCCESS'):
@@ -1695,7 +1753,12 @@ class MultiPlatformNotifier:
             lines.append("硬盘状态")
             n = len(disks)
             for i, d in enumerate(disks):
-                dev = str(d.get("device") or d.get("name") or "unknown")
+                dev = str(d.get("device") or "").strip()
+                label = str(d.get("name") or "").strip()
+                if label and dev and label != dev:
+                    head = f"{label} ({dev})"
+                else:
+                    head = label or dev or "unknown"
                 free_gb = str(d.get("free_gb") or "--")
                 free_text = _size(free_gb)
                 size_text = _size(str(d.get("size_gb") or "--"))
@@ -1703,7 +1766,7 @@ class MultiPlatformNotifier:
                 status = str(d.get("status") or "--")
                 if status == "健康":
                     status = "正常"
-                lines.append(f"{dev}:")
+                lines.append(f"{head}:")
                 if free_text != "--" and size_text != "--":
                     lines.append(f"剩余空间: {free_text} / {size_text}")
                 elif free_text != "--":
@@ -1959,6 +2022,21 @@ class MultiPlatformNotifier:
                 break
         return content or "（无额外详情）"
 
+    def _build_wan_ip_changed_content(self, event_data: Dict[str, Any]) -> str:
+        """外网 IP 变化正文。"""
+        lines: List[str] = []
+        old_ip = (
+            event_data.get("old_wan_ip")
+            or event_data.get("previous_wan_ip")
+            or ""
+        )
+        new_ip = event_data.get("new_wan_ip") or event_data.get("wan_ip") or ""
+        if old_ip:
+            lines.append(f"原外网IP: {old_ip}")
+        if new_ip:
+            lines.append(f"新外网IP: {new_ip}")
+        return "\n".join(lines) if lines else "（无额外详情）"
+
     def _build_trim_library_content(self, event_type: str, event_data: Dict[str, Any]) -> str:
         """影视库事件正文：仅保留用户可读信息。"""
         lines: List[str] = []
@@ -2078,11 +2156,24 @@ class MultiPlatformNotifier:
             self._append_album_owner_display_line(lines, event_data)
         elif event_type == "FACE_RECOGNITION_UPDATED":
             if event_data.get("record_count") not in (None, "", 0):
-                lines.append(f"本轮识别记录: {event_data['record_count']}")
-            if event_data.get("photo_id") is not None:
+                lines.append(f"本批任务记录: {event_data['record_count']}")
+            if event_data.get("photos_with_face") not in (None, "", 0):
+                lines.append(f"检出人脸的照片: {event_data['photos_with_face']}")
+            if event_data.get("faces_detected") not in (None, "", 0):
+                lines.append(f"检出人脸数: {event_data['faces_detected']}")
+            names_text = (event_data.get("person_names_text") or "").strip()
+            if not names_text and isinstance(event_data.get("person_names"), list):
+                names_text = "、".join(str(x) for x in event_data["person_names"] if x)
+            if names_text:
+                lines.append(f"已命名人物: {names_text}")
+            if event_data.get("debounce_sec") not in (None, "", 0):
+                lines.append(f"冷却汇总: 静默 {event_data['debounce_sec']} 秒后推送")
+            if event_data.get("first_task_log_id") and event_data.get("last_task_log_id"):
+                lines.append(
+                    f"任务区间: #{event_data['first_task_log_id']}–#{event_data['last_task_log_id']}"
+                )
+            elif event_data.get("photo_id") is not None:
                 lines.append(f"照片: {event_data['photo_id']}")
-            if event_data.get("user_photo_id") is not None:
-                lines.append(f"条目: {event_data['user_photo_id']}")
             if not lines and event_data.get("task_log_id") is not None:
                 lines.append(f"识别记录: {event_data['task_log_id']}")
         return "\n".join(lines) if lines else "（无额外详情）"
@@ -2483,6 +2574,67 @@ class MultiPlatformNotifier:
                     return [f"{key}: {v}"]
             return [et]
 
+        if et == "WAN_IP_CHANGED":
+            old_ip = ed.get("old_wan_ip") or ed.get("previous_wan_ip") or ""
+            new_ip = ed.get("new_wan_ip") or ed.get("wan_ip") or ""
+            if old_ip or new_ip:
+                return [f"外网IP: {old_ip or '?'} → {new_ip or '?'}"]
+            return ["外网IP变化"]
+
+        if et in ("TRIM_RESOURCE_ADDED", "TRIM_SCRAPE_SUCCESS"):
+            title = (ed.get("title") or data.get("title") or "").strip()
+            item_type = (ed.get("item_type") or data.get("item_type") or "").strip()
+            path = (ed.get("path") or data.get("path") or "").strip()
+            filename = path.rsplit("/", 1)[-1] if "/" in path else path
+            season_number = (
+                ed.get("season_number")
+                if ed.get("season_number") is not None
+                else data.get("season_number")
+            )
+            episode_number = (
+                ed.get("episode_number")
+                if ed.get("episode_number") is not None
+                else data.get("episode_number")
+            )
+            type_map = {
+                "Episode": "单集",
+                "Season": "季",
+                "TV": "剧集",
+                "Movie": "电影",
+                "Video": "视频",
+            }
+            trim_bits: List[str] = []
+            if title:
+                trim_bits.append(title)
+            elif filename:
+                trim_bits.append(filename)
+            if item_type:
+                trim_bits.append(type_map.get(item_type, item_type))
+            if season_number not in (None, "", 0) and episode_number not in (None, "", 0):
+                trim_bits.append(f"第{season_number}季{episode_number}集")
+            elif episode_number not in (None, "", 0):
+                trim_bits.append(f"第{episode_number}集")
+            elif season_number not in (None, "", 0):
+                trim_bits.append(f"第{season_number}季")
+            if filename and title and filename != title:
+                trim_bits.append(filename)
+            return [" · ".join(trim_bits)[:200]] if trim_bits else [et]
+
+        if et in ("MEDIA_LOGIN_SUCC", "MEDIA_LOGOUT", "MEDIA_USER_CREATED"):
+            media_bits: List[str] = []
+            user = self._display_user(
+                (ed.get("user") or data.get("USER_NAME") or data.get("user") or "").strip()
+            )
+            ip = (ed.get("IP") or data.get("ip") or "").strip()
+            app_name = (ed.get("app_name") or data.get("app_name") or "").strip()
+            if user:
+                media_bits.append(f"用户: {user}")
+            if ip:
+                media_bits.append(f"IP: {ip}")
+            if app_name:
+                media_bits.append(f"应用: {app_name}")
+            return [" · ".join(media_bits)] if media_bits else [et]
+
         # 通用回退
         bits: List[str] = []
         if ed.get("user") or ed.get("IP"):
@@ -2492,6 +2644,11 @@ class MultiPlatformNotifier:
             bits.append(str(dn))
         if ed.get("name"):
             bits.append(str(ed.get("name")))
+        if ed.get("title"):
+            bits.append(str(ed.get("title")))
+        path_fb = ed.get("path") or data.get("path")
+        if path_fb:
+            bits.append(str(path_fb).rsplit("/", 1)[-1])
         if bits:
             return [" · ".join(b for b in bits if b)[:200]]
         return [et]

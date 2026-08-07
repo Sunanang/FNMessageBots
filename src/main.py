@@ -40,6 +40,7 @@ from monitor.docker_events_poller import DOCKER_POLL_EVENTS, DockerEventsPoller
 from monitor.docker_socket_access import check_docker_socket_access
 from monitor.event_processor import EventProcessor
 from monitor.nas_patrol import start_nas_patrol_thread
+from monitor.wan_ip_monitor import start_wan_ip_monitor_thread
 from monitor.sqlite_uri import probe_readonly_sqlite
 from notifier.unified_notifier import UnifiedNotifier
 from web.ui_app import start_ui_server_in_background
@@ -68,6 +69,7 @@ class Application:
         self.running = False
         self.notification_health_thread = None
         self._nas_patrol_thread = None
+        self._wan_ip_monitor_thread = None
         self._exit_code = 0
         self._unified_batch_buf: List[Dict[str, Any]] = []
         self._unified_batch_lock = threading.Lock()
@@ -785,11 +787,20 @@ class Application:
             except Exception as e:
                 print(f"配置 UI 启动失败: {e}")
             try:
+                from web.ui_app import set_runtime_monitor_app
+
+                set_runtime_monitor_app(self)
                 self._nas_patrol_thread = start_nas_patrol_thread(self)
                 if self._nas_patrol_thread:
                     print(f"NAS 定时巡检线程已启动: {self._nas_patrol_thread.name}")
             except Exception as e:
                 print(f"NAS 定时巡检线程启动失败: {e}")
+            try:
+                self._wan_ip_monitor_thread = start_wan_ip_monitor_thread(self)
+                if self._wan_ip_monitor_thread:
+                    print(f"外网 IP 监控线程已启动: {self._wan_ip_monitor_thread.name}")
+            except Exception as e:
+                print(f"外网 IP 监控线程启动失败: {e}")
             if not self.notifier:
                 # 未配置推送渠道：不轮询数据库、不推送消息，仅提示用户去 Web 配置
                 print("")
