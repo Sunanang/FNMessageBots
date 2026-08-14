@@ -41,6 +41,7 @@ from monitor.docker_socket_access import check_docker_socket_access
 from monitor.event_processor import EventProcessor
 from monitor.nas_patrol import start_nas_patrol_thread
 from monitor.wan_ip_monitor import start_wan_ip_monitor_thread
+from monitor.ssh_journal_poller import SSH_JOURNAL_EVENTS, SshJournalPoller
 from monitor.sqlite_uri import probe_readonly_sqlite
 from notifier.unified_notifier import UnifiedNotifier
 from web.ui_app import start_ui_server_in_background
@@ -65,6 +66,7 @@ class Application:
         self.photo_db_poller = None
         self.scheduler_db_poller = None
         self.docker_events_poller = None
+        self.ssh_journal_poller = None
         self.logger = None
         self.running = False
         self.notification_health_thread = None
@@ -441,6 +443,18 @@ class Application:
                         print("Docker 容器事件：依赖未就绪或 docker SDK 不可用，未启动监听")
                 else:
                     print("未勾选 Docker 容器事件，跳过 Docker events 监听")
+            if self.ssh_journal_poller and self.ssh_journal_poller.is_available():
+                print(
+                    f"SSH journal 轮询已启用（间隔 {self.config.logger_poll_interval} 秒，"
+                    "journalctl -u ssh/sshd）"
+                )
+            elif set(self.config.monitor_events or []) & set(SSH_JOURNAL_EVENTS):
+                print(
+                    "已勾选 SSH 事件，但 journal 不可用：将回退 logger_data 中的 Sshd*；"
+                    "请挂载 /var/log/journal 与 /etc/machine-id，并确保镜像含 journalctl"
+                )
+            else:
+                print("未勾选 SSH 事件，跳过 SSH journal 轮询")
 
             print("开始注册事件处理器...")
             self._register_db_event_handlers()
@@ -606,6 +620,31 @@ class Application:
                 self.docker_events_poller.stop()
                 self.docker_events_poller = None
 
+        ssh_wanted = bool(me & SSH_JOURNAL_EVENTS)
+        if ssh_wanted:
+            if self.ssh_journal_poller is None:
+                self.ssh_journal_poller = SshJournalPoller(
+                    cursor_dir=cdir,
+                    poll_interval=interval,
+                    monitor_events=self.config.monitor_events,
+                )
+            else:
+                self.ssh_journal_poller.update_config(
+                    monitor_events=self.config.monitor_events,
+                    poll_interval=interval,
+                )
+        else:
+            if self.ssh_journal_poller is not None:
+                self.ssh_journal_poller.stop()
+                self.ssh_journal_poller = None
+
+        # journal 可用时跳过 logger_data 中的 Sshd*，避免双推；不可用则回退库表
+        if self.log_poller is not None:
+            journal_ok = bool(
+                self.ssh_journal_poller is not None and self.ssh_journal_poller.is_available()
+            )
+            self.log_poller.skip_ssh_events = journal_ok
+
         pbs = bool(getattr(self.config, "poll_batch_summary_enabled", False)) and self.event_processor is not None
         batch_enq = self._enqueue_unified_batch_items if pbs else None
         if self.media_db_poller:
@@ -620,6 +659,8 @@ class Application:
             self.backup_poller.set_poll_batch_summary(pbs, batch_enq)
         if self.scheduler_db_poller:
             self.scheduler_db_poller.set_poll_batch_summary(pbs, batch_enq)
+        if self.ssh_journal_poller:
+            self.ssh_journal_poller.set_poll_batch_summary(pbs, batch_enq)
 
     def _register_db_event_handlers(self) -> None:
         """为 logger / 备份 / 影视库 / 相册 SQLite 轮询器注册 monitor_events 中的处理器。"""
@@ -639,11 +680,14 @@ class Application:
             self.scheduler_db_poller.clear_handlers()
         if self.docker_events_poller:
             self.docker_events_poller.clear_handlers()
+        if self.ssh_journal_poller:
+            self.ssh_journal_poller.clear_handlers()
         trim_ev = {"TRIM_RESOURCE_ADDED", "TRIM_SCRAPE_SUCCESS"}
         act_ev = {"MEDIA_LOGIN_SUCC", "MEDIA_LOGOUT"}
         photo_ev = set(PHOTO_POLL_EVENTS)
         scheduler_ev = set(SCHEDULER_POLL_EVENTS)
         docker_ev = set(DOCKER_POLL_EVENTS)
+        ssh_ev = set(SSH_JOURNAL_EVENTS)
         for event_type in self.config.monitor_events:
             handler = self.event_processor.get_handler(event_type)
             if not handler:
@@ -664,6 +708,8 @@ class Application:
                 self.scheduler_db_poller.add_handler(event_type, handler)
             if self.docker_events_poller and event_type in docker_ev:
                 self.docker_events_poller.add_handler(event_type, handler)
+            if self.ssh_journal_poller and event_type in ssh_ev:
+                self.ssh_journal_poller.add_handler(event_type, handler)
             print(f"✓ 注册事件处理器: {event_type}")
 
     def reload_config(self) -> None:
@@ -704,6 +750,8 @@ class Application:
                 self.scheduler_db_poller.start()
             if self.docker_events_poller:
                 self.docker_events_poller.start()
+            if self.ssh_journal_poller:
+                self.ssh_journal_poller.start()
             if self.logger:
                 self.logger.info("热加载完成：监控已启动")
             self._refresh_poll_batch_summary_thread()
@@ -748,6 +796,8 @@ class Application:
                 self.scheduler_db_poller.start()
             if self.docker_events_poller:
                 self.docker_events_poller.start()
+            if self.ssh_journal_poller:
+                self.ssh_journal_poller.start()
             if self.logger:
                 self.logger.info("热加载完成：监控配置已更新")
             self._refresh_poll_batch_summary_thread()
@@ -775,7 +825,7 @@ class Application:
                     self.notifier.send_system_notification(
                         'APP_ERROR',
                         '应用初始化失败: 未知错误',
-                        {'hostname': socket.gethostname(), 'version': '2.4.0'}
+                        {'hostname': socket.gethostname(), 'version': '2.5.0'}
                     )
                 sys.exit(1)
             
@@ -813,7 +863,7 @@ class Application:
                 self.notifier.send_system_notification(
                     'APP_START',
                     '飞牛NAS日志监控系统已启动，开始监控系统事件',
-                    {'hostname': socket.gethostname(), 'version': '2.4.0'}
+                    {'hostname': socket.gethostname(), 'version': '2.5.0'}
                 )
                 if self.log_poller:
                     print("启动数据库日志轮询器...")
@@ -855,6 +905,16 @@ class Application:
                         print(f"已勾选 Docker 容器事件，跳过监听：{sock_issue}")
                     else:
                         print("Docker 容器事件依赖未就绪，跳过监听（请确认已 pip install docker）")
+                if self.ssh_journal_poller:
+                    print("启动 SSH journal 轮询器...")
+                    self.ssh_journal_poller.start()
+                elif set(self.config.monitor_events or []) & set(SSH_JOURNAL_EVENTS):
+                    print(
+                        "已勾选 SSH 事件但 journal 不可用，回退 logger_data Sshd*；"
+                        "请挂载 /var/log/journal 与 /etc/machine-id"
+                    )
+                else:
+                    print("未勾选 SSH 事件，跳过 SSH journal 轮询")
                 self._refresh_poll_batch_summary_thread()
 
             # 设置信号处理
@@ -979,7 +1039,7 @@ class Application:
                 self.notifier.send_system_notification(
                     'APP_ERROR',
                     f'触发自动重启: {reason}',
-                    {'hostname': socket.gethostname(), 'version': '2.4.0'}
+                    {'hostname': socket.gethostname(), 'version': '2.5.0'}
                 )
         except Exception:
             pass
@@ -999,7 +1059,7 @@ class Application:
             self.notifier.send_system_notification(
                 'APP_STOP',
                 '飞牛NAS日志监控系统已停止，监控服务暂停',
-                {'hostname': socket.gethostname(), 'version': '2.4.0'}
+                {'hostname': socket.gethostname(), 'version': '2.5.0'}
             )
 
         # 停止数据库轮询器
@@ -1017,6 +1077,8 @@ class Application:
             self.scheduler_db_poller.stop()
         if self.docker_events_poller:
             self.docker_events_poller.stop()
+        if self.ssh_journal_poller:
+            self.ssh_journal_poller.stop()
 
         # 停止运行日志清理线程
         cleanup_flag = getattr(self.logger, 'cleanup_stop_flag', None) if self.logger else None

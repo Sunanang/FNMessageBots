@@ -120,9 +120,7 @@ def check_and_notify_wan_ip_change(
             _save_state(sp, state)
             return current
 
-        # IP 已变化：先更新基线，再推送，避免并发重复推送
-        state["last_wan_ip"] = current
-        state["last_change_ts"] = now
+        # 先推送，成功后再写基线；若先写基线再推，失败会永久漏报本次变化
         _save_state(sp, state)
 
     event_data = {
@@ -146,7 +144,17 @@ def check_and_notify_wan_ip_change(
             timestamp=ts,
         )
     except Exception as e:
-        log.error("外网 IP 变化推送失败: %s", e, exc_info=True)
+        log.error("外网 IP 变化推送失败（保留旧基线以便重试）: %s", e, exc_info=True)
+        return current
+
+    with _lock:
+        state = _load_state(sp)
+        prev = str(state.get("last_wan_ip") or "").strip()
+        # 仅当基线仍是推送时的旧值时写入，避免并发检测互相覆盖
+        if prev == last or prev == "":
+            state["last_wan_ip"] = current
+            state["last_change_ts"] = time.time()
+            _save_state(sp, state)
     return current
 
 

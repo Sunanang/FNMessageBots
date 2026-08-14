@@ -14,9 +14,10 @@ ENV PYTHONPATH=/app
 WORKDIR /app
 
 # 仅保留健康检查所需的 pgrep（procps）
+# systemd：提供 journalctl，用于采集宿主机 SSH 登录 journal（需挂载 /var/log/journal）
 RUN set -ex && \
     apt-get -o Acquire::Retries=5 update && \
-    apt-get install -y --no-install-recommends procps nut-client smartmontools \
+    apt-get install -y --no-install-recommends procps nut-client smartmontools systemd \
     && rm -rf /var/lib/apt/lists/*
 
 # 复制依赖文件

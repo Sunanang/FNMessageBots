@@ -1,6 +1,6 @@
 [project]
 name = "fnmessagebots"
-version = "2.4.0"
+version = "2.5.0"
 description = "FN Message Bots"
 readme = "README.md"
 requires-python = ">=3.9"

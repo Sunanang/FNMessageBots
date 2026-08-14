@@ -98,6 +98,11 @@ class UnifiedNotifier:
         "PHOTO_DEVICE_REGISTERED",
         "FACE_RECOGNITION_UPDATED",
         "WAN_IP_CHANGED",
+        # SSH 现主要来自 journal，不在 logger_data.db3
+        "SSH_LOGIN_SUCCESS",
+        "SSH_AUTH_FAILED",
+        "SSH_INVALID_USER",
+        "SSH_DISCONNECTED",
     })
     # 外部库轮询事件（不在 logger_data.db3）；主日志事件由 _query_dnd_events_summary 统计，勿重复计入。
     DND_EXTERNAL_POLLER_EVENT_TYPES: frozenset[str] = (

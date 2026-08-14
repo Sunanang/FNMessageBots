@@ -242,8 +242,21 @@ Docker 镜像名称：<code>fn-message-bots</code>
 应用市场版默认端口：<code>18230</code>（不可修改）</p>
           </article>
 
+          <article id="faq-ssh-journal" class="faq-item">
+            <h2>9. SSH 登录推送没有了？</h2>
+            <p>飞牛新版本里，主日志库 <code>logger_data.db3</code> 往往不再写入 <code>Sshd*</code> 事件，且系统已取消 <code>/var/log/auth.log</code>。
+本应用改为轮询宿主机 <code>journalctl -u ssh / sshd</code> 采集 SSH 登录成功、失败、无效用户与断开。</p>
+            <p><strong>Docker / 应用市场版请确认已挂载：</strong></p>
+            <pre class="faq-pre">- /var/log/journal:/var/log/journal:ro
+- /run/log/journal:/run/log/journal:ro
+- /etc/machine-id:/etc/machine-id:ro</pre>
+            <p>镜像需包含 <code>journalctl</code>（官方镜像已安装 systemd）。宿主机可先自检：</p>
+            <pre class="faq-pre">sudo journalctl -u ssh -n 20 --no-pager</pre>
+            <p>若 journal 可读而推送仍无，请查看容器日志是否出现「SSH journal 轮询已启动」。journal 不可用时会回退尝试主日志库中的 <code>Sshd*</code>（若库中仍有）。</p>
+          </article>
+
           <article class="faq-item">
-            <h2>9. 测试推送没问题，但是无法推送日志消息</h2>
+            <h2>10. 测试推送没问题，但是无法推送日志消息</h2>
             <p>这个问题大概率是数据库存在异常。Docker 版可先查看运行日志，是否提示：<code>数据库查询失败：database disk image is malformed</code>。
 如果出现这个提示，基本可以判定是数据库挂载失败；再检查日志显示是否正常，大概率是日志数据库的问题。
 修复命令（仅供参考，建议通过 SSH 执行）：
@@ -256,7 +269,7 @@ Docker 镜像名称：<code>fn-message-bots</code>
           </article>
 
           <article id="faq-external-db" class="faq-item">
-            <h2>10. 挂载影视库 / 相册提示权限问题</h2>
+            <h2>11. 挂载影视库 / 相册提示权限问题</h2>
             <p><strong>Docker 版：</strong>请在编排文件（如 <code>docker-compose.yml</code>）中自行添加卷挂载，使容器能访问宿主上的影视 / 相册数据路径；权限与 UID/GID、挂载只读等均在您本机配置中处理。
 <strong>应用市场版：</strong>若读取影视 / 相册相关数据库时报权限不足，可在 SSH（root）下按需执行下列命令。<strong>请自行评估放宽目录权限、数据库文件权限以及 ACL 带来的安全风险</strong>（例如更多用户可进入目录或读取数据库文件）；系统需支持 <code>setfacl</code>（ACL），否则请先安装/启用相关功能。
 
@@ -281,7 +294,7 @@ sudo setfacl -m u:FnMessageBot:r /usr/local/apps/@appdata/trim.media/database/tr
           </article>
 
           <article id="faq-docker-sock" class="faq-item">
-            <h2>11. Docker 容器事件与 docker.sock 权限</h2>
+            <h2>12. Docker 容器事件与 docker.sock 权限</h2>
             <p>在监控事件中勾选「Docker 容器」相关事件后，保存时若出现「无法访问 <code>/var/run/docker.sock</code>」类告警，说明<strong>当前进程</strong>无权读写 Docker Engine 的 Unix socket。若你在 <code>config.json</code> 中配置了 <code>docker_socket_path</code>，以下命令中的路径请改为与你配置一致。</p>
             <p><strong>安全提示：</strong>将用户加入 <code>docker</code> 组或使用 ACL 读写 <code>docker.sock</code>，等同于授予通过 Docker API 操控引擎的能力；请仅在理解风险后操作，勿随意 <code>chmod 777</code>。</p>
             <p><strong>自建 Docker / Compose：</strong>仅挂载 <code>docker.sock</code> 不够——还需让<strong>容器内正在运行的 Python 进程</strong>对 socket 具备读写权限。宿主上常见为 <code>srw-rw---- root docker</code>（660），非 root 进程须加入 docker 组对应的 GID。在 NAS SSH 执行 <code>stat -c '%g' /var/run/docker.sock</code> 得到数字 GID，在 compose 中示例：</p>

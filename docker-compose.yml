@@ -27,6 +27,10 @@ services:
       # - /var/lib/dpkg/status:/host/dpkg/status:ro
       # 可选：宿主主机名（巡检用，避免显示容器 ID）
       # - /etc/hostname:/host/etc/hostname:ro
+      # SSH 登录 journal（推荐；飞牛新版本主日志库常无 Sshd*）
+      - /var/log/journal:/var/log/journal:ro
+      - /run/log/journal:/run/log/journal:ro
+      - /etc/machine-id:/etc/machine-id:ro
       # 可选：UPS 巡检（挂 /etc/nut 目录；无 ups.conf 时跳过 UPS，不导致启动失败）
       # - /etc/nut:/etc/nut:ro
     environment:

@@ -1,6 +1,6 @@
 services:
   fn-message-bot:
-    image: sunanang/fn-message-bots:2.4.0
+    image: sunanang/fn-message-bots:2.5.0
     container_name: fn-message-bot
     restart: unless-stopped
     ports:
@@ -28,6 +28,10 @@ services:
       - /var/lib/dpkg/status:/host/dpkg/status:ro
       # 宿主主机名（巡检读取 /host/etc/hostname，避免显示容器 ID）
       - /etc/hostname:/host/etc/hostname:ro
+      # SSH 登录：读宿主机 journal（飞牛新版本 logger_data 常无 Sshd*）
+      - /var/log/journal:/var/log/journal:ro
+      - /run/log/journal:/run/log/journal:ro
+      - /etc/machine-id:/etc/machine-id:ro
       # 仅追加极少见项（API socket、/vol5+）；主挂载勿再指望运行时探测
       # FNMB_OPTIONAL_VOLUMES_BEGIN
       # FNMB_OPTIONAL_VOLUMES_END

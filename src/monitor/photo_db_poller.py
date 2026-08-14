@@ -36,7 +36,7 @@ PHOTO_POLL_EVENTS: Set[str] = {
 
 _DEDUP_TTL = 30 * 24 * 3600
 # face_task_log 无批次结束标记：连续无新增达此秒数后，再汇总推送一次
-FACE_DEBOUNCE_SEC = 90
+FACE_DEBOUNCE_SEC = 60
 # 汇总推送里最多展示的照片 / 人物名数量
 _FACE_PENDING_ID_CAP = 30
 _FACE_PERSON_NAME_CAP = 12
@@ -211,16 +211,17 @@ class PhotoDBPoller:
         event_data: Dict[str, Any],
         raw_obj: Dict[str, Any],
         ts_sec: Optional[int],
-    ) -> None:
+    ) -> bool:
+        """投递事件；成功入队/调用 handler 返回 True。"""
         if self.monitor_events and event_type not in self.monitor_events:
-            return
+            return False
         fp = self._fingerprint(event_type, json.dumps(raw_obj, sort_keys=True, ensure_ascii=False)[:400])
         now = int(time.time())
         if fp in self._dedup_seen:
-            return
+            return False
         handler = self.event_handlers.get(event_type)
         if not handler:
-            return
+            return False
         event_data = dict(event_data)
         event_data.setdefault("_source", "photo_db")
         event_data.setdefault("_source_cursor", fp)
@@ -259,8 +260,10 @@ class PhotoDBPoller:
             else:
                 handler(event_data, entry)
             self._dedup_seen[fp] = now
+            return True
         except Exception as e:
             self.logger.error("处理相册事件失败 %s: %s", event_type, e, exc_info=True)
+            return False
 
     def _owner_label(self, owner_id: Any, nas_uid: Any) -> str:
         parts: List[str] = []
@@ -521,9 +524,10 @@ class PhotoDBPoller:
         )
         self.logger.info(msg)
         print(msg, flush=True)
-        self._emit(FACE_RECOGNITION_UPDATED, ev, raw, None)
-        state["face_pending"] = self._empty_face_pending()
-        self._last_face_debounce_log_ts = 0.0
+        # 仅在真正投递成功后再清空缓冲，避免 handler 缺失/去重空操作导致丢批
+        if self._emit(FACE_RECOGNITION_UPDATED, ev, raw, None):
+            state["face_pending"] = self._empty_face_pending()
+            self._last_face_debounce_log_ts = 0.0
 
     def _poll_once(self, state: Dict[str, Any]) -> None:
         if not self.db_path or not os.path.exists(self.db_path):
