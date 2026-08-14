@@ -1,6 +1,6 @@
 services:
   fn-message-bot:
-    image: sunanang/fn-message-bots:2.5.0
+    image: sunanang/fn-message-bots:fpk
     container_name: fn-message-bot
     restart: unless-stopped
     ports:
