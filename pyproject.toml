@@ -1,6 +1,6 @@
 [project]
 name = "fnmessagebots"
-version = "2.3.0"
+version = "2.5.0"
 description = "FN Message Bots"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -11,6 +11,7 @@ dependencies = [
     "psutil>=5.9.0",
     "Flask>=3.0.0",
     "docker>=7.0.0",
+    "croniter>=2.0.0",
 ]
 
 [tool.basedpyright]

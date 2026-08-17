@@ -85,9 +85,11 @@ class Config:
     dnd_start_time: str = "22:00"  # HH:MM，如 22:00
     dnd_end_time: str = "07:00"   # HH:MM，如 07:00（跨日则到次日该时间结束）
 
-    # NAS 定时巡检（按间隔采集本机 CPU/内存/磁盘状态并推送，不参与日志事件勾选）
+    # NAS 定时巡检（Cron 调度；不参与日志事件勾选）
     nas_patrol_enabled: bool = False
-    nas_patrol_interval_minutes: int = 720  # 5～10080
+    nas_patrol_cron: str = "0 12 * * *"  # 标准 5 段：每天中午 12:00
+    # 旧字段：仅用于迁移；新配置以 nas_patrol_cron 为准
+    nas_patrol_interval_minutes: int = 720
 
     # 高级配置
     max_log_age: int = 7  # 应用运行日志 monitor_*.log 保留天数
@@ -221,6 +223,8 @@ class Config:
             self.dnd_end_time = data["dnd_end_time"].strip()
         if "nas_patrol_enabled" in data:
             self.nas_patrol_enabled = as_bool(data["nas_patrol_enabled"], False)
+        if "nas_patrol_cron" in data and isinstance(data["nas_patrol_cron"], str):
+            self.nas_patrol_cron = (data["nas_patrol_cron"] or "").strip()
         if "nas_patrol_interval_minutes" in data and data["nas_patrol_interval_minutes"] is not None:
             try:
                 self.nas_patrol_interval_minutes = int(data["nas_patrol_interval_minutes"])
@@ -475,6 +479,13 @@ class Config:
         except (TypeError, ValueError):
             _iv = 720
         self.nas_patrol_interval_minutes = max(5, min(10080, _iv))
+
+        from utils.cron_util import resolve_nas_patrol_cron
+
+        self.nas_patrol_cron = resolve_nas_patrol_cron(
+            getattr(self, "nas_patrol_cron", "") or "",
+            self.nas_patrol_interval_minutes,
+        )
 
     def _ensure_directories(self):
         """确保目录存在"""

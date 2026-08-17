@@ -1,0 +1,13 @@
+{
+  "docker-project": {
+    "projects": [
+      {
+        "name": "fn-message-bot",
+        "path": "docker"
+      }
+    ]
+  },
+  "api-scope": [
+    "trim.system.getPlatformConfig"
+  ]
+}

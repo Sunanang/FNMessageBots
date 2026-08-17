@@ -112,6 +112,7 @@ class EventProcessor:
             'FW_ENABLE': lambda ed, e: self._handle_simple_notification('FW_ENABLE', ed, e),
             'FW_DISABLE': lambda ed, e: self._handle_simple_notification('FW_DISABLE', ed, e),
             'SECURITY_PORTCHANGED': lambda ed, e: self._handle_simple_notification('SECURITY_PORTCHANGED', ed, e),
+            'WAN_IP_CHANGED': lambda ed, e: self._handle_simple_notification('WAN_IP_CHANGED', ed, e),
             # 虚拟机事件（默认不勾选；勾选后直接推送）
             'SHUTDOWN_VM': lambda ed, e: self._handle_simple_notification('SHUTDOWN_VM', ed, e),
             'STATUS_RUNNING_VM': lambda ed, e: self._handle_simple_notification('STATUS_RUNNING_VM', ed, e),
@@ -168,6 +169,11 @@ class EventProcessor:
             parts.append(str(event_data.get('device_display'))[:60])
         if event_type == 'FACE_RECOGNITION_UPDATED' and event_data.get('task_log_id') is not None:
             parts.append(f"人脸任务#{event_data.get('task_log_id')}")
+        if event_type == 'WAN_IP_CHANGED':
+            old_ip = event_data.get('old_wan_ip') or event_data.get('previous_wan_ip')
+            new_ip = event_data.get('new_wan_ip') or event_data.get('wan_ip')
+            if old_ip or new_ip:
+                parts.append(f"{old_ip or '?'}→{new_ip or '?'}")
         if not parts:
             parts.append(event_type)
         return " | ".join([str(p).strip() for p in parts if p])[:120]

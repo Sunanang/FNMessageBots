@@ -1,0 +1,38 @@
+#!/bin/bash
+
+# Docker 应用：刷新可选挂载并写入主 compose；start 时尝试 recreate 使挂载生效。
+
+set -u
+
+CONTAINER_NAME="fn-message-bot"
+CMD_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+
+# shellcheck source=lib_vol_override.sh
+. "${CMD_DIR}/lib_vol_override.sh"
+
+is_running() {
+  docker inspect "$CONTAINER_NAME" 2>/dev/null | grep -q '"Status": "running"'
+}
+
+case "$1" in
+start)
+  # 写入主 docker-compose.yaml 并 recreate，确保可选库/socket 挂进容器
+  fnmb_write_compose_override recreate || true
+  exit 0
+  ;;
+stop)
+  exit 0
+  ;;
+status)
+  if is_running; then
+    exit 0
+  fi
+  exit 3
+  ;;
+*)
+  if [ -n "${TRIM_TEMP_LOGFILE:-}" ]; then
+    echo "Unknown command: $1" > "$TRIM_TEMP_LOGFILE"
+  fi
+  exit 1
+  ;;
+esac

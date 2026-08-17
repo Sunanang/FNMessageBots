@@ -1,0 +1,62 @@
+#!/bin/bash
+
+### Called after the user installs the application.
+### Docker 版：仅初始化持久化目录与默认配置，不安装 Python/venv。
+
+set -euo pipefail
+
+fail_user_visible() {
+  local msg="$1"
+  if [ -n "${TRIM_TEMP_LOGFILE:-}" ]; then
+    printf "%s\n" "${msg}" > "${TRIM_TEMP_LOGFILE}"
+  fi
+  exit 1
+}
+
+_INSTALL_FAIL_DOCKER_HINT="请前往飞牛社区按教程安装 Docker 版本 FnMessageBot：https://club.fnnas.com/forum.php?mod=viewthread&tid=57252"
+
+if [ -z "${TRIM_PKGVAR:-}" ]; then
+  fail_user_visible "安装失败：未设置 TRIM_PKGVAR。${_INSTALL_FAIL_DOCKER_HINT}"
+fi
+
+mkdir -p "${TRIM_PKGVAR}/config" "${TRIM_PKGVAR}/data/logs" "${TRIM_PKGVAR}/data/cursor"
+
+if ! touch "${TRIM_PKGVAR}/.fnmb_wtest" 2>/dev/null; then
+  fail_user_visible "安装失败：无法在数据目录写入（${TRIM_PKGVAR}）。${_INSTALL_FAIL_DOCKER_HINT}"
+fi
+rm -f "${TRIM_PKGVAR}/.fnmb_wtest"
+
+# 默认配置：优先 TRIM_APPDEST/docker/config，其次相对安装根目录
+_resolve_default_config() {
+  local candidates=()
+  if [ -n "${TRIM_APPDEST:-}" ]; then
+    candidates+=("${TRIM_APPDEST}/docker/config/config.json")
+  fi
+  local root
+  root="$(cd -P "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
+  candidates+=("${root}/app/docker/config/config.json")
+  candidates+=("${root}/target/docker/config/config.json")
+
+  local c
+  for c in "${candidates[@]}"; do
+    if [ -f "${c}" ]; then
+      printf "%s" "${c}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+if [ ! -f "${TRIM_PKGVAR}/config/config.json" ]; then
+  if ! DEFAULT_CONFIG="$(_resolve_default_config)"; then
+    fail_user_visible "安装失败：未找到默认配置 config.json。${_INSTALL_FAIL_DOCKER_HINT}"
+  fi
+  cp -f "${DEFAULT_CONFIG}" "${TRIM_PKGVAR}/config/config.json"
+fi
+
+# 按宿主实况把可选挂载写入主 docker-compose.yaml（不依赖 override）
+# shellcheck source=lib_vol_override.sh
+. "$(cd -P "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/lib_vol_override.sh"
+fnmb_write_compose_override || true
+
+exit 0

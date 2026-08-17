@@ -266,6 +266,64 @@
     .channels-table tbody tr:not(:last-child) td {
       border-bottom: 1px solid #f3f4f6;
     }
+    .channels-table tbody tr.channel-disabled > td:not(.channel-ops-td) {
+      opacity: 0.72;
+    }
+    .channels-table th.channel-ops-th,
+    .channels-table td.channel-ops-td {
+      text-align: center;
+      vertical-align: middle;
+    }
+    .channel-ops {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      flex-wrap: nowrap;
+    }
+    /* 左右滑动开关：灰关 / 绿开 */
+    .channel-switch {
+      position: relative;
+      display: inline-block;
+      width: 44px;
+      height: 26px;
+      flex-shrink: 0;
+      cursor: pointer;
+    }
+    .channel-switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+      position: absolute;
+    }
+    .channel-switch-slider {
+      position: absolute;
+      inset: 0;
+      background: #e5e7eb;
+      border-radius: 999px;
+      transition: background-color 0.2s ease;
+    }
+    .channel-switch-slider::before {
+      content: "";
+      position: absolute;
+      width: 22px;
+      height: 22px;
+      left: 2px;
+      top: 2px;
+      background: #fff;
+      border-radius: 50%;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+      transition: transform 0.2s ease;
+    }
+    .channel-switch input:checked + .channel-switch-slider {
+      background: #22c55e;
+    }
+    .channel-switch input:checked + .channel-switch-slider::before {
+      transform: translateX(18px);
+    }
+    .channel-switch input:focus-visible + .channel-switch-slider {
+      box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.35);
+    }
     select,
     input[type="text"],
     input[type="number"],
@@ -637,6 +695,12 @@
     html[data-theme="dark"] .channels-table tbody tr:not(:last-child) td {
       border-bottom-color: #1f2937;
     }
+    html[data-theme="dark"] .channel-switch-slider {
+      background: #4b5563;
+    }
+    html[data-theme="dark"] .channel-switch input:checked + .channel-switch-slider {
+      background: #22c55e;
+    }
     html[data-theme="dark"] select,
     html[data-theme="dark"] input[type="text"],
     html[data-theme="dark"] input[type="number"],
@@ -772,7 +836,7 @@
           <div class="header-title" id="app-title">FnMessageBot</div>
         </div>
         <div class="header-sub" id="app-subtitle">飞牛日志消息推送机器人</div>
-        <div class="header-ver" id="app-version">2.3.0</div>
+        <div class="header-ver" id="app-version">2.5.0</div>
       </div>
 
       <div class="section stats-section">
@@ -819,7 +883,7 @@
       <div class="section">
         <div class="channels-header">
           <div class="section-title">
-            <span>推送渠道 <small>支持为同一渠道配置多个 Webhook</small></span>
+            <span>推送渠道 <small>支持为同一渠道配置多个 Webhook；关闭开关后保留配置但不推送</small></span>
           </div>
           <button class="add-btn" type="button" id="add-channel-btn">
             <span>＋</span> 添加渠道
@@ -831,7 +895,7 @@
             <tr>
               <th style="width: 120px;">渠道类型</th>
               <th>推送地址</th>
-              <th style="width: 64px; text-align: right;">操作</th>
+              <th class="channel-ops-th" style="width: 140px;">操作</th>
             </tr>
             </thead>
             <tbody id="channels-body"></tbody>
@@ -912,13 +976,16 @@
             <input type="checkbox" id="input-nas-patrol-enabled" />
             <span>巡检任务</span>
           </div>
-          <div class="field-helper" style="margin-bottom: 10px;">按设定间隔采集本机 CPU、内存与磁盘状态并推送；标题为「事件标题前缀-巡检任务完成」，与勿扰可同时开启（巡检不受勿扰拦截）。</div>
-          <div class="system-grid" style="grid-template-columns: 1fr 2fr;">
+          <div class="field-helper" style="margin-bottom: 10px;">按 Cron 采集本机 CPU、内存与磁盘并推送；标题为「事件标题前缀-巡检任务完成」。首次开启会锚定当前时间，<strong>不会立刻推送</strong>，需等到下一次 Cron（例如 <code>*/10 * * * *</code> 最多等约 10 分钟）。可点下方按钮立即验证。</div>
+          <div class="system-grid" style="grid-template-columns: 1fr;">
             <div>
-              <div class="field-label">巡检间隔（分钟）</div>
-              <input id="input-nas-patrol-interval" type="number" min="5" max="10080" step="1" value="720" />
-              <div class="field-helper">默认 720 分钟，范围 5～10080。</div>
+              <div class="field-label">巡检 Cron 表达式</div>
+              <input id="input-nas-patrol-cron" type="text" placeholder="0 12 * * *" value="0 12 * * *" autocomplete="off" />
+              <div class="field-helper">标准 5 段 Cron。示例：每天中午 <code>0 12 * * *</code>；每 10 分钟 <code>*/10 * * * *</code>。<strong>必须勾选上方「巡检任务」并保存</strong>，定时才会执行（仅填 Cron 不会自动推送）。</div>
             </div>
+          </div>
+          <div class="footer-actions" style="margin-top: 10px;">
+            <button class="btn btn-ghost" id="nas-patrol-run-btn" type="button">立即巡检一次</button>
           </div>
         </div>
       </div>
@@ -1001,6 +1068,7 @@
     const addChannelBtn = document.getElementById("add-channel-btn");
     const saveBtn = document.getElementById("save-btn");
     const testBtn = document.getElementById("test-btn");
+    const nasPatrolRunBtn = document.getElementById("nas-patrol-run-btn");
     const statusBar = document.getElementById("status-bar");
     const warningPanel = document.getElementById("warning-panel");
 
@@ -1220,8 +1288,9 @@
       return JSON.stringify(o);
     }
 
-    function createChannelRow(chType, url) {
+    function createChannelRow(chType, url, enabled) {
       const tr = document.createElement("tr");
+      const initiallyEnabled = enabled !== false;
 
       const tdType = document.createElement("td");
       const sel = document.createElement("select");
@@ -1289,7 +1358,7 @@
           const inBase = document.createElement("input");
           inBase.type = "text";
           inBase.className = "magic-push-base channel-url-input";
-          inBase.placeholder = "基础 URL（如 https://push.example.com，不含 /api/push）";
+          inBase.placeholder = "基础 URL（如 https://magicpush.landos.fnos.net）如果是内网请使用ip+端口（如 http://192.168.x.x:818）";
           inBase.value = base;
           inBase.style.width = "100%";
           const row2 = document.createElement("div");
@@ -1425,15 +1494,40 @@
       });
 
       const tdOp = document.createElement("td");
-      tdOp.style.textAlign = "right";
+      tdOp.className = "channel-ops-td";
+      const ops = document.createElement("div");
+      ops.className = "channel-ops";
+
+      const enableLabel = document.createElement("label");
+      enableLabel.className = "channel-switch";
+      enableLabel.title = "关闭后保留配置但不推送该渠道";
+      const enableInp = document.createElement("input");
+      enableInp.type = "checkbox";
+      enableInp.className = "channel-enabled-input";
+      enableInp.checked = initiallyEnabled;
+      enableInp.setAttribute("aria-label", "启用该渠道");
+      const slider = document.createElement("span");
+      slider.className = "channel-switch-slider";
+      enableLabel.appendChild(enableInp);
+      enableLabel.appendChild(slider);
+      function syncRowEnabledStyle() {
+        if (enableInp.checked) tr.classList.remove("channel-disabled");
+        else tr.classList.add("channel-disabled");
+      }
+      enableInp.addEventListener("change", syncRowEnabledStyle);
+      syncRowEnabledStyle();
+
       const delBtn = document.createElement("button");
       delBtn.type = "button";
       delBtn.className = "btn-danger";
       delBtn.textContent = "删除";
+      delBtn.title = "删除该渠道配置";
       delBtn.onclick = () => {
         channelsBody.removeChild(tr);
       };
-      tdOp.appendChild(delBtn);
+      ops.appendChild(enableLabel);
+      ops.appendChild(delBtn);
+      tdOp.appendChild(ops);
 
       tr.appendChild(tdType);
       tr.appendChild(tdUrl);
@@ -1549,11 +1643,11 @@
         channelsBody.innerHTML = "";
         if (data.channels && data.channels.length) {
           for (const ch of data.channels) {
-            createChannelRow(ch.type || "wechat", ch.url || "");
+            createChannelRow(ch.type || "wechat", ch.url || "", ch.enabled !== false);
           }
         } else {
           // 默认只展示一行企业微信，需要其他渠道可点击「添加渠道」
-          createChannelRow("wechat", "");
+          createChannelRow("wechat", "", true);
         }
 
         document.getElementById("input-web-password-enabled").checked = data.web_password_enabled !== false;
@@ -1577,15 +1671,14 @@
           document.getElementById("input-dnd-end").disabled = !en;
         };
 
-        const patrolIv = Math.max(5, Math.min(10080, parseInt(data.nas_patrol_interval_minutes, 10) || 720));
         const nasEn = document.getElementById("input-nas-patrol-enabled");
-        const nasIv = document.getElementById("input-nas-patrol-interval");
+        const nasCron = document.getElementById("input-nas-patrol-cron");
         if (nasEn) nasEn.checked = !!data.nas_patrol_enabled;
-        if (nasIv) nasIv.value = String(patrolIv);
+        if (nasCron) nasCron.value = (data.nas_patrol_cron || "0 12 * * *").trim() || "0 12 * * *";
         function syncNasPatrolInputs() {
           const enEl = document.getElementById("input-nas-patrol-enabled");
-          const ivEl = document.getElementById("input-nas-patrol-interval");
-          if (ivEl && enEl) ivEl.disabled = !enEl.checked;
+          const cronEl = document.getElementById("input-nas-patrol-cron");
+          if (cronEl && enEl) cronEl.disabled = !enEl.checked;
         }
         if (nasEn) nasEn.onchange = syncNasPatrolInputs;
         syncNasPatrolInputs();
@@ -1618,7 +1711,7 @@
 
     addChannelBtn.addEventListener("click", () => {
       const defaultType = channelOptions.length ? channelOptions[0].id : "wechat";
-      createChannelRow(defaultType, "");
+      createChannelRow(defaultType, "", true);
     });
 
     saveBtn.addEventListener("click", async () => {
@@ -1658,7 +1751,9 @@
           url = urlEl.value.trim();
           if (!url) return;
         }
-        channels.push({ type, url });
+        const enableInp = tr.querySelector("input.channel-enabled-input");
+        const enabled = enableInp ? !!enableInp.checked : true;
+        channels.push({ type, url, enabled });
       });
 
       const payload = {
@@ -1674,7 +1769,7 @@
         dnd_start_time: document.getElementById("input-dnd-start").value || "22:00",
         dnd_end_time: document.getElementById("input-dnd-end").value || "07:00",
         nas_patrol_enabled: document.getElementById("input-nas-patrol-enabled").checked,
-        nas_patrol_interval_minutes: document.getElementById("input-nas-patrol-interval").value,
+        nas_patrol_cron: (document.getElementById("input-nas-patrol-cron").value || "").trim(),
         bark_icon: (document.getElementById("input-bark-icon").value || "").trim(),
       };
 
@@ -1731,6 +1826,35 @@
       }
       setStatus(false, "");
     });
+
+    if (nasPatrolRunBtn) {
+      nasPatrolRunBtn.addEventListener("click", async () => {
+        nasPatrolRunBtn.disabled = true;
+        setStatus(false, "正在执行巡检推送...");
+        try {
+          const res = await fetch("/api/nas-patrol/run", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            credentials: "include",
+            body: "{}",
+          });
+          const text = await res.text();
+          let json = null;
+          try { json = JSON.parse(text); } catch (e) { json = null; }
+          if (res.ok && json && json.ok) {
+            showToast(true, json.message || "巡检已推送");
+          } else {
+            showToast(false, (json && json.message) ? json.message : ("巡检失败：" + (text ? text.slice(0, 160) : "")));
+          }
+        } catch (e) {
+          console.error(e);
+          showToast(false, "巡检请求失败，请稍后重试");
+        } finally {
+          nasPatrolRunBtn.disabled = false;
+          setStatus(false, "");
+        }
+      });
+    }
 
     window.addEventListener("load", () => {
       initTheme();

@@ -64,5 +64,6 @@
   "web_password_enabled": true,
   "title_prefix": "飞牛NAS",
   "minimal_push_enabled": false,
-  "nas_patrol_enabled": false
+  "nas_patrol_enabled": false,
+  "nas_patrol_cron": "0 12 * * *"
 }

@@ -1,4 +1,6 @@
-FROM python:3.11-slim
+# 可通过 --build-arg BASE_IMAGE=... 使用国内镜像源，避免直连 Docker Hub 超时
+ARG BASE_IMAGE=python:3.11-slim
+FROM ${BASE_IMAGE}
 
 # 设置环境变量
 ENV PYTHONUNBUFFERED=1 \
@@ -12,9 +14,10 @@ ENV PYTHONPATH=/app
 WORKDIR /app
 
 # 仅保留健康检查所需的 pgrep（procps）
+# systemd：提供 journalctl，用于采集宿主机 SSH 登录 journal（需挂载 /var/log/journal）
 RUN set -ex && \
     apt-get -o Acquire::Retries=5 update && \
-    apt-get install -y --no-install-recommends procps nut-client smartmontools \
+    apt-get install -y --no-install-recommends procps nut-client smartmontools systemd \
     && rm -rf /var/lib/apt/lists/*
 
 # 复制依赖文件

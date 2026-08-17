@@ -35,11 +35,24 @@ from web.app_paths import GITHUB_ICON_FILE
 from web.app_paths import ICON_FILE
 from web.app_paths import SUPPORT_QR_DIR
 from web.app_paths import SUPPORT_QR_FILENAMES
+from web.config_store import channels_from_raw as _channels_from_raw
 from web.config_store import config_load_error as _config_load_error
-from web.config_store import join_urls as _join_urls
 from web.config_store import load_raw_config as _load_raw_config_from_file
+
+# 运行中的主监控应用，供「立即巡检」等接口使用
+_runtime_monitor_app = None
+
+
+def set_runtime_monitor_app(app) -> None:
+    global _runtime_monitor_app
+    _runtime_monitor_app = app
+
+
+def get_runtime_monitor_app():
+    return _runtime_monitor_app
+from web.config_store import normalize_push_channels as _normalize_push_channels
 from web.config_store import save_raw_config as _save_raw_config_to_file
-from web.config_store import split_urls as _split_urls
+from web.config_store import sync_channel_flat_keys as _sync_channel_flat_keys
 from web.config_store import title_prefix_from_dict as _title_prefix_from_dict
 from web.event_catalog import APP_LIFECYCLE_EVENTS
 from web.event_catalog import DEFAULT_SELECTED_EVENTS
@@ -325,7 +338,15 @@ def create_app(on_config_saved=None) -> Flask:
         {"id": "smtp", "name": "SMTP邮件"},
     ]
 
-    PROTECTED_PATHS = {"/", "/history", "/api/config", "/api/save-config", "/api/test", "/api/push-stats"}
+    PROTECTED_PATHS = {
+        "/",
+        "/history",
+        "/api/config",
+        "/api/save-config",
+        "/api/test",
+        "/api/nas-patrol/run",
+        "/api/push-stats",
+    }
     PROTECTED_PREFIXES = ("/api/push-history",)
 
     @app.before_request
@@ -478,32 +499,22 @@ def create_app(on_config_saved=None) -> Flask:
         if not monitor_events:
             monitor_events = list(DEFAULT_SELECTED_EVENTS)
 
-        channels = []
-        for ch_type, key in [
-            ("wechat", "wechat_webhook_url"),
-            ("dingtalk", "dingtalk_webhook_url"),
-            ("feishu", "feishu_webhook_url"),
-            ("bark", "bark_url"),
-            ("pushplus", "pushplus_params"),
-            ("magic_push", "magic_push_params"),
-            ("smtp", "smtp_params"),
-        ]:
-            for url in _split_urls(raw.get(key, "")):
-                # 过滤掉模板中的 ${WECHAT_WEBHOOK_URL} 这类占位符
-                if url.startswith("${") and url.endswith("}"):
-                    continue
-                channels.append({"type": ch_type, "url": url})
+        channels = _channels_from_raw(raw)
 
         try:
-            _npm = int(raw.get("nas_patrol_interval_minutes", 720))
-        except (TypeError, ValueError):
-            _npm = 720
-        _npm = max(5, min(10080, _npm))
+            from utils.cron_util import resolve_nas_patrol_cron
+
+            _cron = resolve_nas_patrol_cron(
+                raw.get("nas_patrol_cron", ""),
+                raw.get("nas_patrol_interval_minutes", 720),
+            )
+        except Exception:
+            _cron = "0 12 * * *"
 
         data = {
             "title": "FnMessageBot",
             "subtitle": "飞牛日志消息推送机器人",
-            "version": "2.3.0",
+            "version": "2.5.0",
             "events_by_category": events_by_category,
             "third_party_events_by_category": third_party_events_by_category,
             "selected_events": monitor_events,
@@ -519,7 +530,7 @@ def create_app(on_config_saved=None) -> Flask:
             "poll_batch_summary_enabled": as_bool(raw.get("poll_batch_summary_enabled", False), False),
             "minimal_push_enabled": as_bool(raw.get("minimal_push_enabled", False), False),
             "nas_patrol_enabled": as_bool(raw.get("nas_patrol_enabled", False), False),
-            "nas_patrol_interval_minutes": _npm,
+            "nas_patrol_cron": _cron,
             "channel_options": CHANNEL_OPTIONS,
         }
         db_access_warnings = _collect_external_db_access_warnings(raw, monitor_events)
@@ -534,6 +545,7 @@ def create_app(on_config_saved=None) -> Flask:
         # 只保留后端认可的事件 ID，避免写入非法值导致热加载或重启异常
         events = [e for e in events if e in valid_event_ids]
         channels = payload.get("channels") or []
+        channels = _normalize_push_channels(channels)
         log_retention_days = payload.get("log_retention_days", 7)
         logger_poll_interval = payload.get("logger_poll_interval", 3)
         dnd_enabled = as_bool(payload.get("dnd_enabled", False), False)
@@ -543,10 +555,7 @@ def create_app(on_config_saved=None) -> Flask:
         poll_batch_summary_enabled = as_bool(payload.get("poll_batch_summary_enabled", False), False)
         minimal_push_enabled = as_bool(payload.get("minimal_push_enabled", False), False)
         nas_patrol_enabled = as_bool(payload.get("nas_patrol_enabled", False), False)
-        try:
-            nas_patrol_interval_minutes = int(payload.get("nas_patrol_interval_minutes", 720))
-        except (TypeError, ValueError):
-            nas_patrol_interval_minutes = 720
+        nas_patrol_cron = (payload.get("nas_patrol_cron") or "").strip()
         title_prefix = _title_prefix_from_dict(payload)
         if title_prefix and len(title_prefix) > 20:
             return jsonify({"ok": False, "message": "标题前缀过长（最多 20 个字符）。"}), 400
@@ -560,8 +569,15 @@ def create_app(on_config_saved=None) -> Flask:
             if not re.match(r"^([01]?\d|2[0-3]):[0-5]\d$", dnd_end_time):
                 return jsonify({"ok": False, "message": "勿扰结束时间格式不正确，请使用 HH:MM（如 07:00）。"}), 400
 
-        if nas_patrol_interval_minutes < 5 or nas_patrol_interval_minutes > 10080:
-            return jsonify({"ok": False, "message": "巡检间隔须在 5～10080 分钟之间。"}), 400
+        if nas_patrol_enabled or nas_patrol_cron:
+            try:
+                from utils.cron_util import validate_cron_expr
+
+                nas_patrol_cron = validate_cron_expr(nas_patrol_cron or "0 12 * * *")
+            except ValueError as e:
+                return jsonify({"ok": False, "message": str(e)}), 400
+        else:
+            nas_patrol_cron = (nas_patrol_cron or "0 12 * * *").strip() or "0 12 * * *"
 
         # 不允许选择内部保留事件
         if EVENT_IDS_HIDDEN_IN_UI & set(events):
@@ -572,6 +588,8 @@ def create_app(on_config_saved=None) -> Flask:
             return jsonify({"ok": False, "message": "请至少选择一个事件类型。"}), 400
 
         if not channels:
+            return jsonify({"ok": False, "message": "请至少配置一个推送渠道。"}), 400
+        if not any(bool(ch.get("enabled")) for ch in channels):
             return jsonify({"ok": False, "message": "请至少配置一个推送渠道。"}), 400
 
         for ch in channels:
@@ -639,42 +657,14 @@ def create_app(on_config_saved=None) -> Flask:
         if logger_poll_interval <= 0:
             return jsonify({"ok": False, "message": "数据库轮询时间必须大于 0 秒。"}), 400
 
-        # 归并渠道为每种类型一个以 '|' 分隔的字符串，兼容现有配置结构
-        wechat_urls = []
-        dingtalk_urls = []
-        feishu_urls = []
-        bark_urls = []
-        pushplus_urls = []
-        magic_push_urls = []
-        smtp_urls = []
-        for ch in channels:
-            ch_type = ch.get("type")
-            url = (ch.get("url") or "").strip()
-            if ch_type == "wechat":
-                wechat_urls.append(url)
-            elif ch_type == "dingtalk":
-                dingtalk_urls.append(url)
-            elif ch_type == "feishu":
-                feishu_urls.append(url)
-            elif ch_type == "bark":
-                bark_urls.append(url)
-            elif ch_type == "pushplus":
-                pushplus_urls.append(url)
-            elif ch_type == "magic_push":
-                magic_push_urls.append(url)
-            elif ch_type == "smtp":
-                smtp_urls.append(url)
+        # 完整列表写入 push_channels；扁平字段仅同步已开启渠道（供通知器推送）
+        flat_keys = _sync_channel_flat_keys(channels)
 
         raw = _load_raw_config()
         raw.update(
             {
-                "wechat_webhook_url": _join_urls(wechat_urls),
-                "dingtalk_webhook_url": _join_urls(dingtalk_urls),
-                "feishu_webhook_url": _join_urls(feishu_urls),
-                "bark_url": _join_urls(bark_urls),
-                "pushplus_params": _join_urls(pushplus_urls),
-                "magic_push_params": _join_urls(magic_push_urls),
-                "smtp_params": _join_urls(smtp_urls),
+                **flat_keys,
+                "push_channels": channels,
                 "monitor_events": events,
                 "log_retention_days": log_retention_days,
                 "logger_poll_interval": logger_poll_interval,
@@ -685,7 +675,7 @@ def create_app(on_config_saved=None) -> Flask:
                 "poll_batch_summary_enabled": poll_batch_summary_enabled,
                 "minimal_push_enabled": minimal_push_enabled,
                 "nas_patrol_enabled": nas_patrol_enabled,
-                "nas_patrol_interval_minutes": nas_patrol_interval_minutes,
+                "nas_patrol_cron": nas_patrol_cron,
                 "title_prefix": title_prefix,
                 "bark_icon": bark_icon,
             }
@@ -697,6 +687,11 @@ def create_app(on_config_saved=None) -> Flask:
             return jsonify({"ok": False, "message": f"配置写入失败（{e}），请检查 config 目录是否可写。"}), 500
 
         db_access_warnings = _collect_external_db_access_warnings(raw, events)
+        if nas_patrol_cron and not nas_patrol_enabled:
+            db_access_warnings = list(db_access_warnings or [])
+            db_access_warnings.append(
+                "已填写巡检 Cron，但未勾选「巡检任务」：定时不会自动执行（「立即巡检一次」仍可用）。"
+            )
 
         if callable(on_config_saved):
             try:
@@ -730,15 +725,56 @@ def create_app(on_config_saved=None) -> Flask:
                 content,
                 {
                     "hostname": socket.gethostname(),
-                    "version": "2.3.0",
+                    "version": "2.5.0",
                 },
             )
             ok = out.get("success", False) if isinstance(out, dict) else bool(out)
+            channel_results = out.get("channel_results") if isinstance(out, dict) else None
             if ok:
-                return jsonify({"ok": True, "message": "测试消息已发送，请检查各渠道是否收到。"})
-            return jsonify({"ok": False, "message": "所有渠道发送失败，请检查配置。"}), 500
+                return jsonify({
+                    "ok": True,
+                    "message": "测试消息已发送，请检查各渠道是否收到。",
+                    "channel_results": channel_results or [],
+                })
+            # 拼出各渠道失败原因，便于排查魔法推送等自建服务
+            fail_bits = []
+            if isinstance(channel_results, list):
+                for cr in channel_results:
+                    if not isinstance(cr, dict):
+                        continue
+                    name = str(cr.get("channel") or "渠道")
+                    err = cr.get("error")
+                    if err:
+                        fail_bits.append(f"{name}: {err}")
+                    elif not cr.get("success"):
+                        fail_bits.append(f"{name}: 发送失败")
+            detail = "；".join(fail_bits) if fail_bits else "请检查配置"
+            return jsonify({
+                "ok": False,
+                "message": f"所有渠道发送失败。{detail}",
+                "channel_results": channel_results or [],
+            }), 500
         except Exception as e:
             return jsonify({"ok": False, "message": f"测试发送异常：{e}"}), 500
+
+    @app.post("/api/nas-patrol/run")
+    def run_nas_patrol():
+        """立即执行一次 NAS 巡检推送（不等待 Cron）。"""
+        try:
+            runtime = get_runtime_monitor_app()
+            if runtime is None:
+                return jsonify({
+                    "ok": False,
+                    "message": "监控进程未就绪（请确认以完整服务启动，而非仅 UI）。",
+                }), 503
+            from monitor.nas_patrol import run_nas_patrol_now
+
+            ok, message = run_nas_patrol_now(runtime)
+            if ok:
+                return jsonify({"ok": True, "message": message})
+            return jsonify({"ok": False, "message": message}), 500
+        except Exception as e:
+            return jsonify({"ok": False, "message": f"巡检执行异常：{e}"}), 500
 
     @app.get("/api/push-stats")
     def get_push_stats():
