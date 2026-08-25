@@ -15,7 +15,7 @@ EVENT_CATEGORIES = [
     ("login", "登录与认证", ["LoginSucc", "LoginSucc2FA1", "LoginFail", "Logout"]),
     ("ssh", "SSH", ["SSH_INVALID_USER", "SSH_AUTH_FAILED", "SSH_LOGIN_SUCCESS", "SSH_DISCONNECTED"]),
     ("security", "安全", [
-        "FW_ENABLE", "FW_DISABLE", "SECURITY_PORTCHANGED",
+        "FW_ENABLE", "FW_DISABLE", "SECURITY_PORTCHANGED", "WAN_IP_CHANGED",
     ]),
     ("hardware", "硬件与告警", [
         "CPU_USAGE_ALARM", "CPU_USAGE_RESTORED", "CPU_TEMPERATURE_ALARM",

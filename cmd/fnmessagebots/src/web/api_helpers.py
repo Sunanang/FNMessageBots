@@ -16,7 +16,6 @@ def build_notifier_from_raw(raw: dict) -> MultiPlatformNotifier:
         dingtalk_webhook_url=raw.get("dingtalk_webhook_url", ""),
         feishu_webhook_url=raw.get("feishu_webhook_url", ""),
         bark_url=raw.get("bark_url", ""),
-        bark_icon=str(raw.get("bark_icon", "") or ""),
         pushplus_params=raw.get("pushplus_params", ""),
         magic_push_params=raw.get("magic_push_params", "") or "",
         smtp_params=raw.get("smtp_params", "") or "",

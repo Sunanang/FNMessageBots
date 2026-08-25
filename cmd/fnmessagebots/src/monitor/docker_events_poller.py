@@ -57,23 +57,6 @@ _DEDUP_TTL_SECONDS = 24 * 3600
 # 运行中重连时 since 与磁盘游标差过大则限制回溯窗口，避免一次补拉过多（引擎仍可能保留上限）
 _SINCE_MAX_LOOKBACK_SECONDS = 86400
 
-# Docker 守护进程不可用时写入；下次成功连接 /events 前若存在此文件，则 since 取当前时刻，避免回放停机前积压事件
-DOCKER_EVENTS_SKIP_HISTORY_FLAG = "docker_events_poller_skip_history.flag"
-
-_DOCKER_BATCH_FLUSH_SIZE = 40
-
-
-def touch_docker_events_skip_history_flag(cursor_dir: str | Path) -> None:
-    """标记「Docker 曾不可用」：下次订阅 events 时不要用磁盘上的旧 since 回放历史。"""
-    p = Path(cursor_dir)
-    try:
-        p.mkdir(parents=True, exist_ok=True)
-        fp = p / DOCKER_EVENTS_SKIP_HISTORY_FLAG
-        if not fp.exists():
-            fp.write_text("1", encoding="ascii")
-    except OSError:
-        pass
-
 
 def _event_unix_seconds(ev: Dict[str, Any]) -> int:
     """从 Docker decode 事件取 Unix 秒时间戳（用于 since 游标）。"""
@@ -118,6 +101,8 @@ class DockerEventsPoller:
         self.socket_path = (socket_path or "").strip() or "/var/run/docker.sock"
         self.cursor_dir = Path(cursor_dir)
         self.monitor_events = set(monitor_events or [])
+        self.poll_batch_summary_enabled = False
+        self.summary_batch_enqueue: Optional[Callable[[List[Dict[str, Any]]], None]] = None
         self.event_handlers: Dict[str, Callable] = {}
         self.running = False
         self._thread: Optional[threading.Thread] = None
@@ -131,9 +116,6 @@ class DockerEventsPoller:
         self._start_cutoff_ts: int = 0
         self._start_cutoff_ns: int = 0
         self.logger = logging.getLogger(__name__)
-        self._docker_batch_buf: List[Dict[str, Any]] = []
-        self.poll_batch_summary_enabled: bool = False
-        self.poller_batch_dispatcher: Optional[Callable[[List[Dict[str, Any]]], bool]] = None
 
     def add_handler(self, event_type: str, handler: Callable) -> None:
         self.event_handlers[event_type] = handler
@@ -164,8 +146,7 @@ class DockerEventsPoller:
         enqueue: Optional[Callable[[List[Dict[str, Any]]], None]],
     ) -> None:
         self.poll_batch_summary_enabled = bool(enabled)
-        # 与当前批量分发实现字段保持一致
-        self.poller_batch_dispatcher = enqueue
+        self.summary_batch_enqueue = enqueue
 
     def _load_dedup(self) -> None:
         try:
@@ -221,7 +202,7 @@ class DockerEventsPoller:
             self.logger.warning("写入 Docker events since 游标失败: %s", e)
 
     def _align_since_cursor_to_start_time(self) -> None:
-        """每次启动对齐到当前时刻，跳过停止/禁用期间积累的 Docker 事件。"""
+        """每次启动对齐到当前时刻，跳过停用/停机期间积累的 Docker 事件。"""
         now_ns = time.time_ns()
         now_ts = max(1, now_ns // 1_000_000_000)
         self._start_cutoff_ns = now_ns
@@ -236,23 +217,6 @@ class DockerEventsPoller:
 
     def _effective_since_for_connect(self) -> int:
         """本次连接使用的 since：不早于本次 start 水位；运行中重连再参考磁盘游标。"""
-        skip_fp = self.cursor_dir / DOCKER_EVENTS_SKIP_HISTORY_FLAG
-        if skip_fp.exists():
-            try:
-                skip_fp.unlink()
-            except OSError:
-                pass
-            now_ns = time.time_ns()
-            now = max(1, now_ns // 1_000_000_000)
-            self._start_cutoff_ns = now_ns
-            self._start_cutoff_ts = now
-            self.logger.info(
-                "检测到 Docker 曾不可用，跳过历史容器事件，仅从当前时刻起订阅（since=%s）",
-                now,
-            )
-            self._since_cursor_ts = now
-            self._save_since_cursor(now)
-            return now
         now = int(time.time())
         stored = self._load_since_cursor()
         floor = max(now - _SINCE_MAX_LOOKBACK_SECONDS, self._start_cutoff_ts or 0)
@@ -339,6 +303,7 @@ class DockerEventsPoller:
             "container_name": name,
             "image": image,
             "docker_action": action_raw,
+            # 供推送去重指纹区分同容器同分钟内多条引擎事件（避免误并入同一指纹）
             "engine_time_nano": time_nano,
             "_source": "docker",
             "_source_cursor": f"{cid}:{action_raw}:{time_nano}",
@@ -367,38 +332,6 @@ class DockerEventsPoller:
             "dedup_key": cursor_key,
         }
 
-    def _flush_docker_batch(self) -> None:
-        buf = self._docker_batch_buf
-        self._docker_batch_buf = []
-        if not buf:
-            return
-        disp = getattr(self, "poller_batch_dispatcher", None)
-        if bool(getattr(self, "poll_batch_summary_enabled", False)) and disp is not None:
-            try:
-                items = [
-                    {"event_type": x["event_type"], "event_data": x["event_data"], "entry": x["entry"]}
-                    for x in buf
-                ]
-                disp(items)
-            except Exception as e:
-                self.logger.error("Docker 批量推送失败: %s", e, exc_info=True)
-                self._docker_batch_buf = buf + self._docker_batch_buf
-                return
-            now = int(time.time())
-            for x in buf:
-                self._dedup_seen[x["dedup_key"]] = now
-            return
-        for x in buf:
-            et = x["event_type"]
-            handler = self.event_handlers.get(et)
-            if not handler:
-                continue
-            try:
-                handler(x["event_data"], x["entry"])
-                self._dedup_seen[x["dedup_key"]] = int(time.time())
-            except Exception as e:
-                self.logger.error("Docker 事件逐条处理失败 %s: %s", et, e, exc_info=True)
-
     def _handle_one(self, ev: Dict[str, Any]) -> None:
         parsed = self._event_to_internal(ev)
         if not parsed:
@@ -412,23 +345,26 @@ class DockerEventsPoller:
         handler = self.event_handlers.get(et)
         if not handler:
             return
-        use_batch = bool(getattr(self, "poll_batch_summary_enabled", False)) and getattr(
-            self, "poller_batch_dispatcher", None
-        ) is not None
-        if use_batch:
-            self._docker_batch_buf.append(
-                {
-                    "event_type": et,
-                    "event_data": parsed["event_data"],
-                    "entry": parsed["entry"],
-                    "dedup_key": dk,
-                }
-            )
-            if len(self._docker_batch_buf) >= _DOCKER_BATCH_FLUSH_SIZE:
-                self._flush_docker_batch()
-            return
         try:
-            handler(parsed["event_data"], parsed["entry"])
+            ed = parsed["event_data"]
+            entry = parsed["entry"]
+            if self.poll_batch_summary_enabled and self.summary_batch_enqueue:
+                rid = abs(hash(dk)) % (2**31 - 1)
+                self.summary_batch_enqueue(
+                    [
+                        {
+                            "row_id": rid,
+                            "db_event_id": et,
+                            "event_type": et,
+                            "event_data": ed,
+                            "entry": entry,
+                            "handler": handler,
+                            "source": "docker",
+                        }
+                    ]
+                )
+            else:
+                handler(ed, entry)
             self._dedup_seen[dk] = int(time.time())
         except Exception as e:
             self.logger.error("处理 Docker 事件失败 %s: %s", et, e, exc_info=True)
@@ -441,10 +377,6 @@ class DockerEventsPoller:
         while self.running:
             try:
                 if not DOCKER_POLL_EVENTS & set(self.monitor_events or []):
-                    time.sleep(3)
-                    continue
-                if not Path(self.socket_path).exists():
-                    touch_docker_events_skip_history_flag(self.cursor_dir)
                     time.sleep(3)
                     continue
                 since_ts = self._effective_since_for_connect()
@@ -493,7 +425,6 @@ class DockerEventsPoller:
                 if self.running:
                     self.logger.warning("Docker events 流异常，将重试: %s", e, exc_info=True)
             finally:
-                self._flush_docker_batch()
                 self._flush_since_cursor()
                 if self._client:
                     try:
@@ -543,7 +474,7 @@ class DockerEventsPoller:
             stuck = self._thread.is_alive()
             if stuck:
                 self.logger.warning(
-                    "DockerEventsPoller 线程未在 15s 内退出，可能仍存在重复监听；请重启应用",
+                    "DockerEventsPoller 线程未在 15s 内退出，可能仍存在重复监听；请重启容器",
                 )
                 # 保留 _thread，避免误判为已停止于是又 start() 拉出第二条监听。
             else:

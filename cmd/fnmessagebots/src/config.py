@@ -26,7 +26,7 @@ class Config:
     bark_url: str = ""  # Bark推送URL
     bark_icon: str = ""  # Bark 自定义图标 URL（留空使用默认图标）
     pushplus_params: str = ""  # PushPlus 推送参数（JSON 字符串，多个用 | 分隔）
-    magic_push_params: str = ""  # 魔法推送（JSON：base_url、token、可选 title，多个用 | 分隔）
+    magic_push_params: str = ""  # 魔法推送（JSON：base_url、token、可选 title、可选 use_inbound，多个用 | 分隔）
     smtp_params: str = ""  # SMTP 邮件参数（JSON：server、port、username、password、from、to；多个用 | 分隔）
     
     # 通知标题配置；默认「飞牛NAS」。仅在配置中显式写入空字符串时，推送标题不包含此前缀。
@@ -85,9 +85,11 @@ class Config:
     dnd_start_time: str = "22:00"  # HH:MM，如 22:00
     dnd_end_time: str = "07:00"   # HH:MM，如 07:00（跨日则到次日该时间结束）
 
-    # NAS 定时巡检（按间隔采集本机 CPU/内存/磁盘状态并推送，不参与日志事件勾选）
+    # NAS 定时巡检（Cron 调度；不参与日志事件勾选）
     nas_patrol_enabled: bool = False
-    nas_patrol_interval_minutes: int = 720  # 5～10080
+    nas_patrol_cron: str = "0 12 * * *"  # 标准 5 段：每天中午 12:00
+    # 旧字段：仅用于迁移；新配置以 nas_patrol_cron 为准
+    nas_patrol_interval_minutes: int = 720
 
     # 高级配置
     max_log_age: int = 7  # 应用运行日志 monitor_*.log 保留天数
@@ -150,7 +152,7 @@ class Config:
                 print(f"警告: 配置文件读取失败 - {e}")
 
     def _apply_discovered_db_paths(self) -> None:
-        """配置项为空时，按环境变量或常见飞牛路径自动探测可读的数据库文件。"""
+        """配置项为空时，按 compose 常见挂载路径自动探测可读的数据库文件。"""
         from config_db_paths import DB_PATH_CONFIG_KEYS, discover_db_path
 
         for key in DB_PATH_CONFIG_KEYS:
@@ -221,6 +223,8 @@ class Config:
             self.dnd_end_time = data["dnd_end_time"].strip()
         if "nas_patrol_enabled" in data:
             self.nas_patrol_enabled = as_bool(data["nas_patrol_enabled"], False)
+        if "nas_patrol_cron" in data and isinstance(data["nas_patrol_cron"], str):
+            self.nas_patrol_cron = (data["nas_patrol_cron"] or "").strip()
         if "nas_patrol_interval_minutes" in data and data["nas_patrol_interval_minutes"] is not None:
             try:
                 self.nas_patrol_interval_minutes = int(data["nas_patrol_interval_minutes"])
@@ -475,6 +479,13 @@ class Config:
         except (TypeError, ValueError):
             _iv = 720
         self.nas_patrol_interval_minutes = max(5, min(10080, _iv))
+
+        from utils.cron_util import resolve_nas_patrol_cron
+
+        self.nas_patrol_cron = resolve_nas_patrol_cron(
+            getattr(self, "nas_patrol_cron", "") or "",
+            self.nas_patrol_interval_minutes,
+        )
 
     def _ensure_directories(self):
         """确保目录存在"""

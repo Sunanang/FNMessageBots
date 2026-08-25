@@ -7,7 +7,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 from typing import Callable, Optional, Tuple
-from web.config_store import config_load_error
+from utils.value_parser import as_bool
 
 PBKDF2_ITERATIONS = 100000
 
@@ -45,8 +45,6 @@ def get_password_config(raw: dict) -> Tuple[Optional[str], Optional[str]]:
 def has_password_set(load_raw_config: Callable[[], dict]) -> bool:
     """当前配置是否已设置访问密码。"""
     raw = load_raw_config()
-    if config_load_error(raw):
-        return True
     salt, h = get_password_config(raw)
     return salt is not None and h is not None
 
@@ -54,6 +52,4 @@ def has_password_set(load_raw_config: Callable[[], dict]) -> bool:
 def is_password_verification_enabled(load_raw_config: Callable[[], dict]) -> bool:
     """是否开启密码验证（默认 True）。"""
     raw = load_raw_config()
-    if config_load_error(raw):
-        return True
-    return bool(raw.get("web_password_enabled", True))
+    return as_bool(raw.get("web_password_enabled", True), True)

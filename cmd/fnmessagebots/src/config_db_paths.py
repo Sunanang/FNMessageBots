@@ -1,6 +1,6 @@
 """
-宿主机数据库路径：与常见飞牛 NAS 路径一致。
-配置项为空时，若当前运行环境内对应文件可读则自动填入（挂载/授权 ≠ 写入 config.json）。
+宿主机数据库路径：与 docker-compose 常见挂载一致。
+配置项为空时，若容器内对应文件可读则自动填入（挂载 ≠ 写入 config.json）。
 """
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Tuple
 
-# 与 FAQ / 默认配置路径对齐；scheduler 多候选适配不同飞牛版本目录
+# 与 README / faq / 仓库 config/config.json 对齐；scheduler 多候选适配不同飞牛版本目录
 _DB_PATH_CANDIDATES: Dict[str, Tuple[str, ...]] = {
     "logger_db_path": ("/usr/trim/var/eventlogger_service/logger_data.db3",),
     "backup_db_path": ("/usr/trim/var/backup_service/basic_backup.db3",),
@@ -68,7 +68,7 @@ def _find_scheduler_db() -> str:
 
 
 def discover_db_path(key: str) -> str:
-    """返回当前运行环境内首个可读的数据库文件路径；无则空字符串。"""
+    """返回容器内首个可读的数据库文件路径；无则空字符串。"""
     k = (key or "").strip()
     if k == "scheduler_db_path":
         return _find_scheduler_db()
@@ -82,7 +82,7 @@ def apply_discovered_db_paths(
     cfg: Mapping[str, Any],
 ) -> Tuple[Dict[str, Any], List[str]]:
     """
-    为 cfg 中空白的库路径键填入环境变量或探测结果。
+    为 cfg 中空白的库路径键填入探测结果。
     返回 (新 dict, 人类可读说明列表，供日志或提示)。
     """
     out: Dict[str, Any] = dict(cfg)
@@ -101,7 +101,7 @@ def apply_discovered_db_paths(
         if not found:
             continue
         out[key] = found
-        notes.append(f"已根据可读数据库自动识别 {key}={found}")
+        notes.append(f"已根据挂载自动识别 {key}={found}")
     return out, notes
 
 

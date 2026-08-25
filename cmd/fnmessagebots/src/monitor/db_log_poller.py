@@ -159,6 +159,8 @@ class DBLogPoller:
         self.media_lib_service_patterns = [str(p).strip() for p in (media_lib_service_patterns or []) if str(p).strip()]
         self.event_handlers: Dict[str, Callable] = {}
         self.batch_handler: Optional[Callable[[List[Dict[str, Any]]], None]] = None
+        # 当 SSH journal 轮询可用时，跳过库内 Sshd*，避免双推
+        self.skip_ssh_events = False
         self.running = False
         self._thread: Optional[threading.Thread] = None
         self._cursor_file = self.cursor_dir / "db_poller_cursor.txt"
@@ -269,6 +271,13 @@ class DBLogPoller:
             uname_raw = (row.get("uname") or "").strip()
             if db_event_id == "SshdLoginAuthFail" and uname_raw.lower() == "invalid":
                 project_type = "SSH_INVALID_USER"
+            if self.skip_ssh_events and project_type in {
+                "SSH_LOGIN_SUCCESS",
+                "SSH_AUTH_FAILED",
+                "SSH_INVALID_USER",
+                "SSH_DISCONNECTED",
+            }:
+                continue
             project_type = self._apply_media_library_filter(row, project_type)
             if self.monitor_events and project_type not in self.monitor_events:
                 continue

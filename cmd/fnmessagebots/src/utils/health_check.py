@@ -14,7 +14,7 @@ try:
 except ImportError:
     psutil = None
 
-from config import Config
+from src.config import Config
 
 class HealthChecker:
     """健康检查器"""

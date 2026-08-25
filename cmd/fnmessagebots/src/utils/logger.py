@@ -38,17 +38,14 @@ def setup_logging(config) -> logging.Logger:
     console_handler.setLevel(getattr(logging, config.log_level))
     logger.addHandler(console_handler)
     
-    # 文件处理器（目录不可写时仅控制台，避免启动即崩溃）
+    # 文件处理器
     log_dir = Path(config.log_dir)
-    try:
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_file = log_dir / f"monitor_{datetime.now().strftime('%Y%m%d')}.log"
-        file_handler = logging.FileHandler(log_file)
-        file_handler.setFormatter(formatter)
-        file_handler.setLevel(getattr(logging, config.log_level))
-        logger.addHandler(file_handler)
-    except OSError as e:
-        print(f"警告: 无法创建或写入日志目录 {log_dir}（{e}），仅输出到控制台。", file=sys.stderr)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / f"monitor_{datetime.now().strftime('%Y%m%d')}.log"
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setFormatter(formatter)
+    file_handler.setLevel(getattr(logging, config.log_level))
+    logger.addHandler(file_handler)
     
     # 设置第三方库日志级别
     logging.getLogger('urllib3').setLevel(logging.WARNING)
