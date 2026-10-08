@@ -145,7 +145,7 @@ class EventProcessor:
         self.ssh_merge_window = 5  # 秒
         self.ssh_pending = {}
         
-        self.logger.info("事件处理器初始化完成")
+        self.logger.debug("事件处理器初始化完成")
 
     def _build_batch_event_brief(self, event_type: str, event_data: Dict[str, Any]) -> str:
         """为批量汇总生成单条简述。"""
@@ -563,9 +563,6 @@ class EventProcessor:
         display_name = data.get('DISPLAY_NAME', data.get('APP_NAME', '未知应用'))
         timestamp = getattr(entry, 'timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
         
-        # 输出标准格式日志
-        print(f"[错误] 应用: {display_name}, 崩溃异常退出, 时间: {timestamp}")
-        
         self.logger.warning(f"应用崩溃: {display_name}")
         
         # 如果entry为None，使用默认值
@@ -583,9 +580,6 @@ class EventProcessor:
         data = event_data.get('data', {})
         display_name = data.get('DISPLAY_NAME', data.get('APP_NAME', '未知应用'))
         timestamp = getattr(entry, 'timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-        
-        # 输出标准格式日志
-        print(f"[错误] 应用: {display_name}, 更新失败, 时间: {timestamp}")
         
         self.logger.warning(f"应用更新失败: {display_name}")
         
@@ -861,9 +855,6 @@ class EventProcessor:
         """处理UPS切换到电池供电事件"""
         timestamp = getattr(entry, 'timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
         
-        # 输出标准格式日志
-        print(f"[警告] UPS启动，切换到电池供电, 时间: {timestamp}")
-        
         self.logger.warning("UPS启动，切换到电池供电")
         
         # 如果entry为None，使用默认值
@@ -880,9 +871,6 @@ class EventProcessor:
         """处理UPS切换到电池供电且电池电量低事件"""
         timestamp = getattr(entry, 'timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
         
-        # 输出标准格式日志
-        print(f"[严重警告] UPS启动，切换到电池供电，电池电量低警告, 时间: {timestamp}")
-        
         self.logger.warning("UPS启动，切换到电池供电，电池电量低警告")
         
         # 如果entry为None，使用默认值
@@ -898,9 +886,6 @@ class EventProcessor:
     def _handle_ups_online(self, event_data: Dict[str, Any], entry: JournalEntry):
         """处理UPS切换到市电供电事件"""
         timestamp = getattr(entry, 'timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-        
-        # 输出标准格式日志
-        print(f"[通知] UPS启动，切换到市电供电模式, 时间: {timestamp}")
         
         self.logger.info("UPS启动，切换到市电供电模式")
         
@@ -962,7 +947,8 @@ class EventProcessor:
 
             event_desc = "磁盘唤醒" if event_type == 'DiskWakeup' else "磁盘休眠"
             disk_label = event_entry['disk'] or event_entry['serial'] or event_entry['model'] or "(未提供磁盘信息)"
-            print(f"[{event_desc}] 磁盘: {disk_label}, 型号: {event_entry['model']}, 序列号: {event_entry['serial']}, 时间: {timestamp}")
+            self.logger.debug("[%s] 磁盘: %s, 型号: %s, 序列号: %s, 时间: %s",
+                              event_desc, disk_label, event_entry['model'], event_entry['serial'], timestamp)
         
         # 取消之前的定时器
         old_timer = getattr(self, timer_attr, None)
@@ -1019,9 +1005,7 @@ class EventProcessor:
         
         # 输出合并的日志
         event_desc = "磁盘唤醒" if event_type == 'DiskWakeup' else "磁盘休眠"
-        print(f"[{event_desc}合并] 共 {len(cache_list)} 个磁盘事件:")
-        for event in cache_list:
-            print(f"  - 磁盘: {event['disk']}, 型号: {event['model']}, 序列号: {event['serial']}")
+        self.logger.info("[%s合并] 共 %s 个磁盘事件", event_desc, len(cache_list))
         
         # 发送通知
         self.notifier.send_notification(

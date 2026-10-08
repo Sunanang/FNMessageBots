@@ -350,8 +350,7 @@ class PhotoDBPoller:
                 f"相册人脸识别冷却中：已累计 {pending['count']} 条任务日志，"
                 f"静默 {FACE_DEBOUNCE_SEC}s 无新增后再汇总推送"
             )
-            self.logger.info(msg)
-            print(msg, flush=True)
+            self.logger.debug(msg)
             self._last_face_debounce_log_ts = now
 
     def _face_pending_person_stats(
@@ -523,7 +522,6 @@ class PhotoDBPoller:
             f"（id {first_id}–{last_id}），静默约 {int(quiet)}s"
         )
         self.logger.info(msg)
-        print(msg, flush=True)
         # 仅在真正投递成功后再清空缓冲，避免 handler 缺失/去重空操作导致丢批
         if self._emit(FACE_RECOGNITION_UPDATED, ev, raw, None):
             state["face_pending"] = self._empty_face_pending()

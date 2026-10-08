@@ -7,7 +7,7 @@
 - **数据库轮询**：定时轮询 eventlogger 的 SQLite 数据库，仅处理启动后的新记录
 - **多平台通知**：企业微信、钉钉、飞书、Bark、PushPlus
 - **Web 配置页**：内置配置 UI（默认端口 `18080`），支持 Webhook、事件类型、勿扰、标题前缀、PushPlus 等；保存后热加载，一般无需重启
-- **Web 访问控制**：可在页面中设置访问密码（`config.json` 内保存盐值与哈希）；支持关闭密码校验（`web_password_enabled`）
+- **Web 访问控制**：所有配置接口均需登录；首次设置密码需填写启动日志中的初始化码（或用 `FNMB_WEB_PASSWORD` 预置），`config.json` 内仅保存盐值与哈希；配置页中的 Webhook key、Token、SMTP 密码会打码显示
 - **智能去重**：时间窗口去重（默认 300 秒）
 - **磁盘事件合并**：同类型磁盘唤醒/休眠在时间窗口内合并推送
 - **HTTP 连接池**：统一 HTTP 管理与重试
@@ -52,7 +52,7 @@ python tools/log_manager.py cleanup 30
 
 ### 1. [配置通知渠道](docs/notification-channels.md)
 
-至少配置一个推送渠道；环境变量与 Web 配置页二选一即可（亦可混用）。各平台图文说明见 **[配置通知渠道](docs/notification-channels.md)**（内含企业微信、钉钉、飞书、Bark、魔法推送、SMTP 邮件、PushPlus 的独立文档入口）。
+至少配置一个推送渠道；环境变量与 Web 配置页二选一即可（亦可混用）。各平台图文说明见 **[配置通知渠道](docs/notification-channels.md)**（内含企业微信、钉钉、飞书、Bark、魔法推送、SMTP 邮件、PushPlus、企业微信应用、通用 Webhook、MeoW 的独立文档入口）。
 
 未配置任何 Webhook / PushPlus 时进程仍可启动，仅提供 Web 配置页；配置完成后自动开始监控与推送。
 
@@ -62,6 +62,9 @@ python tools/log_manager.py cleanup 30
 | --- | --- |
 | `wechat_webhook_url` / `dingtalk_webhook_url` / `feishu_webhook_url` / `bark_url` | 各平台 Webhook 或 Bark URL |
 | `pushplus_params` | PushPlus JSON（可多个，`\|` 分隔） |
+| `wecom_app_params` | 企业微信自建应用 JSON（可多个，`\|` 分隔），见 [企业微信应用](docs/channels/wecom-app.md) |
+| `webhook_params` | 通用 Webhook JSON（可多个，`\|` 分隔），见 [通用 Webhook](docs/channels/webhook.md) |
+| `meow_params` | MeoW JSON（可多个，`\|` 分隔），见 [MeoW](docs/channels/meow.md) |
 | `title_prefix` | 推送标题前缀，留空则使用默认「飞牛NAS」 |
 | `monitor_events` | 要监控的事件 ID 列表 |
 | `log_level` | 日志级别 |
@@ -73,9 +76,10 @@ python tools/log_manager.py cleanup 30
 | `log_retention_days` | 原始推送日志保留天数 |
 | `max_log_age` | 应用运行日志 `monitor_*.log` 保留天数 |
 | `dnd_enabled` / `dnd_start_time` / `dnd_end_time` | 勿扰开关与时段（HH:MM，可跨日） |
-| `web_password_enabled` | 是否要求密码才能访问配置页（默认 true） |
+| `ssh_ignore_loopback` | 忽略来源为 127.0.0.1 / ::1 的 SSH 登录成功与断开（默认关闭；失败告警不受影响；SSH 经 frp 等内网穿透接入时勿开启）。环境变量 `SSH_IGNORE_LOOPBACK` |
+首次在 Web 中设置密码后，会在同文件写入 `web_password_salt`、`web_password_hash`（请勿手工泄露）。旧版的 `web_password_enabled` 已废弃，不再能关闭鉴权。
 
-首次在 Web 中设置密码后，会在同文件写入 `web_password_salt`、`web_password_hash`（请勿手工泄露）。
+**首次设置密码**：为防止局域网内他人抢先设密，首次设置需填写初始化码。初始化码在启动时打印到日志（`docker logs 容器名`），同时写入配置目录的 `.setup_code`（权限 600），设置密码后自动失效。也可用环境变量 `FNMB_WEB_PASSWORD` 预置初始密码（至少 8 位）。
 
 ### 3. 常用环境变量
 
@@ -85,9 +89,11 @@ python tools/log_manager.py cleanup 30
 - `MONITOR_EVENTS`（逗号分隔）
 - `LOG_LEVEL`、`HTTP_POOL_SIZE`、`HTTP_RETRY_COUNT`、`HTTP_TIMEOUT`、`DEDUP_WINDOW`
 - `LOG_RETENTION_DAYS`、`MAX_LOG_AGE`
-- `UI_PORT`：Web 端口（默认 `18080`）
+- `UI_PORT`：Web 端口（默认 `18080`）；`UI_HOST`：监听地址（默认 `0.0.0.0`，仅本机访问可设 `127.0.0.1`）
+- `FNMB_WEB_PASSWORD`：未设密码时作为初始 Web 密码（至少 8 位）
+- `FNMB_DISABLE_AUTH=1`：关闭应用内鉴权，仅在前面已有自建反代鉴权时使用，**切勿直接暴露到局域网**
 - `LOGTIME_DISPLAY_OFFSET_SECONDS`：修正日志时间显示（默认 `28800`，即 +8 小时；若显示不准可调整）
-- `NOTIFY_RESTART_ENABLED`、`NOTIFY_RESTART_CONSECUTIVE`、`NOTIFY_RESTART_WINDOW`、`NOTIFY_RESTART_COOLDOWN`：通知链路失败重启策略
+- `NOTIFY_RESTART_ENABLED`、`NOTIFY_RESTART_CONSECUTIVE`、`NOTIFY_RESTART_WINDOW`、`NOTIFY_RESTART_COOLDOWN`：通知链路失败重启策略（默认关闭；推送限流/额度用尽时重启无法恢复，反而会重复推送）
 - `APP_HOME`：自定义应用根目录（影响 `config.json` 解析路径，一般 Docker 内为 `/app`）
 
 ### 4. 数据库路径
@@ -167,7 +173,7 @@ PYTHONPATH=. LOGGER_DB_PATH=./logger_data.db3 WECHAT_WEBHOOK_URL=xxx python3 src
 - **时间不对**：调整 `LOGTIME_DISPLAY_OFFSET_SECONDS`（默认已为 +8 小时）。
 - **重复通知**：调大 `dedup_window`（秒）。
 - **Web 配置页打不开**：确认端口映射与防火墙；容器内可设 `UI_PORT` 并与 `ports` 一致。
-- **忘记 Web 密码**：在可信环境下编辑 `config.json`，删除 `web_password_salt` 与 `web_password_hash` 后重启，再在页面重新设置密码（或暂时将 `web_password_enabled` 设为 `false`）。
+- **忘记 Web 密码**：在可信环境下编辑 `config.json`，删除 `web_password_salt` 与 `web_password_hash` 后重启，再用日志或 `config/.setup_code` 中的初始化码重新设置密码。
 
 ## 捐赠
 

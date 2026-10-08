@@ -5,6 +5,7 @@ NAS 定时巡检：按 Cron 表达式调度，采集本机 CPU/内存/磁盘状�
 
 from __future__ import annotations
 
+import glob
 import json
 import logging
 import os
@@ -19,7 +20,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 import ipaddress
-import urllib.request
+import ssl
+import urllib.parse
 
 try:
     import psutil
@@ -30,8 +32,10 @@ from .sqlite_uri import connect_readonly_with_fallback
 
 _STATE_FILENAME = "nas_patrol_state.json"
 
-RETRY_BACKOFF_BASE_SEC = 30
+RETRY_BACKOFF_BASE_SEC = 300
 RETRY_BACKOFF_MAX_SEC = 3600
+# 单个巡检周期推送失败后的最大重试次数；用尽后放弃本周期，等下次计划时间
+RETRY_MAX_ATTEMPTS = 2
 
 # NUT upsd 默认端口（仅从系统自动探测连接，不提供应用层配置项）
 _NUT_UPSD_DEFAULT_PORT = 3493
@@ -372,28 +376,100 @@ def _pick_lan_ip() -> str:
     return "--"
 
 
+def _http_get_ip(url: str, *, family: int, timeout: float = 3.0) -> str:
+    """GET 公网 IP 接口，强制使用指定地址族（避免双栈误走另一族）。"""
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.hostname
+    if not host:
+        return ""
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+
+    last_err: Optional[BaseException] = None
+    for res in socket.getaddrinfo(host, port, family, socket.SOCK_STREAM):
+        af, socktype, proto, _canon, sa = res
+        sock: Optional[socket.socket] = None
+        try:
+            sock = socket.socket(af, socktype, proto)
+            sock.settimeout(timeout)
+            sock.connect(sa)
+            if parsed.scheme == "https":
+                ctx = ssl.create_default_context()
+                sock = ctx.wrap_socket(sock, server_hostname=host)
+            req = (
+                f"GET {path} HTTP/1.0\r\n"
+                f"Host: {host}\r\n"
+                f"User-Agent: FNMessageBots\r\n"
+                f"Accept: text/plain\r\n"
+                f"Connection: close\r\n\r\n"
+            ).encode("ascii")
+            sock.sendall(req)
+            raw = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                raw += chunk
+                if len(raw) > 65536:
+                    break
+            text = raw.decode("utf-8", errors="ignore")
+            if "\r\n\r\n" in text:
+                body = text.split("\r\n\r\n", 1)[1]
+            elif "\n\n" in text:
+                body = text.split("\n\n", 1)[1]
+            else:
+                body = text
+            line = (body or "").strip().splitlines()
+            return line[0].strip() if line else ""
+        except Exception as e:
+            last_err = e
+        finally:
+            if sock is not None:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+    if last_err:
+        raise last_err
+    return ""
+
+
 def _pick_wan_ip() -> str:
-    urls = (
-        "https://api4.ipify.org",  # 优先 IPv4
-        "https://api.ipify.org",
+    """优先拿到 IPv4；仅当 IPv4 全部失败时才用 IPv6。
+
+    避免偶发 IPv4 超时回退到 IPv6、下次又拿到 IPv4，导致通知在 v4/v6 间来回刷。
+    """
+    v4_urls = (
+        "https://api4.ipify.org",
+        "https://ipv4.icanhazip.com",
+        "https://v4.ident.me",
         "https://ifconfig.me/ip",
-        "https://icanhazip.com",
-        "https://ipinfo.io/ip",  # 补充源
+        "https://ipinfo.io/ip",
     )
-    for u in urls:
+    # 两轮穷尽 IPv4，降低偶发超时误落到 IPv6 的概率
+    for round_i in range(2):
+        for u in v4_urls:
+            try:
+                text = _http_get_ip(u, family=socket.AF_INET, timeout=3.0)
+                ip_obj = ipaddress.ip_address(text)
+                if ip_obj.version == 4:
+                    return text
+            except Exception:
+                continue
+        if round_i == 0:
+            time.sleep(0.5)
+
+    v6_urls = (
+        "https://api6.ipify.org",
+        "https://ipv6.icanhazip.com",
+        "https://v6.ident.me",
+        "https://api64.ipify.org",
+    )
+    for u in v6_urls:
         try:
-            with urllib.request.urlopen(u, timeout=2.0) as r:  # nosec B310
-                text = (r.read().decode("utf-8", errors="ignore") or "").strip()
-            ip_obj = ipaddress.ip_address(text)
-            if ip_obj.version == 4:
-                return text
-        except Exception:
-            continue
-    # 回退允许 IPv6
-    for u in ("https://api64.ipify.org", "https://api.ipify.org", "https://ipinfo.io/ip"):
-        try:
-            with urllib.request.urlopen(u, timeout=2.0) as r:  # nosec B310
-                text = (r.read().decode("utf-8", errors="ignore") or "").strip()
+            text = _http_get_ip(u, family=socket.AF_INET6, timeout=3.0)
             ipaddress.ip_address(text)
             return text
         except Exception:
@@ -1571,6 +1647,30 @@ def _sysfs_temp_path_sort_key(p: Path) -> Tuple[int, str]:
     return (idx, str(p))
 
 
+def _hwmon_temp1_for_block(nb: str) -> str:
+    if not _valid_sysfs_block_token(nb):
+        return ""
+    patterns = (
+        f"/sys/block/{nb}/../../hwmon/hwmon*/temp1_input",
+        f"/sys/block/{nb}/device/hwmon*/temp1_input",
+        f"/sys/block/{nb}/device/hwmon/hwmon*/temp1_input",
+    )
+    for pat in patterns:
+        try:
+            matches = sorted(glob.glob(pat))
+        except Exception:
+            continue
+        for f in matches:
+            try:
+                raw = Path(f).read_text(encoding="utf-8", errors="ignore").strip()
+                c = int(raw) // 1000
+            except (OSError, ValueError):
+                continue
+            if _celsius_ok(c):
+                return str(c)
+    return ""
+
+
 def _smart_temp_for_block_path(block_path: str) -> str:
     bp = str(block_path or "").strip()
     if not bp.startswith("/dev/"):
@@ -1578,7 +1678,12 @@ def _smart_temp_for_block_path(block_path: str) -> str:
     base = os.path.basename(bp)
     nb = _normalize_block_name(base) or base
 
-    # 1) smartctl JSON（最稳，避免文本列对齐误解析）
+    # 0) 与飞牛系统显示一致：设备所属控制器 hwmon 的 temp1_input（毫摄氏度取整）
+    hw = _hwmon_temp1_for_block(nb)
+    if hw:
+        return hw
+
+    # 1) smartctl JSON（避免文本列对齐误解析）
     out_json = _run_cmd(["smartctl", "-A", "-j", bp], timeout=3.0)
     if out_json:
         try:
@@ -2142,7 +2247,14 @@ def _patrol_partition_dev_paths(dev_base: str) -> List[str]:
 
 def _patrol_free_gb_via_findmnt_for_disk(dev_base: str) -> str:
     """对整盘各分区执行 ``findmnt -S``，在挂载点上再读剩余空间（不依赖 /vol 反查）。"""
-    best: Optional[float] = None
+    free_s, _ = _patrol_space_gb_via_findmnt_for_disk(dev_base)
+    return free_s
+
+
+def _patrol_space_gb_via_findmnt_for_disk(dev_base: str) -> Tuple[str, str]:
+    """对整盘各分区 findmnt，返回 (剩余GB, 文件系统总容量GB)。"""
+    best_free: Optional[float] = None
+    best_total: Optional[float] = None
     for part in _patrol_partition_dev_paths(dev_base):
         out = _run_cmd(["findmnt", "-n", "-r", "-S", part, "-o", "TARGET"], timeout=2.5)
         if not out:
@@ -2159,18 +2271,111 @@ def _patrol_free_gb_via_findmnt_for_disk(dev_base: str) -> str:
                     continue
             except OSError:
                 continue
-            g = _patrol_free_gb_str_for_mount(tgt)
-            if g in {"--", "—"}:
+            free_s, tot_s = _patrol_df_space_gb_pair(tgt)
+            if free_s in {"--", "—"} or tot_s in {"--", "—"}:
                 continue
             try:
-                fv = float(g)
+                fv = float(free_s)
+                tv = float(tot_s)
             except (TypeError, ValueError):
                 continue
-            if fv < 0:
+            if fv < 0 or tv <= 0:
                 continue
-            if best is None or fv > best:
-                best = fv
-    return f"{best:.1f}" if best is not None else "--"
+            if best_free is None or fv > best_free:
+                best_free = fv
+                best_total = tv
+    if best_free is not None and best_total is not None:
+        return f"{best_free:.1f}", f"{best_total:.1f}"
+    return "--", "--"
+
+
+def _patrol_vol_bag_for_physical(
+    physical: str,
+    vol_space_by_physical: Optional[Dict[str, Dict[str, str]]] = None,
+) -> Optional[Dict[str, str]]:
+    """按物理整盘名取 /vol 空间；扫描表 miss 时反向遍历可见 /volN。"""
+    pl = str(physical or "").strip().lower()
+    if not pl:
+        return None
+    vol_space = vol_space_by_physical or {}
+    hit = vol_space.get(pl)
+    if hit:
+        fg = str(hit.get("free_gb") or "").strip()
+        tg = str(hit.get("total_gb") or "").strip()
+        if fg and tg and fg not in {"--", "—"} and tg not in {"--", "—"}:
+            return hit
+
+    for vol in _patrol_visible_fn_vol_mount_roots():
+        if _patrol_mount_is_file_bind_noise(vol):
+            continue
+        try:
+            if not Path(vol).exists():
+                continue
+        except OSError:
+            continue
+        src = _patrol_mount_source_for_path(vol)
+        if not src:
+            continue
+        rdev = src.strip() if str(src).startswith("/dev/") else _patrol_resolve_psutil_device(src)
+        if not rdev.startswith("/dev/"):
+            continue
+        try:
+            rdev_open = os.path.realpath(_patrol_block_dev_for_inspection(rdev))
+        except OSError:
+            rdev_open = _patrol_block_dev_for_inspection(rdev)
+        names = {x.lower() for x in _resolve_physical_disk_names(rdev_open)}
+        walked = _walk_lsblk_to_physical_base(rdev_open)
+        if walked:
+            names.add(walked.lower())
+        if pl not in names:
+            continue
+        free_s, tot_s = _patrol_df_space_gb_pair(vol)
+        if free_s in {"--", "—"} or tot_s in {"--", "—"}:
+            if psutil:
+                try:
+                    u = psutil.disk_usage(vol)
+                    if u.total > 0:
+                        tot_s = f"{u.total / (1024**3):.1f}"
+                        free_s = f"{u.free / (1024**3):.1f}"
+                except Exception:
+                    pass
+        if free_s not in {"--", "—"} and tot_s not in {"--", "—"}:
+            return {"free_gb": free_s, "total_gb": tot_s}
+    return None
+
+
+def _patrol_disk_space_gb_for_row(
+    mount: str,
+    physical: str,
+    vol_space_by_physical: Optional[Dict[str, Dict[str, str]]] = None,
+) -> Tuple[str, str]:
+    """巡检单行 (剩余GB, 总容量GB)；优先 /vol 文件系统容量，再挂载点 df、findmnt。"""
+    phy = str(physical or "").strip()
+    m0 = str(mount or "").strip()
+
+    bag = _patrol_vol_bag_for_physical(phy, vol_space_by_physical)
+    if bag:
+        return str(bag.get("free_gb") or "--"), str(bag.get("total_gb") or "--")
+
+    if not m0 and phy:
+        m0 = _patrol_best_mount_for_physical(phy)
+    if m0 and not _patrol_mount_is_file_bind_noise(m0):
+        free_s, tot_s = _patrol_df_space_gb_pair(m0)
+        if free_s not in {"--", "—"} and tot_s not in {"--", "—"}:
+            return free_s, tot_s
+
+    if phy:
+        fm_free, fm_tot = _patrol_space_gb_via_findmnt_for_disk(phy)
+        if fm_free not in {"--", "—"} and fm_tot not in {"--", "—"}:
+            return fm_free, fm_tot
+
+        free_s = _patrol_disk_free_gb_for_row(m0, phy, vol_space_by_physical)
+        hw_size = _disk_size_gb_for_disk(phy)
+        if free_s not in {"--", "—"} and hw_size not in {"--", "—"}:
+            return free_s, hw_size
+
+    hw_size = _disk_size_gb_for_disk(phy) if phy else "--"
+    return "--", hw_size if hw_size not in {"--", "—"} else "--"
 
 
 def _patrol_scan_vol_space_by_physical() -> Dict[str, Dict[str, str]]:
@@ -2215,6 +2420,9 @@ def _patrol_scan_vol_space_by_physical() -> Dict[str, Dict[str, str]]:
         except OSError:
             pass
         names = _resolve_physical_disk_names(dev_open)
+        walked = _walk_lsblk_to_physical_base(dev_open)
+        if walked:
+            names = list(dict.fromkeys(list(names or []) + [walked]))
         if not names:
             try:
                 base = os.path.basename(os.path.realpath(_patrol_block_dev_for_inspection(rdev)))
@@ -2642,18 +2850,7 @@ def _collect_disk_items() -> List[Dict[str, str]]:
             else "未读到温度（smartctl/nvme/sysfs 均未取得，可能是命令缺失、权限或设备映射限制）"
         )
         m_pick = _patrol_best_mount_for_physical(physical)
-        free_s = _patrol_disk_free_gb_for_row(m_pick, physical, vol_space_by_physical)
-        size_s = _disk_size_gb_for_disk(physical)
-        bag = vol_space_by_physical.get(physical.lower())
-        if bag:
-            fg = bag.get("free_gb")
-            tg = bag.get("total_gb")
-            # 容量优先用整盘 size；剩余空间可用卷映射
-            if fg and str(fg).strip() not in {"--", "—", ""}:
-                free_s = str(fg)
-            # 若整盘 size 读不到，再退回卷总容量
-            if size_s in {"--", "—"} and tg and str(tg).strip() not in {"--", "—", ""}:
-                size_s = str(tg)
+        free_s, size_s = _patrol_disk_space_gb_for_row(m_pick, physical, vol_space_by_physical)
         items.append(
             {
                 "name": "",
@@ -2702,7 +2899,8 @@ def _collect_patrol_payload(_cfg: Any, _state: Dict[str, Any]) -> Dict[str, Any]
         except ValueError:
             continue
     if disk_temps:
-        disk_temp = f"{max(disk_temps):.1f}"
+        mx = max(disk_temps)
+        disk_temp = str(int(mx)) if mx.is_integer() else f"{mx:.1f}"
 
     if hostname == "--":
         missing.append("主机名称")
@@ -2762,17 +2960,14 @@ def _send_patrol_notification(
     if not cfg:
         if logger:
             logger.warning("NAS 巡检跳过：配置未加载")
-        print("NAS 巡检跳过：配置未加载", flush=True)
         return False
     if require_enabled and not getattr(cfg, "nas_patrol_enabled", False):
         if logger:
             logger.warning("NAS 巡检跳过：未开启巡检任务")
-        print("NAS 巡检跳过：未开启巡检任务", flush=True)
         return False
     if not app.notifier:
         if logger:
             logger.warning("NAS 巡检跳过：未配置推送渠道（notifier 为空）")
-        print("NAS 巡检跳过：未配置推送渠道（notifier 为空）", flush=True)
         return False
     payload = _collect_patrol_payload(cfg, {})
     # 巡检触发时顺带检测外网 IP（仅用户勾选 WAN_IP_CHANGED 时生效）
@@ -2799,13 +2994,11 @@ def _send_patrol_notification(
     except Exception as e:
         if logger:
             logger.error("NAS 巡检推送异常: %s", e, exc_info=True)
-        print(f"NAS 巡检推送异常: {e}", flush=True)
         return False
 
     if not getattr(result, "success", False):
         if logger:
             logger.warning("NAS 巡检推送未成功（渠道失败或未配置等）")
-        print("NAS 巡检推送未成功（渠道失败或未配置等）", flush=True)
         return False
     return True
 
@@ -2831,6 +3024,7 @@ def run_nas_patrol_now(app: Any) -> tuple[bool, str]:
                 state["last_success_ts"] = time.time()
                 state["retry_until_ts"] = 0.0
                 state["retry_backoff_sec"] = RETRY_BACKOFF_BASE_SEC
+                state["retry_count"] = 0
                 _save_state(sp, state)
         except Exception as e:
             log.warning("手动巡检成功但更新状态失败: %s", e)
@@ -2874,7 +3068,6 @@ def _patrol_star_interval_seconds(cron_expr: str) -> Optional[int]:
 def nas_patrol_worker_loop(app: Any) -> None:
     log = logging.getLogger(__name__)
     log.info("NAS 定时巡检线程已启动")
-    print("NAS 定时巡检线程已启动", flush=True)
     try:
         from utils.cron_util import croniter_available
 
@@ -2885,37 +3078,27 @@ def nas_patrol_worker_loop(app: Any) -> None:
             )
     except Exception:
         pass
-    _last_wait_log_ts = 0.0
-    _last_idle_log_ts = 0.0
+    _last_wait_due = 0.0
+    _last_idle_msg = ""
     while app.running:
         try:
             cfg = app.config
             if not cfg or not getattr(cfg, "nas_patrol_enabled", False) or not app.notifier:
-                now_idle = time.time()
-                # 未开启时每 60 秒提示一次（便于发现「只填了 Cron、没勾选」）
-                idle_every = 60.0 if (cfg and (getattr(cfg, "nas_patrol_cron", "") or "").strip()) else 300.0
-                if now_idle - _last_idle_log_ts >= idle_every:
-                    reason = []
-                    if not cfg:
-                        reason.append("配置未加载")
-                    elif not getattr(cfg, "nas_patrol_enabled", False):
-                        reason.append("巡检未开启（请勾选「巡检任务」并保存）")
-                    if not getattr(app, "notifier", None):
-                        reason.append("无推送渠道")
-                    cron_hint = ""
-                    if cfg and (getattr(cfg, "nas_patrol_cron", "") or "").strip():
-                        cron_hint = f"，当前 Cron={getattr(cfg, 'nas_patrol_cron', '')}"
-                    msg = (
-                        "NAS 巡检空闲："
-                        + ("、".join(reason) if reason else "条件未满足")
-                        + cron_hint
-                        + "（定时不会执行）"
-                    )
+                reason = []
+                if not cfg:
+                    reason.append("配置未加载")
+                elif not getattr(cfg, "nas_patrol_enabled", False):
+                    reason.append("巡检未开启")
+                if not getattr(app, "notifier", None):
+                    reason.append("无推送渠道")
+                msg = "NAS 巡检空闲：" + ("、".join(reason) if reason else "条件未满足")
+                # 状态不变只记一次
+                if msg != _last_idle_msg:
                     log.info(msg)
-                    print(msg, flush=True)
-                    _last_idle_log_ts = now_idle
+                    _last_idle_msg = msg
                 time.sleep(30)
                 continue
+            _last_idle_msg = ""
 
             from utils.cron_util import next_cron_timestamp, resolve_nas_patrol_cron
 
@@ -2927,7 +3110,6 @@ def nas_patrol_worker_loop(app: Any) -> None:
             except Exception as e:
                 msg = f"NAS 巡检 Cron 配置无效: {e}"
                 log.error(msg)
-                print(msg, flush=True)
                 time.sleep(60)
                 continue
 
@@ -2964,7 +3146,6 @@ def nas_patrol_worker_loop(app: Any) -> None:
                         f"可在 Web 点「立即巡检一次」马上验证"
                     )
                     log.info(msg)
-                    print(msg, flush=True)
                     time.sleep(5)
                     continue
                 _save_state(sp, state)
@@ -2983,7 +3164,6 @@ def nas_patrol_worker_loop(app: Any) -> None:
                     "已重置为当前时间"
                 )
                 log.warning(msg)
-                print(msg, flush=True)
                 last_success = now
                 state["last_success_ts"] = now
                 _save_state(sp, state)
@@ -3003,7 +3183,6 @@ def nas_patrol_worker_loop(app: Any) -> None:
                 except Exception as e:
                     msg = f"NAS 巡检 Cron 无效 ({cron_expr}): {e}"
                     log.error(msg)
-                    print(msg, flush=True)
                     time.sleep(60)
                     continue
 
@@ -3013,60 +3192,45 @@ def nas_patrol_worker_loop(app: Any) -> None:
                 sleep_s = min(60.0, max(5.0, due_at - now))
                 if interval_s is not None:
                     sleep_s = min(sleep_s, float(interval_s))
-                if now - _last_wait_log_ts >= 60:
-                    wait_min = max(0.0, (due_at - now) / 60.0)
+                # 下次触发时间不变只记一次
+                if abs(due_at - _last_wait_due) > 1:
                     nxt_str = datetime.fromtimestamp(due_at).strftime("%Y-%m-%d %H:%M:%S")
-                    msg = (
-                        f"NAS 巡检等待下次触发：Cron={cron_expr}，"
-                        f"约 {wait_min:.1f} 分钟后（{nxt_str}）"
-                    )
-                    log.info(msg)
-                    print(msg, flush=True)
-                    _last_wait_log_ts = now
+                    log.info("NAS 巡检下次触发：%s（Cron=%s）", nxt_str, cron_expr)
+                    _last_wait_due = due_at
                 time.sleep(sleep_s)
                 continue
 
             reason = "间隔已到" if interval_s is not None else "Cron 触发"
-            print(f"NAS 巡检开始采集并推送（Cron={cron_expr}，{reason}）", flush=True)
+            log.info("NAS 巡检开始采集并推送（Cron=%s，%s）", cron_expr, reason)
             ok = _send_patrol_notification(app, log)
             now_after = time.time()
             if ok:
                 state["last_success_ts"] = now_after
                 state["retry_until_ts"] = 0.0
                 state["retry_backoff_sec"] = RETRY_BACKOFF_BASE_SEC
-                if interval_s is not None:
-                    nxt2 = now_after + float(interval_s)
-                else:
-                    try:
-                        nxt2 = next_cron_timestamp(cron_expr, now_after)
-                    except Exception:
-                        nxt2 = now_after + 3600.0
-                wait_min = max(0.0, (nxt2 - now_after) / 60.0)
-                nxt_str = datetime.fromtimestamp(nxt2).strftime("%Y-%m-%d %H:%M:%S")
-                msg = (
-                    f"NAS 巡检推送成功（Cron={cron_expr}），"
-                    f"下次约在 {wait_min:.1f} 分钟后（{nxt_str}）"
-                )
-                log.info(msg)
-                print(msg, flush=True)
+                state["retry_count"] = 0
+                log.info("NAS 巡检推送成功")
             else:
-                cur = int(state.get("retry_backoff_sec") or RETRY_BACKOFF_BASE_SEC)
-                cur = max(RETRY_BACKOFF_BASE_SEC, min(cur, RETRY_BACKOFF_MAX_SEC))
-                wait_sec = cur
-                next_bo = min(cur * 2, RETRY_BACKOFF_MAX_SEC)
-                state["retry_until_ts"] = now_after + float(wait_sec)
-                state["retry_backoff_sec"] = next_bo
-                msg = (
-                    f"NAS 巡检将在 {wait_sec} 秒后重试"
-                    f"（指数退避，下次失败等待上限 {next_bo} 秒）"
-                )
-                log.warning(msg)
-                print(msg, flush=True)
+                attempts = int(state.get("retry_count") or 0) + 1
+                if attempts > RETRY_MAX_ATTEMPTS:
+                    state["last_success_ts"] = now_after
+                    state["retry_until_ts"] = 0.0
+                    state["retry_backoff_sec"] = RETRY_BACKOFF_BASE_SEC
+                    state["retry_count"] = 0
+                    log.warning("NAS 巡检推送连续失败 %s 次，放弃本周期，等待下次计划时间", attempts)
+                else:
+                    cur = int(state.get("retry_backoff_sec") or RETRY_BACKOFF_BASE_SEC)
+                    cur = max(RETRY_BACKOFF_BASE_SEC, min(cur, RETRY_BACKOFF_MAX_SEC))
+                    state["retry_until_ts"] = now_after + float(cur)
+                    state["retry_backoff_sec"] = min(cur * 2, RETRY_BACKOFF_MAX_SEC)
+                    state["retry_count"] = attempts
+                    log.warning(
+                        "NAS 巡检推送失败，%s 秒后重试（%s/%s）", cur, attempts, RETRY_MAX_ATTEMPTS
+                    )
             _save_state(sp, state)
 
         except Exception as e:
             log.error("NAS 巡检线程异常: %s", e, exc_info=True)
-            print(f"NAS 巡检线程异常: {e}", flush=True)
         time.sleep(30)
 
 

@@ -5,37 +5,44 @@ services:
     restart: unless-stopped
     ports:
       - 18080:18080
+    # 挂载遵循最小化原则：默认只挂主日志库、SSH journal 与配置目录，其余按勾选的事件再取消注释，一律只读
     volumes:
       - ./data/logs:/app/data/logs:rw
       - ./data/cursor:/app/data/cursor:rw
+      - ./config:/app/config:rw
+      # 主日志库（必需）
       - /usr/trim/var/eventlogger_service:/usr/trim/var/eventlogger_service:ro
-      - /usr/trim/var/backup_service:/usr/trim/var/backup_service:ro
-      - /usr/local/apps/@appdata/trim.media/database:/usr/local/apps/@appdata/trim.media/database:ro
-      - /usr/local/apps/@appdata/trim.photos/db:/usr/local/apps/@appdata/trim.photos/db:ro
-      # fn-scheduler 任务计划（挂载后 scheduler_db_path 可留空，程序会自动探测 scheduler.db）
+      # SSH 登录 journal（推荐；飞牛新版本主日志库常无 Sshd*）
+      - /var/log/journal:/var/log/journal:ro
+      - /run/log/journal:/run/log/journal:ro
+      - /etc/machine-id:/etc/machine-id:ro
+      # 可选：备份事件
+      # - /usr/trim/var/backup_service:/usr/trim/var/backup_service:ro
+      # 可选：影视事件
+      # - /usr/local/apps/@appdata/trim.media/database:/usr/local/apps/@appdata/trim.media/database:ro
+      # 可选：相册事件
+      # - /usr/local/apps/@appdata/trim.photos/db:/usr/local/apps/@appdata/trim.photos/db:ro
+      # 可选：fn-scheduler 任务计划（挂载后 scheduler_db_path 可留空，程序会自动探测 scheduler.db）
       # - /var/apps/fn-scheduler/var:/var/apps/fn-scheduler/var:ro
       # - /usr/local/apps/@appdata/fn-scheduler:/usr/local/apps/@appdata/fn-scheduler:ro
-      # 可选：Docker 容器事件 — 挂载 socket 后还需让容器进程能读写（常见 socket 为 root:docker 660）
+      # 可选：Docker 容器事件。高风险：能读写 docker.sock 等同于获得宿主机 root 级控制能力，确有需要再开启
       # - /var/run/docker.sock:/var/run/docker.sock
       # 若 Web 仍报 Docker 权限告警，在 NAS 上执行 stat -c '%g' /var/run/docker.sock 得到 GID 后取消下行注释：
       # group_add:
       #   - "999"
-      - ./config:/app/config:rw
-      # 可选：飞牛开放 API 网关（商店/FPK 环境；用于巡检读取飞牛版本）
+      # 可选：飞牛开放 API 网关（用于巡检读取飞牛版本，需配合下方 TRIM_API_TOKEN）
       # - /var/run/trim_open_gateway_apiscope.socket:/var/run/trim_open_gateway_apiscope.socket
       # 可选：只读挂载宿主的 dpkg status，巡检可解析 trim 版本（API 不可用时的回退）
       # - /var/lib/dpkg/status:/host/dpkg/status:ro
       # 可选：宿主主机名（巡检用，避免显示容器 ID）
       # - /etc/hostname:/host/etc/hostname:ro
-      # SSH 登录 journal（推荐；飞牛新版本主日志库常无 Sshd*）
-      - /var/log/journal:/var/log/journal:ro
-      - /run/log/journal:/run/log/journal:ro
-      - /etc/machine-id:/etc/machine-id:ro
       # 可选：UPS 巡检（挂 /etc/nut 目录；无 ups.conf 时跳过 UPS，不导致启动失败）
       # - /etc/nut:/etc/nut:ro
     environment:
       - TZ=Asia/Shanghai
-      # 飞牛开放 API（FPK 安装时由系统注入；手装可按需填写）
+      # 可选：预置初始 Web 密码（至少 8 位）；不填则首次访问需输入启动日志中的初始化码
+      # - FNMB_WEB_PASSWORD=
+      # 可选：飞牛开放 API 参数（不填时巡检回退 dpkg / 本地探测读取版本）
       # - TRIM_API_TOKEN=
       # - TRIM_APPNAME=FnMessageBot
       # - TRIM_SYS_VERSION=

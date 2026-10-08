@@ -7,9 +7,9 @@ from __future__ import annotations
 import hashlib
 import secrets
 from typing import Callable, Optional, Tuple
-from utils.value_parser import as_bool
 
 PBKDF2_ITERATIONS = 100000
+PASSWORD_MIN_LENGTH = 8
 
 
 def hash_password(password: str, salt: bytes) -> str:
@@ -49,7 +49,10 @@ def has_password_set(load_raw_config: Callable[[], dict]) -> bool:
     return salt is not None and h is not None
 
 
-def is_password_verification_enabled(load_raw_config: Callable[[], dict]) -> bool:
-    """是否开启密码验证（默认 True）。"""
-    raw = load_raw_config()
-    return as_bool(raw.get("web_password_enabled", True), True)
+def apply_new_password(raw: dict, password: str) -> dict:
+    """生成新盐值与哈希写入 raw（原地修改并返回），明文不落盘。"""
+    salt = secrets.token_hex(16)
+    raw["web_password_salt"] = salt
+    raw["web_password_hash"] = hash_password(password, bytes.fromhex(salt))
+    raw.pop("web_password_enabled", None)
+    return raw

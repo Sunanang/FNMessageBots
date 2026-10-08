@@ -22,10 +22,44 @@ from email.header import Header
 from email.utils import formataddr
 
 from monitor.sqlite_uri import connect_readonly_with_fallback
+from utils.value_parser import as_bool
+from .channel_params import (
+    meow_fields,
+    parse_json_object,
+    render_webhook_request,
+    validate_meow,
+    validate_webhook,
+    validate_wecom_app,
+    wecom_app_fields,
+)
 from .connection_pool import ConnectionPool
 
 # PushPlus 固定接口地址
 PUSHPLUS_URL = "http://www.pushplus.plus/send"
+
+# 企业微信应用文本消息上限 2048 字节
+WECOM_TEXT_MAX_BYTES = 2000
+# access_token 无效/过期/缺失
+WECOM_TOKEN_INVALID_CODES = frozenset({40001, 40014, 41001, 42001})
+# 进程内共享：热加载重建通知器时不必重新换取 token
+_WECOM_TOKEN_CACHE: Dict[Tuple[str, str, str], Tuple[str, float]] = {}
+_WECOM_TOKEN_LOCK = threading.Lock()
+
+# MeoW 返回体 status（HTTP 状态统一为 200）
+MEOW_STATUS_HINTS = {
+    "400": "标题或消息参数错误",
+    "403": "内容策略禁止发送",
+    "404": "昵称未注册，请确认 MeoW App 中的昵称；同一 IP 一天内输错 3 次会被封禁",
+    "429": "发送频率超限，非会员 3 秒 1 条、每分钟 15 条、每小时 60 条",
+    "500": "MeoW 服务器错误",
+}
+
+
+def _truncate_utf8(text: str, max_bytes: int) -> str:
+    raw = (text or "").encode("utf-8")
+    if len(raw) <= max_bytes:
+        return text or ""
+    return raw[: max_bytes - 3].decode("utf-8", errors="ignore") + "..."
 
 # Docker Engine 容器事件（与 monitor.docker_events_poller 中映射一致）
 DOCKER_CONTAINER_EVENT_TYPES = frozenset({
@@ -451,6 +485,9 @@ class MultiPlatformNotifier:
                  pushplus_params: str = "",
                  magic_push_params: str = "",
                  smtp_params: str = "",
+                 wecom_app_params: str = "",
+                 webhook_params: str = "",
+                 meow_params: str = "",
                  title_prefix: str = "",
                  minimal_push_enabled: bool = False,
                  poll_batch_summary_enabled: bool = False,
@@ -470,8 +507,11 @@ class MultiPlatformNotifier:
             feishu_webhook_url: 飞书Webhook URL
             bark_url: Bark推送URL
             pushplus_params: PushPlus 参数（JSON 字符串，多个用 | 分隔）
-            magic_push_params: 魔法推送（JSON 含 base_url、token、可选 title，多个用 | 分隔）
+            magic_push_params: 魔法推送（JSON 含 base_url、token、可选 title / use_inbound，多个用 | 分隔）
             smtp_params: SMTP 邮件配置（JSON：server、port、username、password、to，可选 from）
+            wecom_app_params: 企业微信应用（JSON：corp_id、corp_secret、agent_id，可选 to_user/to_party/to_tag/api_base）
+            webhook_params: 通用 Webhook（JSON：url，可选 method/content_type/headers/body）
+            meow_params: MeoW（JSON：nickname，可选 url/api_base）
             dedup_window: 去重时间窗口（秒）
             pool_size: 连接池大小
             retries: 重试次数
@@ -485,6 +525,11 @@ class MultiPlatformNotifier:
         self.pushplus_params = pushplus_params or ""
         self.magic_push_params = magic_push_params or ""
         self.smtp_params = smtp_params or ""
+        self.wecom_app_params = wecom_app_params or ""
+        self.webhook_params = webhook_params or ""
+        self.meow_params = meow_params or ""
+        # MeoW 对同一 IP 一天内 3 次推送未注册昵称会封禁 IP；命中 404 后本实例内停发，保存配置重建后恢复
+        self._meow_unregistered: set = set()
         if not isinstance(title_prefix, str):
             self.title_prefix = ""
         else:
@@ -548,6 +593,12 @@ class MultiPlatformNotifier:
             platforms.append('魔法推送')
         if self.smtp_params:
             platforms.append('SMTP邮件')
+        if self.wecom_app_params:
+            platforms.append('企业微信应用')
+        if self.webhook_params:
+            platforms.append('通用Webhook')
+        if self.meow_params:
+            platforms.append('MeoW')
 
         self.logger.info(f"多平台通知器初始化完成，支持平台: {', '.join(platforms) if platforms else '无'}, 去重窗口: {dedup_window}秒")
 
@@ -601,6 +652,9 @@ class MultiPlatformNotifier:
                     'pushplus': bool(self.pushplus_params),
                     'magic_push': bool(self.magic_push_params),
                     'smtp': bool(self.smtp_params),
+                    'wecom_app': bool(self.wecom_app_params),
+                    'webhook': bool(self.webhook_params),
+                    'meow': bool(self.meow_params),
                 }
             }
     
@@ -713,6 +767,7 @@ class MultiPlatformNotifier:
             results.append(ok)
             channel_results.append(cr)
             self.logger.debug("合并事件-SMTP邮件: %s", cr)
+        self._send_to_extra_channels(message, results, channel_results)
         if results and any(results):
             self._record_send_result(True)
             self.logger.info(f"合并事件发送成功: {event_type}, 数量: {len(event_list)}")
@@ -808,6 +863,7 @@ class MultiPlatformNotifier:
             results.append(ok)
             channel_results.append(cr)
             self.logger.debug("SMTP邮件通知发送结果: %s", cr)
+        self._send_to_extra_channels(message, results, channel_results)
         
         if results and any(results):  # 至少一个平台发送成功
             if not skip_dedup and event_fingerprint:
@@ -986,8 +1042,15 @@ class MultiPlatformNotifier:
         any_ok = any(r.get("success") for r in results)
         return any_ok, self._channel_result("PushPlus", results)
 
+    @staticmethod
+    def _magic_push_endpoint(base: str, token: str, use_inbound: bool) -> str:
+        """方式一：token 放路径。未勾选入站走 /api/push，勾选后走 /api/inbound。"""
+        token_q = urllib.parse.quote(token, safe="")
+        path = "inbound" if use_inbound else "push"
+        return f"{base}/api/{path}/{token_q}"
+
     def _send_to_magic_push(self, message: MultiPlatformMessage) -> tuple:
-        """魔法推送：POST {base}/api/push/{token}，JSON body title/content/type。
+        """魔法推送：POST {base}/api/push/{token} 或 /api/inbound/{token}。
 
         使用官方「方式一」（token 在路径）而非 Bearer 头：飞牛反代域名下，
         容器经公网回环访问时 Authorization 常被拦成 403；路径令牌与可用 curl 更一致。
@@ -1031,9 +1094,9 @@ class MultiPlatformNotifier:
                     "content": api_content[:5000],
                     "type": "text",
                 }
+                use_inbound = as_bool(cfg.get("use_inbound"), False)
                 # 方式一：token 在路径（避免反代剥离/拒绝 Authorization）
-                token_q = urllib.parse.quote(token, safe="")
-                url = f"{base}/api/push/{token_q}"
+                url = self._magic_push_endpoint(base, token, use_inbound)
                 hdrs = {
                     # 与可用 curl 对齐；覆盖 session 默认的 charset / FN-Log-Monitor UA
                     "Content-Type": "application/json",
@@ -1139,6 +1202,186 @@ class MultiPlatformNotifier:
                 results.append({"success": False, "response": None, "error": str(e)[:120]})
         any_ok = any(r.get("success") for r in results)
         return any_ok, self._channel_result("SMTP邮件", results)
+
+    def _send_to_extra_channels(
+        self,
+        message: MultiPlatformMessage,
+        results: List[bool],
+        channel_results: List[Dict[str, Any]],
+    ) -> None:
+        """企业微信应用、通用 Webhook、MeoW。"""
+        if self.wecom_app_params:
+            ok, cr = self._send_to_wecom_app(message)
+            results.append(ok)
+            channel_results.append(cr)
+            self.logger.debug("企业微信应用发送结果: %s", cr)
+        if self.webhook_params:
+            ok, cr = self._send_to_webhook(message)
+            results.append(ok)
+            channel_results.append(cr)
+            self.logger.debug("通用Webhook发送结果: %s", cr)
+        if self.meow_params:
+            ok, cr = self._send_to_meow(message)
+            results.append(ok)
+            channel_results.append(cr)
+            self.logger.debug("MeoW发送结果: %s", cr)
+
+    def _wecom_access_token(self, f: Dict[str, Any], force_refresh: bool = False) -> Tuple[str, Dict[str, Any]]:
+        """获取并缓存企业微信应用 access_token；失败返回 ("", 请求结果)。"""
+        key = (f["api_base"], f["corp_id"], hashlib.sha256(f["corp_secret"].encode()).hexdigest())
+        now = time.time()
+        with _WECOM_TOKEN_LOCK:
+            cached = _WECOM_TOKEN_CACHE.get(key)
+            if cached and not force_refresh and cached[1] > now:
+                return cached[0], {"success": True}
+        r = self.connection_pool.request(
+            "GET",
+            f"{f['api_base']}/cgi-bin/gettoken",
+            params={"corpid": f["corp_id"], "corpsecret": f["corp_secret"]},
+        )
+        body = r.get("response") if isinstance(r.get("response"), dict) else {}
+        token = str(body.get("access_token") or "") if r.get("success") else ""
+        if not token:
+            if r.get("success"):
+                r = {"success": False, "response": body, "error": "未返回 access_token"}
+            return "", r
+        expires = int(body.get("expires_in") or 7200)
+        with _WECOM_TOKEN_LOCK:
+            _WECOM_TOKEN_CACHE[key] = (token, now + max(60, expires - 300))
+        return token, r
+
+    def _send_to_wecom_app(self, message: MultiPlatformMessage) -> tuple:
+        """企业微信自建应用消息：gettoken → message/send（文本消息）。"""
+        param_list = self._iter_urls(self.wecom_app_params)
+        if not param_list:
+            return False, {"channel": "企业微信应用", "success": False, "response": None, "error": "未配置"}
+        content = _truncate_utf8(message.merged_plain_text(), WECOM_TEXT_MAX_BYTES)
+        results = []
+        for param_str in param_list:
+            obj, err = parse_json_object(param_str, "企业微信应用")
+            if err or obj is None:
+                results.append({"success": False, "response": None, "error": err})
+                continue
+            err = validate_wecom_app(obj)
+            if err:
+                results.append({"success": False, "response": None, "error": err})
+                continue
+            f = wecom_app_fields(obj)
+            payload = {
+                "touser": f["to_user"],
+                "toparty": f["to_party"],
+                "totag": f["to_tag"],
+                "msgtype": "text",
+                "agentid": int(f["agent_id"]),
+                "text": {"content": content},
+            }
+            result: Dict[str, Any] = {}
+            for attempt in range(2):
+                token, tr = self._wecom_access_token(f, force_refresh=attempt > 0)
+                if not token:
+                    result = tr
+                    break
+                result = self.connection_pool.post(
+                    f"{f['api_base']}/cgi-bin/message/send?access_token={urllib.parse.quote(token, safe='')}",
+                    payload,
+                )
+                body = result.get("response") if isinstance(result.get("response"), dict) else {}
+                # token 失效时消息未投递，刷新后重发一次不会重复
+                if result.get("success") or body.get("errcode") not in WECOM_TOKEN_INVALID_CODES:
+                    break
+            body = result.get("response") if isinstance(result.get("response"), dict) else {}
+            if not result.get("success") and body.get("errcode") == 60020:
+                result = {
+                    **result,
+                    "error": f"{result.get('error')}（需在企业微信后台为该应用配置「企业可信IP」，"
+                    "或在 API 地址中填写可信代理）",
+                }
+            results.append(result)
+        any_ok = any(r.get("success") for r in results)
+        return any_ok, self._channel_result("企业微信应用", results)
+
+    def _send_to_webhook(self, message: MultiPlatformMessage) -> tuple:
+        """通用 Webhook：按用户配置的方法、请求头、请求体模板发送。"""
+        param_list = self._iter_urls(self.webhook_params)
+        if not param_list:
+            return False, {"channel": "通用Webhook", "success": False, "response": None, "error": "未配置"}
+        values = {
+            "title": message.title or "",
+            "content": message.content or "",
+            "text": message.merged_plain_text(),
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        results = []
+        for param_str in param_list:
+            obj, err = parse_json_object(param_str, "通用 Webhook")
+            if err or obj is None:
+                results.append({"success": False, "response": None, "error": err})
+                continue
+            err = validate_webhook(obj)
+            if err:
+                results.append({"success": False, "response": None, "error": err})
+                continue
+            req, err = render_webhook_request(obj, values)
+            if err or req is None:
+                results.append({"success": False, "response": None, "error": err})
+                continue
+            results.append(
+                self.connection_pool.request(
+                    req["method"], req["url"], body=req["body"], headers=req["headers"]
+                )
+            )
+        any_ok = any(r.get("success") for r in results)
+        return any_ok, self._channel_result("通用Webhook", results)
+
+    def _send_to_meow(self, message: MultiPlatformMessage) -> tuple:
+        """MeoW：POST {api_base}/{昵称}，JSON 携带 title / msg；业务结果看返回体 status。"""
+        param_list = self._iter_urls(self.meow_params)
+        if not param_list:
+            return False, {"channel": "MeoW", "success": False, "response": None, "error": "未配置"}
+        # 极简推送时 content 为空、整行在 title；MeoW 的 msg 必填，若 title/msg 都用同一行会重复显示
+        title = (message.title or "").strip() or "MeoW"
+        content = (message.content or "").strip()
+        if content:
+            msg = content
+        else:
+            msg = title
+            title = (self.title_prefix or "").strip() or "MeoW"
+        results = []
+        for param_str in param_list:
+            obj, err = parse_json_object(param_str, "MeoW")
+            if err or obj is None:
+                results.append({"success": False, "response": None, "error": err})
+                continue
+            err = validate_meow(obj)
+            if err:
+                results.append({"success": False, "response": None, "error": err})
+                continue
+            f = meow_fields(obj)
+            key = (f["api_base"], f["nickname"])
+            if key in self._meow_unregistered:
+                results.append({
+                    "success": False,
+                    "response": None,
+                    "error": f"昵称「{f['nickname']}」未注册，已暂停推送以免 IP 被封禁；请修改昵称并保存配置",
+                })
+                continue
+            payload: Dict[str, Any] = {"title": title, "msg": msg}
+            if f["url"]:
+                payload["url"] = f["url"]
+            result = self.connection_pool.post(
+                f"{f['api_base']}/{urllib.parse.quote(f['nickname'], safe='')}", payload
+            )
+            body = result.get("response") if isinstance(result.get("response"), dict) else {}
+            status = body.get("status")
+            if result.get("success") and status is not None and str(status) != "200":
+                if str(status) == "404":
+                    self._meow_unregistered.add(key)
+                hint = MEOW_STATUS_HINTS.get(str(status), "")
+                detail = body.get("message") or body.get("msg") or f"status={status}"
+                result = {**result, "success": False, "error": f"{detail}{'（' + hint + '）' if hint else ''}"}
+            results.append(result)
+        any_ok = any(r.get("success") for r in results)
+        return any_ok, self._channel_result("MeoW", results)
     
     def _source_fingerprint_key(self, event_type: str, event_data: Dict[str, Any]) -> str:
         """源记录级指纹：同一源记录只推一次，不合并不同数据库行。"""
@@ -1767,12 +2010,11 @@ class MultiPlatformNotifier:
                 if status == "健康":
                     status = "正常"
                 lines.append(f"{head}:")
-                if free_text != "--" and size_text != "--":
-                    lines.append(f"剩余空间: {free_text} / {size_text}")
+                if size_text != "--":
+                    free_show = free_text if free_text != "--" else "--"
+                    lines.append(f"剩余空间: {free_show} / {size_text}")
                 elif free_text != "--":
                     lines.append(f"剩余空间: {free_text}")
-                elif size_text != "--":
-                    lines.append(f"总容量: {size_text}")
                 else:
                     lines.append("剩余空间: -- / --")
                 lines.append(f"温度: {temp_c}")
@@ -3094,7 +3336,7 @@ class MultiPlatformNotifier:
             dict: success、success_count、fail_count、channel_results（每渠道发送明细）；
             去重跳过时有 skipped=\"duplicate\"，channel_results 为空。
         """
-        self.logger.info(f"准备发送系统事件通知: {event_type}")
+        self.logger.debug(f"准备发送系统事件通知: {event_type}")
         
         # 构建事件数据
         event_data = {
@@ -3166,6 +3408,7 @@ class MultiPlatformNotifier:
             results.append(ok)
             channel_results.append(cr)
             self.logger.debug("SMTP邮件系统通知: %s", cr)
+        self._send_to_extra_channels(multi_msg, results, channel_results)
         success_count = sum(1 for r in results if r)
         fail_count = len(results) - success_count
         any_ok = bool(results and success_count > 0)
@@ -3247,7 +3490,7 @@ class MultiPlatformNotifier:
     
     def close(self):
         """关闭通知器"""
-        self.logger.info("正在关闭多平台通知器...")
+        self.logger.debug("正在关闭多平台通知器...")
 
         # 设置停止标志
         self._stop_flag = True
@@ -3265,7 +3508,7 @@ class MultiPlatformNotifier:
         # 清理缓存
         self.cleanup_cache()
 
-        self.logger.info("多平台通知器已关闭")
+        self.logger.debug("多平台通知器已关闭")
 
     def _flush_pending_disk_events(self):
         """刷新所有待发送的磁盘事件"""

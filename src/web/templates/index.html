@@ -3,6 +3,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
+  <meta name="robots" content="noindex, nofollow" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   {% if favicon_url %}
   <link rel="icon" href="{{ favicon_url }}" />
@@ -674,6 +675,9 @@
       border-color: #1d4ed8;
       color: #fff;
     }
+    html[data-theme="dark"] .magic-push-inbound-label {
+      color: #d1d5db;
+    }
     html[data-theme="dark"] .stats-block {
       background: #0f172a;
       border-color: #374151;
@@ -800,8 +804,13 @@
     <div class="auth-card">
       <div id="auth-set-password" style="display:none;">
         <div class="auth-title">设置访问密码</div>
-        <div class="auth-sub">首次使用或已清除密码后，请设置新密码（至少 6 位）</div>
+        <div class="auth-sub">首次使用或已清除密码后，请设置新密码（至少 8 位）</div>
         <form class="auth-form" id="form-set-password">
+          <div id="set-pw-code-wrap" style="display:none;">
+            <div class="field-label">初始化码</div>
+            <input type="text" id="set-pw-code" placeholder="请输入初始化码" autocomplete="off" />
+            <div class="field-helper">为防止他人抢先设置密码，需要填写初始化码：Docker 版执行 <code>docker logs 容器名</code> 查看，或查看配置目录下的 <code>.setup_code</code> 文件。</div>
+          </div>
           <div class="field-label">密码</div>
           <input type="password" id="set-pw-password" placeholder="请输入密码" autocomplete="new-password" />
           <div class="field-label">确认密码</div>
@@ -844,7 +853,7 @@
           <div class="section-title">
             <span>推送数据汇总</span>
           </div>
-          <button type="button" class="btn btn-ghost" onclick="window.location.href='/history'">查看推送记录</button>
+          <button type="button" class="btn btn-ghost" onclick="window.location.href='history'">查看推送记录</button>
         </div>
         <div class="stats-grid">
           <div class="stats-block">
@@ -914,14 +923,7 @@
         <div class="section-title">
           <span>系统设置 <small>影响日志缓存与轮询行为</small></span>
         </div>
-        <div>
-          <div class="field-label" style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
-            <input type="checkbox" id="input-web-password-enabled" />
-            <span>开启密码验证</span>
-          </div>
-          <div class="field-helper">关闭后无需输入密码即可访问配置页，本地密码仍保留，可随时重新开启。</div>
-        </div>
-        <div class="system-grid" style="margin-top: 16px; padding-top: 16px; border-top: 1px solid #e5e7eb;">
+        <div class="system-grid">
           <div>
             <div class="field-label">日志缓存天数 (day)</div>
             <input id="input-log-days" type="number" min="1" />
@@ -950,6 +952,13 @@
               <span>极简推送</span>
             </div>
             <div class="field-helper">开启后推送消息将压缩为一行显示，仅展示关键信息</div>
+          </div>
+          <div>
+            <div class="field-label" style="display: flex; align-items: center; gap: 8px;">
+              <input type="checkbox" id="input-ssh-ignore-loopback" />
+              <span>忽略本机 SSH 登录/断开</span>
+            </div>
+            <div class="field-helper">来源为 127.0.0.1 / ::1 的 SSH 登录成功与断开不推送（如 fnOS Web 终端、本机工具定时 SSH 自查），失败与无效用户告警仍会推送。<strong>通过 frp 等内网穿透访问 SSH 时来源同为本机，请勿开启。</strong></div>
           </div>
         </div>
         <div class="dnd-section" style="margin-top: 16px; padding-top: 16px; border-top: 1px solid #e5e7eb;">
@@ -1012,9 +1021,9 @@
           开源地址
         </a>
         <span class="footer-sep" aria-hidden="true">·</span>
-        <a class="footer-link" href="/support">支持作者</a>
+        <a class="footer-link" href="support">支持作者</a>
         <span class="footer-sep" aria-hidden="true">·</span>
-        <a class="footer-link" href="/faq">常见问题</a>
+        <a class="footer-link" href="faq">常见问题</a>
       </div>
       <p class="license-footer">© 2024 Sunanang · FnMessageBot · MIT License terms apply.</p>
     </div>
@@ -1075,14 +1084,18 @@
     let channelOptions = [];
     const fetchOpts = { credentials: "include" };
 
+    let setupRequiresCode = false;
+    let passwordMinLength = 8;
+
     async function initAuth() {
-      const res = await fetch("/api/auth/status", fetchOpts);
+      const res = await fetch("api/auth/status", fetchOpts);
       const data = await res.json();
       const authGate = document.getElementById("auth-gate");
       const appMain = document.getElementById("app-main");
-      // 已登录，或未开启密码验证（无需设置密码且无需登录）时直接进入配置页
-      const canShowApp = data.authenticated || (!data.need_setup && !data.need_login);
-      if (canShowApp) {
+      setupRequiresCode = !!data.setup_requires_code;
+      passwordMinLength = data.password_min_length || 8;
+      document.getElementById("set-pw-code-wrap").style.display = setupRequiresCode ? "block" : "none";
+      if (data.authenticated) {
         authGate.style.display = "none";
         appMain.style.display = "flex";
         loadConfig();
@@ -1101,10 +1114,16 @@
       const msgEl = document.getElementById("auth-set-msg");
       const p1 = document.getElementById("set-pw-password").value.trim();
       const p2 = document.getElementById("set-pw-confirm").value.trim();
+      const setupCode = document.getElementById("set-pw-code").value.trim();
       msgEl.textContent = "";
       msgEl.className = "auth-msg";
-      if (p1.length < 6) {
-        msgEl.textContent = "密码长度至少 6 位";
+      if (setupRequiresCode && !setupCode) {
+        msgEl.textContent = "请输入初始化码";
+        msgEl.className = "auth-msg error";
+        return;
+      }
+      if (p1.length < passwordMinLength) {
+        msgEl.textContent = "密码长度至少 " + passwordMinLength + " 位";
         msgEl.className = "auth-msg error";
         return;
       }
@@ -1113,11 +1132,11 @@
         msgEl.className = "auth-msg error";
         return;
       }
-      const res = await fetch("/api/auth/set-password", {
+      const res = await fetch("api/auth/set-password", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ password: p1, password_confirm: p2 }),
+        body: JSON.stringify({ password: p1, password_confirm: p2, setup_code: setupCode }),
       });
       const json = await res.json();
       if (json.ok) {
@@ -1141,7 +1160,7 @@
         msgEl.className = "auth-msg error";
         return;
       }
-      const res = await fetch("/api/auth/login", {
+      const res = await fetch("api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
@@ -1197,14 +1216,14 @@
       }
       function formatWarningItemHtml(item) {
         var s = String(item);
-        var marker = "常见问题 · 第11条";
+        var marker = "常见问题 · 第13条";
         if (s.indexOf("Docker：") === 0 && s.indexOf(marker) >= 0) {
           var i = s.indexOf(marker);
           var before = escapeHtml(s.slice(0, i));
           var after = escapeHtml(s.slice(i + marker.length));
           return (
             before +
-            '<a href="/faq#faq-docker-sock" target="_blank" rel="noopener noreferrer">' +
+            '<a href="faq#faq-docker-sock" target="_blank" rel="noopener noreferrer">' +
             marker +
             "</a>" +
             after
@@ -1223,7 +1242,7 @@
         faq10 =
           '<p class="warning-panel-faq-link">' +
           '影视 / 相册数据库路径、挂载与权限说明请查看 ' +
-          '<a href="/faq#faq-external-db" target="_blank" rel="noopener noreferrer">常见问题 · 第10条</a>。' +
+          '<a href="faq#faq-external-db" target="_blank" rel="noopener noreferrer">常见问题 · 第12条</a>。' +
           "</p>";
       }
       warningPanel.classList.add("show");
@@ -1282,10 +1301,227 @@
       const token = (wrap.querySelector(".magic-push-token") && wrap.querySelector(".magic-push-token").value || "").trim();
       const titleEl = wrap.querySelector(".magic-push-title");
       const title = titleEl ? titleEl.value.trim() : "";
+      const inboundEl = wrap.querySelector(".magic-push-inbound");
       if (!base || !token) return "";
       const o = { base_url: base, token: token };
       if (title) o.title = title;
+      if (inboundEl && inboundEl.checked) o.use_inbound = true;
       return JSON.stringify(o);
+    }
+
+    // 多条渠道配置以 | 拼接保存，JSON 字符串内的 | 需转义
+    function stringifyChannelJson(o) {
+      return JSON.stringify(o).replace(/\|/g, "\\u007c");
+    }
+
+    function parseChannelJson(val) {
+      if (!val) return {};
+      try {
+        const o = JSON.parse(val);
+        return o && typeof o === "object" ? o : {};
+      } catch (e) {
+        return {};
+      }
+    }
+
+    function fieldValue(wrap, cls) {
+      const el = wrap.querySelector("." + cls);
+      return el ? String(el.value || "").trim() : "";
+    }
+
+    function makeChannelInput(cls, placeholder, value, type) {
+      const inp = document.createElement("input");
+      inp.type = type || "text";
+      inp.className = cls;
+      inp.placeholder = placeholder;
+      inp.value = value || "";
+      if (type === "password") inp.autocomplete = "new-password";
+      return inp;
+    }
+
+    function makeChannelHelper(html) {
+      const tip = document.createElement("div");
+      tip.className = "field-helper";
+      tip.innerHTML = html;
+      return tip;
+    }
+
+    function makeAdvancedFold(open) {
+      const det = document.createElement("details");
+      det.className = "channel-advanced";
+      det.open = !!open;
+      const sum = document.createElement("summary");
+      sum.textContent = "高级选项（可选）";
+      sum.style.cursor = "pointer";
+      sum.style.fontSize = "12px";
+      sum.style.color = "#6b7280";
+      sum.style.userSelect = "none";
+      det.appendChild(sum);
+      const body = document.createElement("div");
+      body.style.display = "flex";
+      body.style.flexDirection = "column";
+      body.style.gap = "8px";
+      body.style.marginTop = "8px";
+      det.appendChild(body);
+      return { el: det, body: body };
+    }
+
+    function serializeWecomAppFromInputs(wrap) {
+      if (!wrap) return "";
+      const o = {
+        corp_id: fieldValue(wrap, "wecom-corp-id"),
+        corp_secret: fieldValue(wrap, "wecom-corp-secret"),
+        agent_id: fieldValue(wrap, "wecom-agent-id"),
+      };
+      if (!o.corp_id || !o.corp_secret || !o.agent_id) return "";
+      const optional = {
+        to_user: "wecom-to-user",
+        to_party: "wecom-to-party",
+        to_tag: "wecom-to-tag",
+        api_base: "wecom-api-base",
+      };
+      Object.keys(optional).forEach(function (k) {
+        const v = fieldValue(wrap, optional[k]);
+        if (v) o[k] = v;
+      });
+      return stringifyChannelJson(o);
+    }
+
+    function serializeWebhookFromInputs(wrap) {
+      if (!wrap) return "";
+      const url = fieldValue(wrap, "webhook-url");
+      if (!url) return "";
+      const o = { url: url };
+      // 页面固定 POST + JSON；config.json 中手工配置的其它方法/格式原样保留
+      if (wrap.dataset.method) o.method = wrap.dataset.method;
+      if (wrap.dataset.contentType) o.content_type = wrap.dataset.contentType;
+      const headersEl = wrap.querySelector(".webhook-headers");
+      const bodyEl = wrap.querySelector(".webhook-body");
+      const headers = headersEl ? headersEl.value.trim() : "";
+      const body = bodyEl ? bodyEl.value.trim() : "";
+      if (headers) o.headers = headers;
+      if (body) o.body = body;
+      return stringifyChannelJson(o);
+    }
+
+    function buildWecomAppWidget(val) {
+      const o = parseChannelJson(val);
+      const wrap = document.createElement("div");
+      wrap.className = "wecom-app-fields";
+      wrap.style.display = "flex";
+      wrap.style.flexDirection = "column";
+      wrap.style.gap = "8px";
+      wrap.style.width = "100%";
+      const grid = document.createElement("div");
+      grid.style.display = "grid";
+      grid.style.gridTemplateColumns = "repeat(3, minmax(140px, 1fr))";
+      grid.style.gap = "8px";
+      grid.appendChild(makeChannelInput("wecom-corp-id", "企业ID（corpid）", o.corp_id));
+      grid.appendChild(makeChannelInput("wecom-corp-secret", "应用 Secret", o.corp_secret, "password"));
+      grid.appendChild(makeChannelInput("wecom-agent-id", "AgentId", o.agent_id));
+      wrap.appendChild(grid);
+      const adv = makeAdvancedFold(o.to_user || o.to_party || o.to_tag || o.api_base);
+      const advGrid = document.createElement("div");
+      advGrid.style.display = "grid";
+      advGrid.style.gridTemplateColumns = "repeat(3, minmax(140px, 1fr))";
+      advGrid.style.gap = "8px";
+      advGrid.appendChild(makeChannelInput("wecom-to-user", "接收成员（默认 @all 全员，多个用 | 分隔）", o.to_user));
+      advGrid.appendChild(makeChannelInput("wecom-to-party", "接收部门ID", o.to_party));
+      advGrid.appendChild(makeChannelInput("wecom-to-tag", "接收标签ID", o.to_tag));
+      adv.body.appendChild(advGrid);
+      const base = makeChannelInput(
+        "wecom-api-base",
+        "API 地址（默认 https://qyapi.weixin.qq.com；无固定公网 IP 时可填可信代理地址）",
+        o.api_base
+      );
+      base.style.width = "100%";
+      adv.body.appendChild(base);
+      wrap.appendChild(adv.el);
+      wrap.appendChild(makeChannelHelper(
+        "默认推送给应用可见范围内的全部成员。若返回 60020，需在应用详情配置「企业可信IP」（填 NAS 出口公网 IP）。"
+      ));
+      return wrap;
+    }
+
+    function buildWebhookWidget(val) {
+      const o = parseChannelJson(val);
+      const wrap = document.createElement("div");
+      wrap.className = "webhook-fields";
+      wrap.style.display = "flex";
+      wrap.style.flexDirection = "column";
+      wrap.style.gap = "8px";
+      wrap.style.width = "100%";
+      const method = String(o.method || "").trim().toUpperCase();
+      const contentType = String(o.content_type || "").trim().toLowerCase();
+      if (method && method !== "POST") wrap.dataset.method = method;
+      if (contentType && contentType !== "json") wrap.dataset.contentType = contentType;
+      const url = makeChannelInput("webhook-url", "Webhook 地址（如 https://example.com/hook ）", o.url);
+      url.style.width = "100%";
+      wrap.appendChild(url);
+      const hasHeaders = typeof o.headers === "string" ? !!o.headers.trim()
+        : !!(o.headers && typeof o.headers === "object" && Object.keys(o.headers).length);
+      const adv = makeAdvancedFold(hasHeaders || !!o.body);
+      const headers = document.createElement("textarea");
+      headers.className = "webhook-headers";
+      headers.rows = 2;
+      headers.placeholder = "请求头，每行一个，如 Authorization: Bearer xxx";
+      headers.value = typeof o.headers === "string" ? o.headers
+        : (o.headers && typeof o.headers === "object"
+          ? Object.keys(o.headers).map(function (k) { return k + ": " + o.headers[k]; }).join("\n") : "");
+      adv.body.appendChild(headers);
+      const body = document.createElement("textarea");
+      body.className = "webhook-body";
+      body.rows = 3;
+      body.placeholder = '请求体模板，留空默认 {"title": "{title}", "content": "{content}"}';
+      body.value = o.body || "";
+      adv.body.appendChild(body);
+      adv.body.appendChild(makeChannelHelper(
+        "占位符：<code>{title}</code> 标题、<code>{content}</code> 正文、<code>{text}</code> 标题+正文、<code>{time}</code> 发送时间。"
+      ));
+      wrap.appendChild(adv.el);
+      const tip = makeChannelHelper(
+        "以 POST + JSON 发送 <code>{\"title\": \"标题\", \"content\": \"正文\"}</code>，返回 HTTP 2xx 视为成功。"
+      );
+      if (wrap.dataset.method || wrap.dataset.contentType) {
+        tip.textContent = "按配置文件中的 " + (wrap.dataset.method || "POST") + " + "
+          + (wrap.dataset.contentType || "json") + " 方式发送，返回 HTTP 2xx 视为成功。";
+      }
+      wrap.appendChild(tip);
+      return wrap;
+    }
+
+    function serializeMeowFromInputs(wrap) {
+      if (!wrap) return "";
+      const nickname = fieldValue(wrap, "meow-nickname");
+      if (!nickname) return "";
+      const o = { nickname: nickname };
+      const link = fieldValue(wrap, "meow-url");
+      if (link) o.url = link;
+      if (wrap.dataset.apiBase) o.api_base = wrap.dataset.apiBase;
+      return stringifyChannelJson(o);
+    }
+
+    function buildMeowWidget(val) {
+      const o = parseChannelJson(val);
+      const wrap = document.createElement("div");
+      wrap.className = "meow-fields";
+      wrap.style.display = "flex";
+      wrap.style.flexDirection = "column";
+      wrap.style.gap = "8px";
+      wrap.style.width = "100%";
+      if (o.api_base) wrap.dataset.apiBase = String(o.api_base);
+      const nick = makeChannelInput("meow-nickname", "MeoW 昵称（App 中注册的昵称）", o.nickname);
+      nick.style.width = "100%";
+      wrap.appendChild(nick);
+      const adv = makeAdvancedFold(!!o.url);
+      const link = makeChannelInput("meow-url", "点击通知跳转的链接，如 NAS 访问地址", o.url);
+      link.style.width = "100%";
+      adv.body.appendChild(link);
+      wrap.appendChild(adv.el);
+      wrap.appendChild(makeChannelHelper(
+        "在 MeoW App 中注册昵称后填入即可，请仔细核对：同一 IP 一天内累计 3 次推送到未注册昵称会被 MeoW 封禁。非会员限 3 秒 1 条、每分钟 15 条、每小时 60 条，事件较多时建议开启「轮询汇总模式」。"
+      ));
+      return wrap;
     }
 
     function createChannelRow(chType, url, enabled) {
@@ -1319,6 +1555,15 @@
           const wrap = tdUrl.querySelector(".smtp-fields");
           return serializeSmtpFromInputs(wrap);
         }
+        if (rowChannelType === "wecom_app") {
+          return serializeWecomAppFromInputs(tdUrl.querySelector(".wecom-app-fields"));
+        }
+        if (rowChannelType === "webhook") {
+          return serializeWebhookFromInputs(tdUrl.querySelector(".webhook-fields"));
+        }
+        if (rowChannelType === "meow") {
+          return serializeMeowFromInputs(tdUrl.querySelector(".meow-fields"));
+        }
         if (rowChannelType === "bark") {
           const inp = tdUrl.querySelector(".bark-channel-fields input.channel-url-input");
           return inp ? inp.value.trim() : "";
@@ -1338,7 +1583,7 @@
           ta.style.minHeight = "60px";
           tdUrl.appendChild(ta);
         } else if (type === "magic_push") {
-          let base = "", token = "", title = "";
+          let base = "", token = "", title = "", useInbound = false;
           if (val) {
             try {
               const o = JSON.parse(val);
@@ -1346,6 +1591,7 @@
                 base = (o.base_url || "").trim();
                 token = (o.token || "").trim();
                 title = (o.title || "").trim();
+                useInbound = o.use_inbound === true || o.use_inbound === "true" || o.use_inbound === 1;
               }
             } catch (e) { /* ignore */ }
           }
@@ -1384,10 +1630,28 @@
           inTitle.value = title;
           inTitle.style.flex = "1 1 160px";
           inTitle.style.minWidth = "120px";
+          const inboundRow = document.createElement("label");
+          inboundRow.className = "magic-push-inbound-label";
+          inboundRow.style.display = "flex";
+          inboundRow.style.alignItems = "flex-start";
+          inboundRow.style.gap = "8px";
+          inboundRow.style.fontSize = "13px";
+          inboundRow.style.color = "#374151";
+          inboundRow.style.cursor = "pointer";
+          const inInbound = document.createElement("input");
+          inInbound.type = "checkbox";
+          inInbound.className = "magic-push-inbound";
+          inInbound.checked = useInbound;
+          inInbound.style.marginTop = "2px";
+          const inboundText = document.createElement("span");
+          inboundText.innerHTML = "使用入站配置（<code>/api/inbound</code>）。需先在魔法推送开启入站并映射 <code>$.title</code> / <code>$.content</code>；未勾选走默认 <code>/api/push</code>。";
+          inboundRow.appendChild(inInbound);
+          inboundRow.appendChild(inboundText);
           wrap.appendChild(inBase);
           row2.appendChild(inTok);
           row2.appendChild(inTitle);
           wrap.appendChild(row2);
+          wrap.appendChild(inboundRow);
           tdUrl.appendChild(wrap);
         } else if (type === "smtp") {
           let server = "", port = "", username = "", password = "", fromAddr = "", toAddr = "";
@@ -1447,6 +1711,12 @@
           wrap.appendChild(inFrom);
           wrap.appendChild(inTo);
           tdUrl.appendChild(wrap);
+        } else if (type === "wecom_app") {
+          tdUrl.appendChild(buildWecomAppWidget(val));
+        } else if (type === "webhook") {
+          tdUrl.appendChild(buildWebhookWidget(val));
+        } else if (type === "meow") {
+          tdUrl.appendChild(buildMeowWidget(val));
         } else if (type === "bark") {
           const wrap = document.createElement("div");
           wrap.className = "bark-channel-fields";
@@ -1614,7 +1884,7 @@
 
     async function loadConfig() {
       try {
-        const res = await fetch("/api/config", fetchOpts);
+        const res = await fetch("api/config", fetchOpts);
         const json = await res.json();
         if (res.status === 401) {
           initAuth();
@@ -1650,11 +1920,11 @@
           createChannelRow("wechat", "", true);
         }
 
-        document.getElementById("input-web-password-enabled").checked = data.web_password_enabled !== false;
         document.getElementById("input-log-days").value = data.log_retention_days || 7;
         document.getElementById("input-poll-interval").value = data.logger_poll_interval || 5;
         document.getElementById("input-poll-batch-summary").checked = !!data.poll_batch_summary_enabled;
         document.getElementById("input-minimal-push-enabled").checked = !!data.minimal_push_enabled;
+        document.getElementById("input-ssh-ignore-loopback").checked = !!data.ssh_ignore_loopback;
         document.getElementById("input-title-prefix").value =
           typeof data.title_prefix === "string" ? data.title_prefix : "飞牛NAS";
         syncBarkIconInputsFromMaster();
@@ -1695,7 +1965,7 @@
 
     async function loadPushStats() {
       try {
-        const res = await fetch("/api/push-stats", fetchOpts);
+        const res = await fetch("api/push-stats", fetchOpts);
         const json = await res.json();
         if (!json.ok || !json.data) return;
         const t = json.data.total || {};
@@ -1738,6 +2008,15 @@
           const wrap = tr.querySelector(".smtp-fields");
           url = serializeSmtpFromInputs(wrap);
           if (!url) return;
+        } else if (type === "wecom_app") {
+          url = serializeWecomAppFromInputs(tr.querySelector(".wecom-app-fields"));
+          if (!url) return;
+        } else if (type === "webhook") {
+          url = serializeWebhookFromInputs(tr.querySelector(".webhook-fields"));
+          if (!url) return;
+        } else if (type === "meow") {
+          url = serializeMeowFromInputs(tr.querySelector(".meow-fields"));
+          if (!url) return;
         } else if (type === "bark") {
           const inp = tr.querySelector(".bark-channel-fields input.channel-url-input");
           if (!inp) return;
@@ -1762,9 +2041,9 @@
         log_retention_days: document.getElementById("input-log-days").value,
         logger_poll_interval: document.getElementById("input-poll-interval").value,
         title_prefix: (document.getElementById("input-title-prefix").value || "").trim(),
-        web_password_enabled: document.getElementById("input-web-password-enabled").checked,
         poll_batch_summary_enabled: document.getElementById("input-poll-batch-summary").checked,
         minimal_push_enabled: document.getElementById("input-minimal-push-enabled").checked,
+        ssh_ignore_loopback: document.getElementById("input-ssh-ignore-loopback").checked,
         dnd_enabled: document.getElementById("input-dnd-enabled").checked,
         dnd_start_time: document.getElementById("input-dnd-start").value || "22:00",
         dnd_end_time: document.getElementById("input-dnd-end").value || "07:00",
@@ -1774,7 +2053,7 @@
       };
 
       try {
-        const res = await fetch("/api/save-config", {
+        const res = await fetch("api/save-config", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           credentials: "include",
@@ -1806,7 +2085,7 @@
       }
       setStatus(false, "正在发送测试消息...");
       try {
-        const res = await fetch("/api/test", {
+        const res = await fetch("api/test", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           credentials: "include",
@@ -1832,7 +2111,7 @@
         nasPatrolRunBtn.disabled = true;
         setStatus(false, "正在执行巡检推送...");
         try {
-          const res = await fetch("/api/nas-patrol/run", {
+          const res = await fetch("api/nas-patrol/run", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             credentials: "include",

@@ -62,13 +62,38 @@ def _event_enabled(app: Any) -> bool:
     return WAN_IP_CHANGED in me
 
 
+def _ip_version(ip: str) -> Optional[int]:
+    try:
+        import ipaddress
+
+        return ipaddress.ip_address((ip or "").strip()).version
+    except Exception:
+        return None
+
+
 def _fetch_wan_ip(known_ip: Optional[str] = None) -> str:
-    text = (known_ip or "").strip()
-    if text and text != "--":
-        return text
+    """始终优先探测；能拿到 IPv4 就用 IPv4，拿不到才用 IPv6。
+
+    known_ip 仅作提示：若探测结果落到 IPv6、而已知为有效 IPv4，则保留 IPv4，
+    避免巡检传入的偶发 IPv6 覆盖稳定 IPv4。
+    """
     from monitor.nas_patrol import _pick_wan_ip
 
-    return (_pick_wan_ip() or "").strip() or "--"
+    picked = (_pick_wan_ip() or "").strip() or "--"
+    known = (known_ip or "").strip()
+    if known and known != "--":
+        kv, pv = _ip_version(known), _ip_version(picked)
+        # 探测失败时沿用已知 IP
+        if picked == "--":
+            return known
+        # 已有 IPv4 时不接受回退到 IPv6
+        if kv == 4 and pv == 6:
+            return known
+        # 探测到 IPv4 时优先用探测结果（即便 known 是 IPv6）
+        if pv == 4:
+            return picked
+        return picked if picked != "--" else known
+    return picked
 
 
 def check_and_notify_wan_ip_change(
@@ -113,12 +138,22 @@ def check_and_notify_wan_ip_change(
             _save_state(sp, state)
             msg = f"外网 IP 已记录基线: {current}（source={source}，不推送）"
             log.info(msg)
-            print(msg, flush=True)
             return current
 
         if current == last:
             _save_state(sp, state)
             return current
+
+        last_ver, cur_ver = _ip_version(last), _ip_version(current)
+        # IPv4 基线偶发探测失败落到 IPv6：忽略，不推送、不改基线
+        if last_ver == 4 and cur_ver == 6:
+            _save_state(sp, state)
+            log.info(
+                "外网 IP 探测回退到 IPv6，忽略（保留 IPv4 基线 %s，source=%s）",
+                last,
+                source,
+            )
+            return last
 
         # 先推送，成功后再写基线；若先写基线再推，失败会永久漏报本次变化
         _save_state(sp, state)
@@ -135,7 +170,6 @@ def check_and_notify_wan_ip_change(
     ts = event_data["changed_at"]
     msg = f"外网 IP 变化: {last} → {current}（source={source}）"
     log.warning(msg)
-    print(msg, flush=True)
     try:
         app.notifier.send_notification(
             event_type=WAN_IP_CHANGED,
@@ -161,7 +195,6 @@ def check_and_notify_wan_ip_change(
 def wan_ip_monitor_worker_loop(app: Any) -> None:
     log = logging.getLogger(__name__)
     log.info("外网 IP 监控线程已启动（间隔 %ss）", WAN_IP_CHECK_INTERVAL_SEC)
-    print(f"外网 IP 监控线程已启动（间隔 {WAN_IP_CHECK_INTERVAL_SEC}s）", flush=True)
     # 启动后稍等再检，避免与 APP_START 抢推送
     for _ in range(15):
         if not getattr(app, "running", True):

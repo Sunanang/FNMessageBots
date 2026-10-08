@@ -8,6 +8,7 @@ import json
 from typing import List, Dict, Any
 from dataclasses import dataclass, field, fields
 from pathlib import Path
+from notifier.channel_params import validate_channel_json
 from utils.value_parser import as_bool
 from valid_event_ids import filter_monitor_events
 
@@ -26,13 +27,18 @@ class Config:
     bark_url: str = ""  # Bark推送URL
     bark_icon: str = ""  # Bark 自定义图标 URL（留空使用默认图标）
     pushplus_params: str = ""  # PushPlus 推送参数（JSON 字符串，多个用 | 分隔）
-    magic_push_params: str = ""  # 魔法推送（JSON：base_url、token、可选 title，多个用 | 分隔）
+    magic_push_params: str = ""  # 魔法推送（JSON：base_url、token、可选 title、可选 use_inbound，多个用 | 分隔）
     smtp_params: str = ""  # SMTP 邮件参数（JSON：server、port、username、password、from、to；多个用 | 分隔）
+    wecom_app_params: str = ""  # 企业微信应用（JSON：corp_id、corp_secret、agent_id，可选 to_user/to_party/to_tag/api_base；多个用 | 分隔）
+    webhook_params: str = ""  # 通用 Webhook（JSON：url，可选 method/content_type/headers/body；多个用 | 分隔）
+    meow_params: str = ""  # MeoW（JSON：nickname，可选 url/api_base；多个用 | 分隔）
     
     # 通知标题配置；默认「飞牛NAS」。仅在配置中显式写入空字符串时，推送标题不包含此前缀。
     title_prefix: str = field(default=TITLE_PREFIX_DEFAULT)
     # 极简推送：开启后所有渠道仅推送一行关键信息（默认关闭）
     minimal_push_enabled: bool = False
+    # 忽略本机回环（127.0.0.1 / ::1）的 SSH 登录成功与断开；SSH 经内网穿透接入时来源同为回环，勿开启
+    ssh_ignore_loopback: bool = False
 
     # 监控配置
     monitor_events: List[str] = field(default_factory=lambda: [
@@ -93,10 +99,11 @@ class Config:
 
     # 高级配置
     max_log_age: int = 7  # 应用运行日志 monitor_*.log 保留天数
-    notification_restart_enabled: bool = True
+    # 推送失败多为渠道限流/额度用尽，重启无法恢复且会产生启停通知与重复推送，默认关闭
+    notification_restart_enabled: bool = False
     notification_restart_consecutive_failures: int = 10
     notification_restart_window: int = 1800  # 30分钟
-    notification_restart_cooldown: int = 3600  # 1小时
+    notification_restart_cooldown: int = 21600  # 6小时
     
 
     
@@ -193,12 +200,17 @@ class Config:
             self.bark_icon = data["bark_icon"]
         if not env_skip("minimal_push_enabled") and "minimal_push_enabled" in data:
             self.minimal_push_enabled = as_bool(data["minimal_push_enabled"], False)
+        if not env_skip("ssh_ignore_loopback") and "ssh_ignore_loopback" in data:
+            self.ssh_ignore_loopback = as_bool(data["ssh_ignore_loopback"], False)
         if not env_skip("smtp_params") and "smtp_params" in data and isinstance(data["smtp_params"], str):
             self.smtp_params = data["smtp_params"]
         if "pushplus_params" in data and isinstance(data["pushplus_params"], str):
             self.pushplus_params = data["pushplus_params"]
         if "magic_push_params" in data and isinstance(data["magic_push_params"], str):
             self.magic_push_params = data["magic_push_params"]
+        for key in ("wecom_app_params", "webhook_params", "meow_params"):
+            if not env_skip(key) and isinstance(data.get(key), str):
+                setattr(self, key, data[key])
         if "title_prefix" in data and isinstance(data["title_prefix"], str):
             self.title_prefix = (data["title_prefix"] or "").strip()
         if not env_skip("log_retention_days") and "log_retention_days" in data and data["log_retention_days"] is not None:
@@ -289,9 +301,20 @@ class Config:
         if minimal_push_enabled := os.getenv('MINIMAL_PUSH_ENABLED'):
             self.minimal_push_enabled = minimal_push_enabled.lower() in ['1', 'true', 'yes', 'on']
             self._env_set_keys.add('minimal_push_enabled')
+        if ssh_ignore_loopback := os.getenv('SSH_IGNORE_LOOPBACK'):
+            self.ssh_ignore_loopback = ssh_ignore_loopback.lower() in ['1', 'true', 'yes', 'on']
+            self._env_set_keys.add('ssh_ignore_loopback')
         if smtp_params := os.getenv('SMTP_PARAMS'):
             self.smtp_params = smtp_params
             self._env_set_keys.add('smtp_params')
+        for env_name, key in (
+            ("WECOM_APP_PARAMS", "wecom_app_params"),
+            ("WEBHOOK_PARAMS", "webhook_params"),
+            ("MEOW_PARAMS", "meow_params"),
+        ):
+            if env_val := os.getenv(env_name):
+                setattr(self, key, env_val)
+                self._env_set_keys.add(key)
 
         # 监控事件
         if events := os.getenv('MONITOR_EVENTS'):
@@ -465,6 +488,12 @@ class Config:
                         raise ValueError("SMTP port 必须为整数")
                 except json.JSONDecodeError as e:
                     raise ValueError(f"SMTP 参数不是合法 JSON: {e}")
+
+        for ch_type, key in (("wecom_app", "wecom_app_params"), ("webhook", "webhook_params"), ("meow", "meow_params")):
+            for part in (p.strip() for p in (getattr(self, key) or "").split("|") if p.strip()):
+                err = validate_channel_json(ch_type, part)
+                if err:
+                    raise ValueError(err)
 
         if not self.monitor_events:
             raise ValueError("必须配置至少一个监控事件")

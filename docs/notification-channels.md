@@ -16,6 +16,9 @@
 | 魔法推送 | 推送聚合 | [魔法推送](channels/magicpush.md) |
 | SMTP 邮件 | 邮箱通知 | [SMTP 邮件](channels/email.md) |
 | PushPlus | 微信模板消息等 | [官方消息接口文档](https://www.pushplus.plus/doc/guide/api.html) |
+| 企业微信应用 | 自建应用消息，可推送到指定成员 / 部门 / 标签 | [企业微信应用](channels/wecom-app.md) |
+| 通用 Webhook | 自定义 HTTP 请求，对接任意平台 | [通用 Webhook](channels/webhook.md) |
+| MeoW | 手机推送 App，填昵称即可 | [MeoW](channels/meow.md) |
 
 ## 按渠道打开文档
 
@@ -26,6 +29,9 @@
 - [魔法推送](channels/magicpush.md)
 - [SMTP 邮件](channels/email.md)
 - [PushPlus 官方消息接口文档](https://www.pushplus.plus/doc/guide/api.html)
+- [企业微信应用](channels/wecom-app.md)
+- [通用 Webhook](channels/webhook.md)
+- [MeoW](channels/meow.md)
 
 ## 环境变量速查
 
@@ -36,6 +42,9 @@
 | `FEISHU_WEBHOOK_URL` | 飞书 |
 | `BARK_URL` | Bark |
 | `SMTP_PARAMS` | SMTP 邮件（`smtp_params`） |
+| `WECOM_APP_PARAMS` | 企业微信应用（`wecom_app_params`） |
+| `WEBHOOK_PARAMS` | 通用 Webhook（`webhook_params`） |
+| `MEOW_PARAMS` | MeoW（`meow_params`） |
 
 **PushPlus**：在 Web 或 `config.json` 中配置 `pushplus_params`，值为包含 `token` 的 JSON 字符串；多个渠道可用 `|` 分隔，例如 `{"token":"xxx"}|{"token":"yyy"}`。接口与参数说明见 [PushPlus 消息接口文档](https://www.pushplus.plus/doc/guide/api.html)
 

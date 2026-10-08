@@ -48,8 +48,11 @@ def setup_logging(config) -> logging.Logger:
     logger.addHandler(file_handler)
     
     # 设置第三方库日志级别
-    logging.getLogger('urllib3').setLevel(logging.WARNING)
+    logging.getLogger('urllib3').setLevel(logging.ERROR)
     logging.getLogger('requests').setLevel(logging.WARNING)
+    # Web 页面会定时轮询接口，访问日志会刷满日志文件
+    logging.getLogger('werkzeug').setLevel(logging.WARNING)
+    logging.getLogger('docker').setLevel(logging.WARNING)
 
     # 启动日志清理线程（使用实际日志目录）
     cleanup_stop_flag = start_log_cleanup_thread(config, log_dir)

@@ -72,16 +72,30 @@ def _fmt_duration(started_at: Optional[str], finished_at: Optional[str]) -> str:
 
 
 def _iso_to_display(iso_str: Optional[str]) -> str:
-    """将 ISO 8601 字符串转为本地时间显示格式（YYYY-MM-DD HH:MM:SS）。"""
+    """转为显示格式（YYYY-MM-DD HH:MM:SS）。
+
+    fn-scheduler 存的是不带时区的本地时间，原样显示；带时区的才换算到本地时区。
+    （_iso_to_timestamp 把无时区值当 UTC 仅用于水位比较，不能用于显示）
+    """
     if not iso_str:
         return ""
-    ts = _iso_to_timestamp(iso_str)
-    if ts <= 0:
-        return iso_str.strip()
-    try:
-        return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
-    except Exception:
-        return iso_str.strip()
+    s = iso_str.strip()
+    for fmt in (
+        "%Y-%m-%dT%H:%M:%S.%f%z",
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%S.%f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S.%f",
+        "%Y-%m-%d %H:%M:%S",
+    ):
+        try:
+            dt = datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+        if dt.tzinfo is not None:
+            dt = dt.astimezone()
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    return s
 
 
 def _status_to_event_type(status: str) -> Optional[str]:
