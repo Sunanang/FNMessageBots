@@ -21,11 +21,19 @@ if __name__ == "__main__":
 
 from flask import Flask, jsonify, request, render_template, send_from_directory, abort, redirect
 
+from notifier.channel_params import validate_channel_json
 from notifier.multi_platform_notifier import MultiPlatformNotifier
+from web.access_guard import GatewayPrefixMiddleware
+from web.access_guard import LoginRateLimiter
+from web.access_guard import SetupCodeStore
+from web.access_guard import StripGatewayHeadersMiddleware
+from web.access_guard import auth_disabled_by_env as _auth_disabled_by_env
+from web.access_guard import gateway_identity as _gateway_identity_from_environ
+from web.access_guard import is_loopback_request as _is_loopback_request_environ
+from web.auth_service import PASSWORD_MIN_LENGTH
+from web.auth_service import apply_new_password as _apply_new_password
 from web.auth_service import get_password_config as _get_password_config
-from web.auth_service import hash_password as _hash_password
 from web.auth_service import has_password_set as _has_password_set_fn
-from web.auth_service import is_password_verification_enabled as _is_password_verification_enabled_fn
 from web.auth_service import verify_password as _verify_password
 from web.api_helpers import build_notifier_from_raw as _build_notifier_from_raw
 from web.api_helpers import parse_success_filter as _parse_success_filter
@@ -38,6 +46,8 @@ from web.app_paths import SUPPORT_QR_FILENAMES
 from web.config_store import channels_from_raw as _channels_from_raw
 from web.config_store import config_load_error as _config_load_error
 from web.config_store import load_raw_config as _load_raw_config_from_file
+from web.config_store import mask_channels as _mask_channels
+from web.config_store import restore_masked_channels as _restore_masked_channels
 
 # 运行中的主监控应用，供「立即巡检」等接口使用
 _runtime_monitor_app = None
@@ -103,13 +113,49 @@ def _get_session_id_from_cookie() -> str:
     return (request.cookies.get(AUTH_COOKIE_NAME) or "").strip()
 
 
+_setup_codes = SetupCodeStore(CONFIG_FILE.parent / ".setup_code")
+_login_limiter = LoginRateLimiter()
+
+
+def _gateway_identity():
+    return _gateway_identity_from_environ(request.environ)
+
+
 def _is_authenticated() -> bool:
+    """统一网关的 NAS 管理员、显式关闭鉴权的部署，或持有有效会话。"""
+    gw = _gateway_identity()
+    if gw is not None:
+        return bool(gw["is_admin"])
+    if _auth_disabled_by_env():
+        return True
     return _touch_session(_get_session_id_from_cookie(), SESSION_IDLE_SECONDS)
 
 
-def _is_password_verification_enabled() -> bool:
-    """是否开启密码验证（默认 True）。关闭后不删密码，但访问配置页无需验证。"""
-    return _is_password_verification_enabled_fn(_load_raw_config)
+def _setup_requires_code() -> bool:
+    """网关管理员与本机回环请求可直接设密，其余来源需要初始化码。"""
+    gw = _gateway_identity()
+    if gw is not None and gw["is_admin"]:
+        return False
+    return not _is_loopback_request_environ(request.environ)
+
+
+def _client_key() -> str:
+    return (request.remote_addr or "unknown").strip()
+
+
+def _apply_initial_password_from_env() -> None:
+    """FNMB_WEB_PASSWORD：未设密码时用作初始密码（手装 Docker 可在 compose 中预置）。"""
+    pw = (os.getenv("FNMB_WEB_PASSWORD") or "").strip()
+    if not pw or _has_password_set():
+        return
+    if len(pw) < PASSWORD_MIN_LENGTH:
+        print(f"FNMB_WEB_PASSWORD 长度不足 {PASSWORD_MIN_LENGTH} 位，已忽略")
+        return
+    try:
+        _save_raw_config(_apply_new_password(_load_raw_config(), pw))
+        print("已根据 FNMB_WEB_PASSWORD 设置 Web 访问密码")
+    except Exception as e:
+        print(f"根据 FNMB_WEB_PASSWORD 设置密码失败：{e}")
 
 
 def _load_raw_config() -> dict:
@@ -308,10 +354,14 @@ def create_app(on_config_saved=None) -> Flask:
     _sk = os.environ.get("FLASK_SECRET_KEY") or os.environ.get("SECRET_KEY")
     app.secret_key = _sk if (_sk and _sk.strip()) else secrets.token_hex(32)
     icon_ver = str(int(ICON_FILE.stat().st_mtime)) if ICON_FILE.exists() else ""
-    icon_url = f"/assets/icons/app-icon.png?v={icon_ver}" if icon_ver else ""
-    favicon_url = f"/favicon.ico?v={icon_ver}" if icon_ver else ""
+    # 页面均位于根路径下一级，统一用相对地址，兼容统一网关的 /app/<appname>/ 前缀
+    icon_url = f"assets/icons/app-icon.png?v={icon_ver}" if icon_ver else ""
+    favicon_url = f"favicon.ico?v={icon_ver}" if icon_ver else ""
     gh_ver = str(int(GITHUB_ICON_FILE.stat().st_mtime)) if GITHUB_ICON_FILE.exists() else ""
-    github_icon_url = f"/assets/icons/github.svg?v={gh_ver}" if gh_ver else "/assets/icons/github.svg"
+    github_icon_url = f"assets/icons/github.svg?v={gh_ver}" if gh_ver else "assets/icons/github.svg"
+    _apply_initial_password_from_env()
+    if not _has_password_set() and not _auth_disabled_by_env():
+        _setup_codes.ensure()
     assets_dir = BASE_DIR / "assets"
 
     @app.get("/assets/<path:filename>")
@@ -328,6 +378,15 @@ def create_app(on_config_saved=None) -> Flask:
             return send_from_directory(str(ICON_FILE.parent), ICON_FILE.name)
         abort(404)
 
+    @app.get("/robots.txt")
+    def robots_txt():
+        return "User-agent: *\nDisallow: /\n", 200, {"Content-Type": "text/plain; charset=utf-8"}
+
+    @app.after_request
+    def _no_index(resp):
+        resp.headers.setdefault("X-Robots-Tag", "noindex, nofollow, noarchive")
+        return resp
+
     CHANNEL_OPTIONS = [
         {"id": "wechat", "name": "企业微信"},
         {"id": "dingtalk", "name": "钉钉"},
@@ -336,63 +395,53 @@ def create_app(on_config_saved=None) -> Flask:
         {"id": "pushplus", "name": "PushPlus"},
         {"id": "magic_push", "name": "魔法推送"},
         {"id": "smtp", "name": "SMTP邮件"},
+        {"id": "wecom_app", "name": "企业微信应用"},
+        {"id": "webhook", "name": "通用Webhook"},
+        {"id": "meow", "name": "MeoW"},
     ]
 
-    PROTECTED_PATHS = {
+    # 默认拒绝：只有以下路径无需登录；"/" 仅返回页面骨架，数据全部走需鉴权的接口
+    PUBLIC_PATHS = {
         "/",
-        "/history",
-        "/api/config",
-        "/api/save-config",
-        "/api/test",
-        "/api/nas-patrol/run",
-        "/api/push-stats",
+        "/favicon.ico",
+        "/robots.txt",
+        "/api/auth/status",
+        "/api/auth/login",
+        "/api/auth/set-password",
     }
-    PROTECTED_PREFIXES = ("/api/push-history",)
+    PUBLIC_PREFIXES = ("/assets/",)
+
+    def _home_url() -> str:
+        return (request.script_root or "") + "/"
 
     @app.before_request
     def _require_auth():
-        # 首页与 /history 的 GET 始终返回 HTML，由前端根据接口 401 跳转登录
-        if request.path == "/":
-            return None
-        if request.path == "/history" and request.method == "GET":
+        gw = _gateway_identity()
+        if gw is not None and not gw["is_admin"]:
+            msg = "仅 NAS 管理员可访问日志推送配置。"
+            if request.path.startswith("/api/"):
+                return jsonify({"ok": False, "message": msg}), 403
+            return msg, 403, {"Content-Type": "text/plain; charset=utf-8"}
+        # 写接口只接受 JSON，避免跨站表单以 text/plain 绕过预检
+        if request.method == "POST" and not request.is_json:
+            return jsonify({"ok": False, "message": "请求须为 application/json。"}), 415
+        path = request.path
+        if path in PUBLIC_PATHS or path.startswith(PUBLIC_PREFIXES):
             return None
         config_error = _current_config_load_error()
         if config_error:
-            is_config_page_asset = request.path in {"/support", "/faq"} or request.path.startswith("/support/img/")
-            if (
-                request.path in PROTECTED_PATHS
-                or request.path.startswith(PROTECTED_PREFIXES)
-                or is_config_page_asset
-            ):
-                return jsonify(_config_load_error_payload(config_error)), 500
-        # 捐赠页与收款码：与配置页同一套密码与空闲超时（SESSION_IDLE_SECONDS，默认 300s）
-        if request.path == "/support" and request.method == "GET":
-            if not _has_password_set() or not _is_password_verification_enabled():
-                return None
-            if not _is_authenticated():
-                return redirect("/")
-            return None
-        if request.path == "/faq" and request.method == "GET":
-            if not _has_password_set() or not _is_password_verification_enabled():
-                return None
-            if not _is_authenticated():
-                return redirect("/")
-            return None
-        if request.path.startswith("/support/img/") and request.method == "GET":
-            if not _has_password_set() or not _is_password_verification_enabled():
-                return None
-            if not _is_authenticated():
-                abort(403)
-            return None
-        if request.path not in PROTECTED_PATHS and not request.path.startswith(PROTECTED_PREFIXES):
-            return None
-        if not _has_password_set():
-            return None
-        if not _is_password_verification_enabled():
-            return None
+            return jsonify(_config_load_error_payload(config_error)), 500
         if _is_authenticated():
             return None
-        return jsonify({"ok": False, "message": "未登录或会话已过期，请重新输入密码。"}), 401
+        if path.startswith("/api/"):
+            return jsonify({
+                "ok": False,
+                "need_setup": not _has_password_set(),
+                "message": "未登录或会话已过期，请重新输入密码。",
+            }), 401
+        if path.startswith("/support/img/"):
+            abort(403)
+        return redirect(_home_url())
 
     @app.get("/api/auth/status")
     def auth_status():
@@ -401,43 +450,55 @@ def create_app(on_config_saved=None) -> Flask:
         if config_error:
             return jsonify(_config_load_error_payload(config_error)), 500
         has_pw = _has_password_set()
-        verification_enabled = _is_password_verification_enabled()
         authenticated = _is_authenticated()
-        need_setup = not has_pw
-        need_login = has_pw and verification_enabled and not authenticated
+        need_setup = not has_pw and not authenticated
+        setup_requires_code = need_setup and _setup_requires_code()
+        if setup_requires_code:
+            _setup_codes.ensure()
         return jsonify({
             "ok": True,
             "need_setup": need_setup,
-            "need_login": need_login,
+            "setup_requires_code": setup_requires_code,
+            "need_login": has_pw and not authenticated,
             "authenticated": authenticated,
+            "via_gateway": _gateway_identity() is not None,
+            "password_min_length": PASSWORD_MIN_LENGTH,
         })
 
     @app.post("/api/auth/set-password")
     def auth_set_password():
-        """首次设置密码（两次输入须一致）。"""
+        """首次设置密码：网关管理员/本机可直接设置，其余来源须提供初始化码。"""
         config_error = _current_config_load_error()
         if config_error:
             return jsonify(_config_load_error_payload(config_error)), 500
         if _has_password_set():
             return jsonify({"ok": False, "message": "已设置过密码，请使用登录。"}), 400
-        payload = request.get_json(force=True, silent=True) or {}
+        key = _client_key()
+        wait = _login_limiter.retry_after(key)
+        if wait:
+            return jsonify({"ok": False, "message": f"尝试次数过多，请 {wait} 秒后再试。"}), 429
+        payload = request.get_json(silent=True) or {}
+        if _setup_requires_code():
+            if not _setup_codes.verify(str(payload.get("setup_code") or "")):
+                _login_limiter.record_failure(key)
+                return jsonify({
+                    "ok": False,
+                    "message": "初始化码错误。请在应用运行日志或配置目录的 .setup_code 文件中查看。",
+                }), 403
         p1 = (payload.get("password") or "").strip()
         p2 = (payload.get("password_confirm") or "").strip()
         if not p1:
             return jsonify({"ok": False, "message": "请输入密码。"}), 400
-        if len(p1) < 6:
-            return jsonify({"ok": False, "message": "密码长度至少 6 位。"}), 400
+        if len(p1) < PASSWORD_MIN_LENGTH:
+            return jsonify({"ok": False, "message": f"密码长度至少 {PASSWORD_MIN_LENGTH} 位。"}), 400
         if p1 != p2:
             return jsonify({"ok": False, "message": "两次输入的密码不一致。"}), 400
-        salt = secrets.token_hex(16)
-        stored_hash = _hash_password(p1, bytes.fromhex(salt))
-        raw = _load_raw_config()
-        raw["web_password_salt"] = salt
-        raw["web_password_hash"] = stored_hash
         try:
-            _save_raw_config(raw)
+            _save_raw_config(_apply_new_password(_load_raw_config(), p1))
         except Exception as e:
             return jsonify({"ok": False, "message": f"保存失败：{e}"}), 500
+        _setup_codes.clear()
+        _login_limiter.reset(key)
         session_id = _create_session()
         resp = jsonify({"ok": True, "message": "密码设置成功。"})
         resp.set_cookie(AUTH_COOKIE_NAME, session_id, **_auth_cookie_kwargs())
@@ -445,13 +506,17 @@ def create_app(on_config_saved=None) -> Flask:
 
     @app.post("/api/auth/login")
     def auth_login():
-        """使用密码登录。"""
+        """使用密码登录（按来源 IP 限制连续失败次数）。"""
         config_error = _current_config_load_error()
         if config_error:
             return jsonify(_config_load_error_payload(config_error)), 500
         if not _has_password_set():
             return jsonify({"ok": False, "message": "尚未设置密码。"}), 400
-        payload = request.get_json(force=True, silent=True) or {}
+        key = _client_key()
+        wait = _login_limiter.retry_after(key)
+        if wait:
+            return jsonify({"ok": False, "message": f"密码错误次数过多，请 {wait} 秒后再试。"}), 429
+        payload = request.get_json(silent=True) or {}
         password = (payload.get("password") or "").strip()
         if not password:
             return jsonify({"ok": False, "message": "请输入密码。"}), 400
@@ -460,7 +525,9 @@ def create_app(on_config_saved=None) -> Flask:
         if not salt or not stored_hash:
             return jsonify({"ok": False, "message": "密码配置无效，请重新设置密码。"}), 400
         if not _verify_password(password, salt, stored_hash):
+            _login_limiter.record_failure(key)
             return jsonify({"ok": False, "message": "密码错误。"}), 401
+        _login_limiter.reset(key)
         session_id = _create_session()
         resp = jsonify({"ok": True, "message": "登录成功。"})
         resp.set_cookie(AUTH_COOKIE_NAME, session_id, **_auth_cookie_kwargs())
@@ -499,7 +566,7 @@ def create_app(on_config_saved=None) -> Flask:
         if not monitor_events:
             monitor_events = list(DEFAULT_SELECTED_EVENTS)
 
-        channels = _channels_from_raw(raw)
+        channels = _mask_channels(_channels_from_raw(raw))
 
         try:
             from utils.cron_util import resolve_nas_patrol_cron
@@ -526,9 +593,9 @@ def create_app(on_config_saved=None) -> Flask:
             "dnd_enabled": as_bool(raw.get("dnd_enabled", False), False),
             "dnd_start_time": (raw.get("dnd_start_time") or "22:00").strip(),
             "dnd_end_time": (raw.get("dnd_end_time") or "07:00").strip(),
-            "web_password_enabled": as_bool(raw.get("web_password_enabled", True), True),
             "poll_batch_summary_enabled": as_bool(raw.get("poll_batch_summary_enabled", False), False),
             "minimal_push_enabled": as_bool(raw.get("minimal_push_enabled", False), False),
+            "ssh_ignore_loopback": as_bool(raw.get("ssh_ignore_loopback", False), False),
             "nas_patrol_enabled": as_bool(raw.get("nas_patrol_enabled", False), False),
             "nas_patrol_cron": _cron,
             "channel_options": CHANNEL_OPTIONS,
@@ -538,7 +605,7 @@ def create_app(on_config_saved=None) -> Flask:
 
     @app.post("/api/save-config")
     def save_config():
-        payload = request.get_json(force=True, silent=True) or {}
+        payload = request.get_json(silent=True) or {}
 
         _, _, valid_event_ids, _ = _events_catalog_bundle()
         events = payload.get("events") or []
@@ -546,14 +613,17 @@ def create_app(on_config_saved=None) -> Flask:
         events = [e for e in events if e in valid_event_ids]
         channels = payload.get("channels") or []
         channels = _normalize_push_channels(channels)
+        channels, restore_err = _restore_masked_channels(channels, _channels_from_raw(_load_raw_config()))
+        if restore_err:
+            return jsonify({"ok": False, "message": restore_err}), 400
         log_retention_days = payload.get("log_retention_days", 7)
         logger_poll_interval = payload.get("logger_poll_interval", 3)
         dnd_enabled = as_bool(payload.get("dnd_enabled", False), False)
         dnd_start_time = (payload.get("dnd_start_time") or "22:00").strip()
         dnd_end_time = (payload.get("dnd_end_time") or "07:00").strip()
-        web_password_enabled = as_bool(payload.get("web_password_enabled", True), True)
         poll_batch_summary_enabled = as_bool(payload.get("poll_batch_summary_enabled", False), False)
         minimal_push_enabled = as_bool(payload.get("minimal_push_enabled", False), False)
+        ssh_ignore_loopback = as_bool(payload.get("ssh_ignore_loopback", False), False)
         nas_patrol_enabled = as_bool(payload.get("nas_patrol_enabled", False), False)
         nas_patrol_cron = (payload.get("nas_patrol_cron") or "").strip()
         title_prefix = _title_prefix_from_dict(payload)
@@ -592,14 +662,24 @@ def create_app(on_config_saved=None) -> Flask:
         if not any(bool(ch.get("enabled")) for ch in channels):
             return jsonify({"ok": False, "message": "请至少配置一个推送渠道。"}), 400
 
+        known_types = {opt["id"] for opt in CHANNEL_OPTIONS}
         for ch in channels:
             ch_type = ch.get("type")
             url = (ch.get("url") or "").strip()
-            if ch_type not in {"wechat", "dingtalk", "feishu", "bark", "pushplus", "magic_push", "smtp"}:
+            if ch_type not in known_types:
                 return jsonify({"ok": False, "message": "存在未知的推送渠道类型。"}), 400
             if not url:
                 return jsonify({"ok": False, "message": "推送渠道地址不能为空。"}), 400
-            if ch_type == "pushplus":
+            if ch_type in ("wecom_app", "webhook", "meow"):
+                parts = []
+                for part in (p.strip() for p in url.split("|") if p.strip()):
+                    err = validate_channel_json(ch_type, part)
+                    if err:
+                        return jsonify({"ok": False, "message": err}), 400
+                    # 多条配置以 | 拼接，JSON 字符串内的 | 转义保存
+                    parts.append(json.dumps(json.loads(part), ensure_ascii=False).replace("|", "\\u007c"))
+                ch["url"] = "|".join(parts)
+            elif ch_type == "pushplus":
                 try:
                     obj = json.loads(url)
                     if not isinstance(obj, dict) or "token" not in obj:
@@ -671,9 +751,9 @@ def create_app(on_config_saved=None) -> Flask:
                 "dnd_enabled": dnd_enabled,
                 "dnd_start_time": dnd_start_time,
                 "dnd_end_time": dnd_end_time,
-                "web_password_enabled": web_password_enabled,
                 "poll_batch_summary_enabled": poll_batch_summary_enabled,
                 "minimal_push_enabled": minimal_push_enabled,
+                "ssh_ignore_loopback": ssh_ignore_loopback,
                 "nas_patrol_enabled": nas_patrol_enabled,
                 "nas_patrol_cron": nas_patrol_cron,
                 "title_prefix": title_prefix,
@@ -712,7 +792,7 @@ def create_app(on_config_saved=None) -> Flask:
     @app.post("/api/test")
     def test_push():
         try:
-            payload = request.get_json(force=True, silent=True) or {}
+            payload = request.get_json(silent=True) or {}
             content = (payload.get("content") or "").strip()
             if not content:
                 return jsonify({"ok": False, "message": "请输入要测试的内容。"}), 400
@@ -844,12 +924,12 @@ def create_app(on_config_saved=None) -> Flask:
     def support_page():
         """支持作者：展示 README 中与捐赠说明一致的收款二维码。"""
         wechat_src = (
-            "/support/img/wechat_pay.jpg"
+            "support/img/wechat_pay.jpg"
             if SUPPORT_QR_DIR.is_dir() and (SUPPORT_QR_DIR / "wechat_pay.jpg").is_file()
             else ""
         )
         ali_src = (
-            "/support/img/ali_pay.jpg"
+            "support/img/ali_pay.jpg"
             if SUPPORT_QR_DIR.is_dir() and (SUPPORT_QR_DIR / "ali_pay.jpg").is_file()
             else ""
         )
@@ -879,16 +959,41 @@ def create_app(on_config_saved=None) -> Flask:
     return app
 
 
+def _serve_forever(server, name: str) -> threading.Thread:
+    thread = threading.Thread(target=server.serve_forever, name=name, daemon=True)
+    thread.start()
+    return thread
+
+
 def start_ui_server_in_background(on_config_saved=None):
-    """在后台线程启动配置 UI 服务。on_config_saved: 保存配置成功后的回调（热加载用）。"""
+    """在后台线程启动配置 UI 服务。on_config_saved: 保存配置成功后的回调（热加载用）。
+
+    - TCP：UI_HOST（默认 0.0.0.0）/ UI_PORT（默认 18080）；剥离客户端自带的 X-Trim-* 头。
+    - 统一网关：设置 FNMB_GATEWAY_SOCKET 时额外监听该 Unix Socket，前缀取 FNMB_GATEWAY_PREFIX。
+    """
+    from werkzeug.serving import make_server
+
     app = create_app(on_config_saved=on_config_saved)
+    host = (os.getenv("UI_HOST") or "0.0.0.0").strip() or "0.0.0.0"
     port = int(os.getenv("UI_PORT", "18080"))
 
-    def _run():
-        app.run(host="0.0.0.0", port=port, threaded=True)
+    tcp_server = make_server(host, port, StripGatewayHeadersMiddleware(app.wsgi_app), threaded=True)
+    print(f"配置 UI 监听 http://{host}:{port}")
+    thread = _serve_forever(tcp_server, "FnMessageBots-UI")
 
-    thread = threading.Thread(target=_run, name="FnMessageBots-UI", daemon=True)
-    thread.start()
+    sock_path = (os.getenv("FNMB_GATEWAY_SOCKET") or "").strip()
+    if sock_path:
+        prefix = (os.getenv("FNMB_GATEWAY_PREFIX") or "").strip()
+        try:
+            if os.path.exists(sock_path):
+                os.unlink(sock_path)
+            gw_server = make_server(
+                f"unix://{sock_path}", 0, GatewayPrefixMiddleware(app.wsgi_app, prefix), threaded=True
+            )
+            print(f"统一网关 Socket 已监听：{sock_path}（前缀 {prefix or '/'}）")
+            _serve_forever(gw_server, "FnMessageBots-Gateway")
+        except Exception as e:
+            print(f"统一网关 Socket 监听失败（{e}），仅提供 TCP 访问")
     return thread
 
 
@@ -897,6 +1002,7 @@ if __name__ == "__main__":
     repo_root = Path(__file__).resolve().parent.parent.parent
     os.chdir(repo_root)
     app = create_app()
+    app.wsgi_app = StripGatewayHeadersMiddleware(app.wsgi_app)
     port = int(os.getenv("UI_PORT", "18080"))
     print(f"配置 UI: http://127.0.0.1:{port}")
-    app.run(host="0.0.0.0", port=port, debug=True)
+    app.run(host="127.0.0.1", port=port, debug=True)

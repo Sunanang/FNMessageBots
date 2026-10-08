@@ -83,7 +83,7 @@ class Application:
         banner = f"""
         启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         监控模式: 数据库轮询 (logger_data.db3 log 表)
-        通知方式: 企业微信/钉钉/飞书机器人/Bark/PushPlus/魔法推送/SMTP邮件
+        通知方式: 企业微信/企业微信应用/钉钉/飞书机器人/Bark/PushPlus/魔法推送/SMTP邮件/通用Webhook/MeoW
 
         """
         print(banner)
@@ -189,12 +189,12 @@ class Application:
             return False
         try:
             probe_readonly_sqlite(db_path, timeout=3.0, table_probe_sql=table_probe_sql)
-            print(f"✓ {label} 可访问: {db_path}")
             return True
         except Exception as e:
-            print(f"⚠ {label} 不可访问: {db_path}（{e}）")
             if self.logger:
                 self.logger.warning("%s 不可访问: %s (%s)", label, db_path, e)
+            else:
+                print(f"⚠ {label} 不可访问: {db_path}（{e}）")
             self._print_db_permission_hint(label, db_path)
             return False
 
@@ -296,12 +296,10 @@ class Application:
             return None
         logger_db_path = (getattr(self.config, "logger_db_path", "") or "").strip()
         if not logger_db_path:
-            print("未配置 logger_db_path，跳过主日志库轮询（仅启用其他已配置轮询源）。")
             if self.logger:
                 self.logger.warning("未配置 logger_db_path，主日志库轮询未启用")
             return None
         if not self._probe_db_readable("主日志库 logger_data.db3", logger_db_path):
-            print("主日志库不可访问，跳过主日志库轮询（仅启用其他已配置轮询源）。")
             return None
 
         poller = DBLogPoller(
@@ -314,13 +312,8 @@ class Application:
         )
         if getattr(self.config, "poll_batch_summary_enabled", False):
             poller.set_batch_handler(self._dispatch_batch_events)
-            print(
-                "轮询汇总模式：已开启（主日志每轮与影视/相册/Docker/备份/任务计划 等待项合并为一条推送；"
-                "无主日志时按轮询间隔刷外部队列）"
-            )
         else:
             poller.set_batch_handler(None)
-            print("轮询汇总模式：已关闭（逐条推送；事件密集时可能触发渠道限流）")
         return poller
     
     def initialize(self) -> bool:
@@ -339,6 +332,9 @@ class Application:
                 self.config.pushplus_params,
                 getattr(self.config, "magic_push_params", "") or "",
                 getattr(self.config, "smtp_params", "") or "",
+                getattr(self.config, "wecom_app_params", "") or "",
+                getattr(self.config, "webhook_params", "") or "",
+                getattr(self.config, "meow_params", "") or "",
             ])
             if has_webhook:
                 print("配置加载完成（已配置推送渠道）")
@@ -347,119 +343,57 @@ class Application:
             
             # 设置日志
             self.logger = setup_logging(self.config)
-            print("日志设置完成")
-            
-            # 打印横幅
+
             self._print_banner()
-            
-            # 显示配置信息
-            print(f"监控事件: {', '.join(self.config.monitor_events)}")
-            print(f"日志级别: {self.config.log_level}")
-            print(f"去重窗口: {self.config.dedup_window}秒")
-            print(f"连接池大小: {self.config.http_pool_size}")
-            
-            # 检查推送渠道配置
-            if self.config.wechat_webhook_url:
-                print(f"企业微信Webhook: 已配置")
-            if self.config.dingtalk_webhook_url:
-                print(f"钉钉Webhook: 已配置")
-            if self.config.feishu_webhook_url:
-                print(f"飞书Webhook: 已配置")
-            if self.config.bark_url:
-                print(f"Bark: 已配置")
-            if self.config.pushplus_params:
-                print(f"PushPlus: 已配置")
-            if getattr(self.config, "magic_push_params", ""):
-                print(f"魔法推送: 已配置")
-            if getattr(self.config, "smtp_params", ""):
-                print("SMTP邮件: 已配置")
+            print(f"监控事件（{len(self.config.monitor_events)} 项）: {', '.join(self.config.monitor_events)}")
+
             if not has_webhook:
                 print("未配置推送渠道：不轮询数据库、不推送消息，仅提供 Web 配置页面。")
-                print("初始化完成（待配置）。")
                 return True
-            
-            # 已配置推送渠道：初始化通知器、事件处理器、数据库轮询器
-            print("初始化多平台通知器...")
-            self.notifier = UnifiedNotifier(self.config)
-            print("多平台通知器初始化完成")
-            
-            print("正在初始化事件处理器...")
-            self.event_processor = EventProcessor(self.notifier, self.config)
-            print("事件处理器初始化完成")
-            
-            print("正在初始化数据库日志轮询器...")
-            self.log_poller = self._build_log_poller()
-            if self.log_poller:
-                print(f"数据库轮询器初始化完成（间隔: {self.config.logger_poll_interval}秒，数据库: {self.config.logger_db_path}）")
-            else:
-                print("主日志库轮询器未启用")
 
-            print("正在按监控事件初始化备份库/影视库/相册轮询器...")
+            self.notifier = UnifiedNotifier(self.config)
+            self.event_processor = EventProcessor(self.notifier, self.config)
+            self.log_poller = self._build_log_poller()
             self._sync_optional_pollers()
+
+            enabled_sources = []
+            if self.log_poller:
+                enabled_sources.append("主日志库")
             if self.backup_poller:
-                print(
-                    f"备份库轮询已启用（间隔 {self.config.logger_poll_interval} 秒，"
-                    f"{getattr(self.config, 'backup_db_path', '')}）"
-                )
-            else:
-                print("未勾选备份任务事件，跳过备份库轮询")
+                enabled_sources.append("备份库")
             if self.media_db_poller:
-                print(
-                    f"trimmedia 轮询已启用（间隔 {self.config.logger_poll_interval} 秒，"
-                    f"{getattr(self.config, 'trim_media_db_path', '') or '(路径未配置)'}）"
-                )
-            else:
-                print("未勾选影视库入库/刮削事件，跳过 trimmedia.db 轮询")
+                enabled_sources.append("trimmedia")
             if self.trim_activity_poller:
-                print(
-                    f"trimactivity 轮询已启用（间隔 {self.config.logger_poll_interval} 秒，"
-                    f"{getattr(self.config, 'trim_activity_db_path', '') or '(路径未配置)'}）"
-                )
-            else:
-                print("未勾选影视库登录/登出事件，跳过 trimactivity.db 轮询")
+                enabled_sources.append("trimactivity")
             if self.photo_db_poller:
-                print(
-                    f"相册 photo.db 轮询已启用（间隔 {self.config.logger_poll_interval} 秒，"
-                    f"{getattr(self.config, 'photo_db_path', '') or '(路径未配置)'}）"
-                )
-            else:
-                print("未勾选相册相关事件，跳过 photo.db 轮询")
+                enabled_sources.append("相册")
             if self.scheduler_db_poller:
-                print(
-                    f"任务计划 scheduler.db 轮询已启用（间隔 {self.config.logger_poll_interval} 秒，"
-                    f"{getattr(self.config, 'scheduler_db_path', '') or '(路径未配置)'}）"
-                )
-            else:
-                print("未勾选任务计划事件，跳过 scheduler.db 轮询")
-            ds = (getattr(self.config, "docker_socket_path", "") or "").strip() or "/var/run/docker.sock"
+                enabled_sources.append("任务计划")
             if self.docker_events_poller:
-                print(f"Docker 容器事件监听已启用（socket: {ds}）")
-            else:
-                if set(self.config.monitor_events or []) & set(DOCKER_POLL_EVENTS):
-                    sock_issue = check_docker_socket_access(ds)
-                    if sock_issue:
-                        print(f"已勾选 Docker 容器事件，但未启动监听：{sock_issue}")
-                    else:
-                        print("Docker 容器事件：依赖未就绪或 docker SDK 不可用，未启动监听")
-                else:
-                    print("未勾选 Docker 容器事件，跳过 Docker events 监听")
+                enabled_sources.append("Docker 事件")
             if self.ssh_journal_poller and self.ssh_journal_poller.is_available():
-                print(
-                    f"SSH journal 轮询已启用（间隔 {self.config.logger_poll_interval} 秒，"
-                    "journalctl -u ssh/sshd）"
-                )
-            elif set(self.config.monitor_events or []) & set(SSH_JOURNAL_EVENTS):
+                enabled_sources.append("SSH journal")
+            print(
+                f"已启用轮询源（间隔 {self.config.logger_poll_interval} 秒）: "
+                f"{'、'.join(enabled_sources) or '无'}"
+            )
+            if not self.docker_events_poller and set(self.config.monitor_events or []) & set(DOCKER_POLL_EVENTS):
+                ds = (getattr(self.config, "docker_socket_path", "") or "").strip() or "/var/run/docker.sock"
+                sock_issue = check_docker_socket_access(ds)
+                if sock_issue:
+                    print(f"已勾选 Docker 容器事件，但未启动监听：{sock_issue}")
+                else:
+                    print("Docker 容器事件：依赖未就绪或 docker SDK 不可用，未启动监听")
+            if not (self.ssh_journal_poller and self.ssh_journal_poller.is_available()) and (
+                set(self.config.monitor_events or []) & set(SSH_JOURNAL_EVENTS)
+            ):
                 print(
                     "已勾选 SSH 事件，但 journal 不可用：将回退 logger_data 中的 Sshd*；"
                     "请挂载 /var/log/journal 与 /etc/machine-id，并确保镜像含 journalctl"
                 )
-            else:
-                print("未勾选 SSH 事件，跳过 SSH journal 轮询")
 
-            print("开始注册事件处理器...")
             self._register_db_event_handlers()
-            
-            print(f"\n初始化完成，开始监控...")
+            print("初始化完成，开始监控")
             return True
         except Exception as e:
             print(f"初始化失败: {e}")
@@ -621,17 +555,20 @@ class Application:
                 self.docker_events_poller = None
 
         ssh_wanted = bool(me & SSH_JOURNAL_EVENTS)
+        ssh_ignore_loopback = bool(getattr(self.config, "ssh_ignore_loopback", False))
         if ssh_wanted:
             if self.ssh_journal_poller is None:
                 self.ssh_journal_poller = SshJournalPoller(
                     cursor_dir=cdir,
                     poll_interval=interval,
                     monitor_events=self.config.monitor_events,
+                    ignore_loopback=ssh_ignore_loopback,
                 )
             else:
                 self.ssh_journal_poller.update_config(
                     monitor_events=self.config.monitor_events,
                     poll_interval=interval,
+                    ignore_loopback=ssh_ignore_loopback,
                 )
         else:
             if self.ssh_journal_poller is not None:
@@ -644,6 +581,7 @@ class Application:
                 self.ssh_journal_poller is not None and self.ssh_journal_poller.is_available()
             )
             self.log_poller.skip_ssh_events = journal_ok
+            self.log_poller.ignore_ssh_loopback = ssh_ignore_loopback
 
         pbs = bool(getattr(self.config, "poll_batch_summary_enabled", False)) and self.event_processor is not None
         batch_enq = self._enqueue_unified_batch_items if pbs else None
@@ -688,6 +626,7 @@ class Application:
         scheduler_ev = set(SCHEDULER_POLL_EVENTS)
         docker_ev = set(DOCKER_POLL_EVENTS)
         ssh_ev = set(SSH_JOURNAL_EVENTS)
+        registered = 0
         for event_type in self.config.monitor_events:
             handler = self.event_processor.get_handler(event_type)
             if not handler:
@@ -710,7 +649,8 @@ class Application:
                 self.docker_events_poller.add_handler(event_type, handler)
             if self.ssh_journal_poller and event_type in ssh_ev:
                 self.ssh_journal_poller.add_handler(event_type, handler)
-            print(f"✓ 注册事件处理器: {event_type}")
+            registered += 1
+        print(f"已注册 {registered} 个事件处理器")
 
     def reload_config(self) -> None:
         """保存配置后热加载：从配置文件重新加载并更新通知器与轮询器，无需重启容器。"""
@@ -728,6 +668,9 @@ class Application:
             self.config.pushplus_params,
             getattr(self.config, "magic_push_params", "") or "",
             getattr(self.config, "smtp_params", "") or "",
+            getattr(self.config, "wecom_app_params", "") or "",
+            getattr(self.config, "webhook_params", "") or "",
+            getattr(self.config, "meow_params", "") or "",
         ])
         if self.notifier is None and has_webhook:
             print("配置已保存并热加载：检测到新配置的推送渠道，正在启动监控...")
@@ -832,8 +775,7 @@ class Application:
             self.running = True
 
             try:
-                ui_thread = start_ui_server_in_background(on_config_saved=self.reload_config)
-                print(f"配置 UI 已启动，线程: {ui_thread.name}")
+                start_ui_server_in_background(on_config_saved=self.reload_config)
             except Exception as e:
                 print(f"配置 UI 启动失败: {e}")
             try:
@@ -841,14 +783,10 @@ class Application:
 
                 set_runtime_monitor_app(self)
                 self._nas_patrol_thread = start_nas_patrol_thread(self)
-                if self._nas_patrol_thread:
-                    print(f"NAS 定时巡检线程已启动: {self._nas_patrol_thread.name}")
             except Exception as e:
                 print(f"NAS 定时巡检线程启动失败: {e}")
             try:
                 self._wan_ip_monitor_thread = start_wan_ip_monitor_thread(self)
-                if self._wan_ip_monitor_thread:
-                    print(f"外网 IP 监控线程已启动: {self._wan_ip_monitor_thread.name}")
             except Exception as e:
                 print(f"外网 IP 监控线程启动失败: {e}")
             if not self.notifier:
@@ -860,61 +798,26 @@ class Application:
             else:
                 # 已配置推送渠道：正常启动监控与推送
                 self._start_notification_health_monitor()
-                self.notifier.send_system_notification(
-                    'APP_START',
-                    '飞牛NAS日志监控系统已启动，开始监控系统事件',
-                    {'hostname': socket.gethostname(), 'version': '2.5.0'}
-                )
-                if self.log_poller:
-                    print("启动数据库日志轮询器...")
-                    self.log_poller.start()
-                else:
-                    print("无法启动数据库日志轮询器")
-                if self.backup_poller:
-                    print("启动备份数据库轮询器...")
-                    self.backup_poller.start()
-                else:
-                    print("未勾选备份任务事件，跳过备份库轮询")
-                if self.media_db_poller:
-                    print("启动影视库 trimmedia 轮询器...")
-                    self.media_db_poller.start()
-                else:
-                    print("未勾选影视库入库/刮削事件，跳过 trimmedia.db 轮询")
-                if self.trim_activity_poller:
-                    print("启动影视库 trimactivity 轮询器...")
-                    self.trim_activity_poller.start()
-                else:
-                    print("未勾选影视库登录/登出事件，跳过 trimactivity.db 轮询")
-                if self.photo_db_poller:
-                    print("启动相册 photo.db 轮询器...")
-                    self.photo_db_poller.start()
-                else:
-                    print("未勾选相册相关事件，跳过 photo.db 轮询")
-                if self.scheduler_db_poller:
-                    print("启动任务计划 scheduler.db 轮询器...")
-                    self.scheduler_db_poller.start()
-                else:
-                    print("未勾选任务计划事件，跳过 scheduler.db 轮询")
-                if self.docker_events_poller:
-                    print("启动 Docker 容器事件监听...")
-                    self.docker_events_poller.start()
-                elif set(self.config.monitor_events or []) & set(DOCKER_POLL_EVENTS):
-                    ds = (getattr(self.config, "docker_socket_path", "") or "").strip() or "/var/run/docker.sock"
-                    sock_issue = check_docker_socket_access(ds)
-                    if sock_issue:
-                        print(f"已勾选 Docker 容器事件，跳过监听：{sock_issue}")
-                    else:
-                        print("Docker 容器事件依赖未就绪，跳过监听（请确认已 pip install docker）")
-                if self.ssh_journal_poller:
-                    print("启动 SSH journal 轮询器...")
-                    self.ssh_journal_poller.start()
-                elif set(self.config.monitor_events or []) & set(SSH_JOURNAL_EVENTS):
-                    print(
-                        "已勾选 SSH 事件但 journal 不可用，回退 logger_data Sshd*；"
-                        "请挂载 /var/log/journal 与 /etc/machine-id"
+                if self._mark_app_start_notice():
+                    self.notifier.send_system_notification(
+                        'APP_START',
+                        '飞牛NAS日志监控系统已启动，开始监控系统事件',
+                        {'hostname': socket.gethostname(), 'version': '2.5.0'}
                     )
                 else:
-                    print("未勾选 SSH 事件，跳过 SSH journal 轮询")
+                    print("距上次启动通知不足 10 分钟，跳过本次启动通知（避免频繁重启刷屏）")
+                for poller in (
+                    self.log_poller,
+                    self.backup_poller,
+                    self.media_db_poller,
+                    self.trim_activity_poller,
+                    self.photo_db_poller,
+                    self.scheduler_db_poller,
+                    self.docker_events_poller,
+                    self.ssh_journal_poller,
+                ):
+                    if poller:
+                        poller.start()
                 self._refresh_poll_batch_summary_thread()
 
             # 设置信号处理
@@ -994,6 +897,22 @@ class Application:
                     self.logger.error(f"通知健康监控出错: {e}", exc_info=True)
             time.sleep(check_interval)
 
+    def _mark_app_start_notice(self, window_sec: int = 600) -> bool:
+        """返回 True 表示应发送启动通知；窗口内重复启动只发一次。"""
+        cursor_dir = getattr(self.config, "cursor_dir", "./data/cursor") or "./data/cursor"
+        marker = Path(cursor_dir) / "app_start_notice.ts"
+        now = time.time()
+        try:
+            if marker.exists():
+                last_ts = float(marker.read_text().strip() or "0")
+                if 0 <= now - last_ts < window_sec:
+                    return False
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(str(now))
+        except Exception:
+            pass
+        return True
+
     def _should_throttle_notification_restart(self) -> bool:
         """防止通知故障导致频繁重启"""
         if not self.config:
@@ -1045,6 +964,7 @@ class Application:
             pass
 
         time.sleep(2)
+        self._auto_restarting = True
         self._exit_code = 1
         self.running = False
     
@@ -1054,8 +974,8 @@ class Application:
         self._stop_unified_batch_flush_thread()
         self._flush_unified_batch_pending_only()
 
-        # 发送停止通知
-        if self.notifier:
+        # 发送停止通知（自动重启时已发过 APP_ERROR，不再追加）
+        if self.notifier and not getattr(self, "_auto_restarting", False):
             self.notifier.send_system_notification(
                 'APP_STOP',
                 '飞牛NAS日志监控系统已停止，监控服务暂停',
@@ -1083,12 +1003,10 @@ class Application:
         # 停止运行日志清理线程
         cleanup_flag = getattr(self.logger, 'cleanup_stop_flag', None) if self.logger else None
         if cleanup_flag is not None:
-            print("正在停止运行日志清理线程...")
             cleanup_flag.set()
 
         # 停止原始推送日志清理线程
         if self.event_processor and hasattr(self.event_processor, 'log_storage'):
-            print("正在停止原始推送日志清理线程...")
             self.event_processor.log_storage.stop_cleanup_thread()
 
         # 关闭通知器

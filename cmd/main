@@ -4,6 +4,9 @@ set -u
 
 LOG_FILE="${TRIM_PKGVAR}/info.log"
 PID_FILE="${TRIM_PKGVAR}/app.pid"
+GATEWAY_SOCKET="${TRIM_APPDEST:-}/app.sock"
+# 须与 app/ui/config 中的 gatewayPrefix 一致
+GATEWAY_PREFIX="/app/FnMessageBot"
 
 # write the command to start your program here 
 _app_install_root() {
@@ -59,7 +62,8 @@ build_cmd() {
         return 1
     fi
 
-    printf '%s' "export APP_HOME=\"${TRIM_PKGVAR}\"; export UI_PORT=\"18230\"; export PYTHONUNBUFFERED=1; export PYTHONPATH=\"${pypath}\"; cd \"${TRIM_PKGVAR}\"; \"${py}\" -u \"${app_main}\""
+    # 配置页经统一网关（${TRIM_APPDEST}/app.sock，NAS 登录态）访问；18230 只监听本机，不对局域网开放
+    printf '%s' "export APP_HOME=\"${TRIM_PKGVAR}\"; export UI_HOST=\"127.0.0.1\"; export UI_PORT=\"18230\"; export FNMB_GATEWAY_SOCKET=\"${GATEWAY_SOCKET}\"; export FNMB_GATEWAY_PREFIX=\"${GATEWAY_PREFIX}\"; export PYTHONUNBUFFERED=1; export PYTHONPATH=\"${pypath}\"; cd \"${TRIM_PKGVAR}\"; \"${py}\" -u \"${app_main}\""
 }
 
 fail_user_visible() {
@@ -127,6 +131,7 @@ stop_process() {
             log_msg "process killed... "
         fi
     fi
+    rm -f "${GATEWAY_SOCKET}" 2>/dev/null || true
 
     return 0
 }

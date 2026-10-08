@@ -150,6 +150,9 @@ class UnifiedNotifier:
             pushplus_params=config.pushplus_params,
             magic_push_params=getattr(config, "magic_push_params", "") or "",
             smtp_params=getattr(config, "smtp_params", "") or "",
+            wecom_app_params=getattr(config, "wecom_app_params", "") or "",
+            webhook_params=getattr(config, "webhook_params", "") or "",
+            meow_params=getattr(config, "meow_params", "") or "",
             title_prefix=getattr(config, "title_prefix", TITLE_PREFIX_DEFAULT),
             minimal_push_enabled=bool(getattr(config, "minimal_push_enabled", False)),
             poll_batch_summary_enabled=bool(getattr(config, "poll_batch_summary_enabled", False)),
@@ -161,7 +164,7 @@ class UnifiedNotifier:
             retries=config.http_retry_count,
             timeout=config.http_timeout
         )
-        self.logger.info("多平台通知器已初始化")
+        self.logger.debug("多平台通知器已初始化")
 
     def reload_config(self):
         """按当前 self.config 重新创建多平台通知器（保存配置后热加载用）。"""
@@ -175,6 +178,9 @@ class UnifiedNotifier:
             pushplus_params=self.config.pushplus_params,
             magic_push_params=getattr(self.config, "magic_push_params", "") or "",
             smtp_params=getattr(self.config, "smtp_params", "") or "",
+            wecom_app_params=getattr(self.config, "wecom_app_params", "") or "",
+            webhook_params=getattr(self.config, "webhook_params", "") or "",
+            meow_params=getattr(self.config, "meow_params", "") or "",
             title_prefix=getattr(self.config, "title_prefix", TITLE_PREFIX_DEFAULT),
             minimal_push_enabled=bool(getattr(self.config, "minimal_push_enabled", False)),
             poll_batch_summary_enabled=bool(getattr(self.config, "poll_batch_summary_enabled", False)),
@@ -490,7 +496,7 @@ class UnifiedNotifier:
             by_type[et] = int(by_type.get(et, 0)) + int(cnt)
         if not by_type:
             self._save_last_dnd_summary_end(end_key)
-            self.logger.info("勿扰结束：数据库查询到 0 条监控事件，跳过汇总推送")
+            self.logger.debug("勿扰结束：数据库查询到 0 条监控事件，跳过汇总推送")
             return
         summary = self._build_dnd_summary_from_db(start_dt, end_dt, by_type)
         try:
@@ -707,6 +713,12 @@ class UnifiedNotifier:
             active_platforms.append('magic_push')
         if getattr(self.config, "smtp_params", ""):
             active_platforms.append('smtp')
+        if getattr(self.config, "wecom_app_params", ""):
+            active_platforms.append('wecom_app')
+        if getattr(self.config, "webhook_params", ""):
+            active_platforms.append('webhook')
+        if getattr(self.config, "meow_params", ""):
+            active_platforms.append('meow')
         
         if len(active_platforms) == 0:
             method = 'none'
@@ -778,6 +790,12 @@ class UnifiedNotifier:
             active_platforms.append('magic_push')
         if getattr(self.config, "smtp_params", ""):
             active_platforms.append('smtp')
+        if getattr(self.config, "wecom_app_params", ""):
+            active_platforms.append('wecom_app')
+        if getattr(self.config, "webhook_params", ""):
+            active_platforms.append('webhook')
+        if getattr(self.config, "meow_params", ""):
+            active_platforms.append('meow')
         
         if len(active_platforms) == 0:
             method = 'none'
@@ -830,6 +848,9 @@ class UnifiedNotifier:
                 'pushplus': False,
                 'magic_push': False,
                 'smtp': False,
+                'wecom_app': False,
+                'webhook': False,
+                'meow': False,
             }
         }
     
@@ -838,4 +859,4 @@ class UnifiedNotifier:
         if self.multi_platform_notifier:
             self.multi_platform_notifier.close()
         
-        self.logger.info("统一通知器已关闭")
+        self.logger.debug("统一通知器已关闭")

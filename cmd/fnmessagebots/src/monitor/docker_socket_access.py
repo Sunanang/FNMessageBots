@@ -40,7 +40,7 @@ def check_docker_socket_access(sock_path: str) -> Optional[str]:
     返回告警文案；socket 可用（含 Docker API ping）时返回 None。
     """
     sp = (sock_path or "").strip() or "/var/run/docker.sock"
-    faq = "详见常见问题 · 第11条（/faq#faq-docker-sock）。"
+    faq = "详见常见问题 · 第13条（faq#faq-docker-sock）。"
 
     try:
         st = os.stat(sp)

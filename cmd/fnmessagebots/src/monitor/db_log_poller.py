@@ -18,6 +18,7 @@ from utils.logtime_display import get_logtime_display_offset_seconds
 
 from .models import JournalEntry
 from .sqlite_uri import connect_readonly_with_fallback
+from .ssh_journal_poller import should_ignore_loopback_ssh
 
 
 # 数据库 eventId -> 项目内 event_type（通知/处理器使用的类型）
@@ -142,6 +143,8 @@ def _row_to_entry(row: Dict[str, Any]) -> JournalEntry:
 class DBLogPoller:
     """从 logger_data.db3 的 log 表轮询新记录并分发到已注册的事件处理器。"""
 
+    BATCH_MAX_ATTEMPTS = 3
+
     def __init__(
         self,
         db_path: str,
@@ -161,16 +164,19 @@ class DBLogPoller:
         self.batch_handler: Optional[Callable[[List[Dict[str, Any]]], None]] = None
         # 当 SSH journal 轮询可用时，跳过库内 Sshd*，避免双推
         self.skip_ssh_events = False
+        # 与 SshJournalPoller 一致：忽略本机回环的 SSH 登录成功 / 断开
+        self.ignore_ssh_loopback = False
         self.running = False
         self._thread: Optional[threading.Thread] = None
         self._cursor_file = self.cursor_dir / "db_poller_cursor.txt"
+        self._batch_fail_count = 0
         self.logger = logging.getLogger(__name__)
         self.cursor_dir.mkdir(parents=True, exist_ok=True)
 
     def add_handler(self, event_type: str, handler: Callable):
         """注册事件类型对应的处理函数（event_type 为项目内类型，如 LoginSucc、SSH_LOGIN_SUCCESS）。"""
         self.event_handlers[event_type] = handler
-        self.logger.info("注册事件处理器: %s", event_type)
+        self.logger.debug("注册事件处理器: %s", event_type)
 
     def clear_handlers(self) -> None:
         """清空已注册的事件处理器（热加载配置前调用）。"""
@@ -289,6 +295,8 @@ class DBLogPoller:
                 row.get("uname"),
                 row.get("uid"),
             )
+            if self.ignore_ssh_loopback and should_ignore_loopback_ssh(project_type, event_data):
+                continue
             event_data.setdefault("_source", "logger_db")
             event_data.setdefault("_source_cursor", str(row_id))
             event_data.setdefault("_source_event_id", db_event_id)
@@ -317,9 +325,18 @@ class DBLogPoller:
                     except Exception as e:
                         self.logger.error("处理事件失败 eventId=%s: %s", item["db_event_id"], e)
         if rows:
-            # 汇总模式批量投递失败时不推进游标，下次轮询重试同批 id，避免静默丢事件
+            # 汇总投递异常时同批最多重试 BATCH_MAX_ATTEMPTS 次，之后推进游标，避免无限重发
             if self.batch_handler and batch_events and batch_delivery_failed:
-                return last_id
+                self._batch_fail_count += 1
+                if self._batch_fail_count < self.BATCH_MAX_ATTEMPTS:
+                    return last_id
+                self.logger.warning(
+                    "批量处理连续失败 %s 次，放弃本批（id %s–%s）",
+                    self._batch_fail_count,
+                    rows[0].get("id"),
+                    rows[-1].get("id"),
+                )
+            self._batch_fail_count = 0
             self._write_last_id(rows[-1].get("id", last_id))
         return last_id if not rows else rows[-1].get("id", last_id)
 

@@ -16,3 +16,4 @@ cmd/fnmessagebots/data/
 cmd/fnmessagebots/src/data/
 cmd/fnmessagebots/config/*.local.json
 cmd/fnmessagebots/config/config.json.bak
+cmd/fnmessagebots/config/.setup_code

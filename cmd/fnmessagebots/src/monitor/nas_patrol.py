@@ -5,6 +5,7 @@ NAS 定时巡检：按 Cron 表达式调度，采集本机 CPU/内存/磁盘状�
 
 from __future__ import annotations
 
+import glob
 import json
 import logging
 import os
@@ -31,8 +32,10 @@ from .sqlite_uri import connect_readonly_with_fallback
 
 _STATE_FILENAME = "nas_patrol_state.json"
 
-RETRY_BACKOFF_BASE_SEC = 30
+RETRY_BACKOFF_BASE_SEC = 300
 RETRY_BACKOFF_MAX_SEC = 3600
+# 单个巡检周期推送失败后的最大重试次数；用尽后放弃本周期，等下次计划时间
+RETRY_MAX_ATTEMPTS = 2
 
 # NUT upsd 默认端口（仅从系统自动探测连接，不提供应用层配置项）
 _NUT_UPSD_DEFAULT_PORT = 3493
@@ -1644,6 +1647,30 @@ def _sysfs_temp_path_sort_key(p: Path) -> Tuple[int, str]:
     return (idx, str(p))
 
 
+def _hwmon_temp1_for_block(nb: str) -> str:
+    if not _valid_sysfs_block_token(nb):
+        return ""
+    patterns = (
+        f"/sys/block/{nb}/../../hwmon/hwmon*/temp1_input",
+        f"/sys/block/{nb}/device/hwmon*/temp1_input",
+        f"/sys/block/{nb}/device/hwmon/hwmon*/temp1_input",
+    )
+    for pat in patterns:
+        try:
+            matches = sorted(glob.glob(pat))
+        except Exception:
+            continue
+        for f in matches:
+            try:
+                raw = Path(f).read_text(encoding="utf-8", errors="ignore").strip()
+                c = int(raw) // 1000
+            except (OSError, ValueError):
+                continue
+            if _celsius_ok(c):
+                return str(c)
+    return ""
+
+
 def _smart_temp_for_block_path(block_path: str) -> str:
     bp = str(block_path or "").strip()
     if not bp.startswith("/dev/"):
@@ -1651,7 +1678,12 @@ def _smart_temp_for_block_path(block_path: str) -> str:
     base = os.path.basename(bp)
     nb = _normalize_block_name(base) or base
 
-    # 1) smartctl JSON（最稳，避免文本列对齐误解析）
+    # 0) 与飞牛系统显示一致：设备所属控制器 hwmon 的 temp1_input（毫摄氏度取整）
+    hw = _hwmon_temp1_for_block(nb)
+    if hw:
+        return hw
+
+    # 1) smartctl JSON（避免文本列对齐误解析）
     out_json = _run_cmd(["smartctl", "-A", "-j", bp], timeout=3.0)
     if out_json:
         try:
@@ -2867,7 +2899,8 @@ def _collect_patrol_payload(_cfg: Any, _state: Dict[str, Any]) -> Dict[str, Any]
         except ValueError:
             continue
     if disk_temps:
-        disk_temp = f"{max(disk_temps):.1f}"
+        mx = max(disk_temps)
+        disk_temp = str(int(mx)) if mx.is_integer() else f"{mx:.1f}"
 
     if hostname == "--":
         missing.append("主机名称")
@@ -2927,17 +2960,14 @@ def _send_patrol_notification(
     if not cfg:
         if logger:
             logger.warning("NAS 巡检跳过：配置未加载")
-        print("NAS 巡检跳过：配置未加载", flush=True)
         return False
     if require_enabled and not getattr(cfg, "nas_patrol_enabled", False):
         if logger:
             logger.warning("NAS 巡检跳过：未开启巡检任务")
-        print("NAS 巡检跳过：未开启巡检任务", flush=True)
         return False
     if not app.notifier:
         if logger:
             logger.warning("NAS 巡检跳过：未配置推送渠道（notifier 为空）")
-        print("NAS 巡检跳过：未配置推送渠道（notifier 为空）", flush=True)
         return False
     payload = _collect_patrol_payload(cfg, {})
     # 巡检触发时顺带检测外网 IP（仅用户勾选 WAN_IP_CHANGED 时生效）
@@ -2964,13 +2994,11 @@ def _send_patrol_notification(
     except Exception as e:
         if logger:
             logger.error("NAS 巡检推送异常: %s", e, exc_info=True)
-        print(f"NAS 巡检推送异常: {e}", flush=True)
         return False
 
     if not getattr(result, "success", False):
         if logger:
             logger.warning("NAS 巡检推送未成功（渠道失败或未配置等）")
-        print("NAS 巡检推送未成功（渠道失败或未配置等）", flush=True)
         return False
     return True
 
@@ -2996,6 +3024,7 @@ def run_nas_patrol_now(app: Any) -> tuple[bool, str]:
                 state["last_success_ts"] = time.time()
                 state["retry_until_ts"] = 0.0
                 state["retry_backoff_sec"] = RETRY_BACKOFF_BASE_SEC
+                state["retry_count"] = 0
                 _save_state(sp, state)
         except Exception as e:
             log.warning("手动巡检成功但更新状态失败: %s", e)
@@ -3039,7 +3068,6 @@ def _patrol_star_interval_seconds(cron_expr: str) -> Optional[int]:
 def nas_patrol_worker_loop(app: Any) -> None:
     log = logging.getLogger(__name__)
     log.info("NAS 定时巡检线程已启动")
-    print("NAS 定时巡检线程已启动", flush=True)
     try:
         from utils.cron_util import croniter_available
 
@@ -3050,37 +3078,27 @@ def nas_patrol_worker_loop(app: Any) -> None:
             )
     except Exception:
         pass
-    _last_wait_log_ts = 0.0
-    _last_idle_log_ts = 0.0
+    _last_wait_due = 0.0
+    _last_idle_msg = ""
     while app.running:
         try:
             cfg = app.config
             if not cfg or not getattr(cfg, "nas_patrol_enabled", False) or not app.notifier:
-                now_idle = time.time()
-                # 未开启时每 60 秒提示一次（便于发现「只填了 Cron、没勾选」）
-                idle_every = 60.0 if (cfg and (getattr(cfg, "nas_patrol_cron", "") or "").strip()) else 300.0
-                if now_idle - _last_idle_log_ts >= idle_every:
-                    reason = []
-                    if not cfg:
-                        reason.append("配置未加载")
-                    elif not getattr(cfg, "nas_patrol_enabled", False):
-                        reason.append("巡检未开启（请勾选「巡检任务」并保存）")
-                    if not getattr(app, "notifier", None):
-                        reason.append("无推送渠道")
-                    cron_hint = ""
-                    if cfg and (getattr(cfg, "nas_patrol_cron", "") or "").strip():
-                        cron_hint = f"，当前 Cron={getattr(cfg, 'nas_patrol_cron', '')}"
-                    msg = (
-                        "NAS 巡检空闲："
-                        + ("、".join(reason) if reason else "条件未满足")
-                        + cron_hint
-                        + "（定时不会执行）"
-                    )
+                reason = []
+                if not cfg:
+                    reason.append("配置未加载")
+                elif not getattr(cfg, "nas_patrol_enabled", False):
+                    reason.append("巡检未开启")
+                if not getattr(app, "notifier", None):
+                    reason.append("无推送渠道")
+                msg = "NAS 巡检空闲：" + ("、".join(reason) if reason else "条件未满足")
+                # 状态不变只记一次
+                if msg != _last_idle_msg:
                     log.info(msg)
-                    print(msg, flush=True)
-                    _last_idle_log_ts = now_idle
+                    _last_idle_msg = msg
                 time.sleep(30)
                 continue
+            _last_idle_msg = ""
 
             from utils.cron_util import next_cron_timestamp, resolve_nas_patrol_cron
 
@@ -3092,7 +3110,6 @@ def nas_patrol_worker_loop(app: Any) -> None:
             except Exception as e:
                 msg = f"NAS 巡检 Cron 配置无效: {e}"
                 log.error(msg)
-                print(msg, flush=True)
                 time.sleep(60)
                 continue
 
@@ -3129,7 +3146,6 @@ def nas_patrol_worker_loop(app: Any) -> None:
                         f"可在 Web 点「立即巡检一次」马上验证"
                     )
                     log.info(msg)
-                    print(msg, flush=True)
                     time.sleep(5)
                     continue
                 _save_state(sp, state)
@@ -3148,7 +3164,6 @@ def nas_patrol_worker_loop(app: Any) -> None:
                     "已重置为当前时间"
                 )
                 log.warning(msg)
-                print(msg, flush=True)
                 last_success = now
                 state["last_success_ts"] = now
                 _save_state(sp, state)
@@ -3168,7 +3183,6 @@ def nas_patrol_worker_loop(app: Any) -> None:
                 except Exception as e:
                     msg = f"NAS 巡检 Cron 无效 ({cron_expr}): {e}"
                     log.error(msg)
-                    print(msg, flush=True)
                     time.sleep(60)
                     continue
 
@@ -3178,60 +3192,45 @@ def nas_patrol_worker_loop(app: Any) -> None:
                 sleep_s = min(60.0, max(5.0, due_at - now))
                 if interval_s is not None:
                     sleep_s = min(sleep_s, float(interval_s))
-                if now - _last_wait_log_ts >= 60:
-                    wait_min = max(0.0, (due_at - now) / 60.0)
+                # 下次触发时间不变只记一次
+                if abs(due_at - _last_wait_due) > 1:
                     nxt_str = datetime.fromtimestamp(due_at).strftime("%Y-%m-%d %H:%M:%S")
-                    msg = (
-                        f"NAS 巡检等待下次触发：Cron={cron_expr}，"
-                        f"约 {wait_min:.1f} 分钟后（{nxt_str}）"
-                    )
-                    log.info(msg)
-                    print(msg, flush=True)
-                    _last_wait_log_ts = now
+                    log.info("NAS 巡检下次触发：%s（Cron=%s）", nxt_str, cron_expr)
+                    _last_wait_due = due_at
                 time.sleep(sleep_s)
                 continue
 
             reason = "间隔已到" if interval_s is not None else "Cron 触发"
-            print(f"NAS 巡检开始采集并推送（Cron={cron_expr}，{reason}）", flush=True)
+            log.info("NAS 巡检开始采集并推送（Cron=%s，%s）", cron_expr, reason)
             ok = _send_patrol_notification(app, log)
             now_after = time.time()
             if ok:
                 state["last_success_ts"] = now_after
                 state["retry_until_ts"] = 0.0
                 state["retry_backoff_sec"] = RETRY_BACKOFF_BASE_SEC
-                if interval_s is not None:
-                    nxt2 = now_after + float(interval_s)
-                else:
-                    try:
-                        nxt2 = next_cron_timestamp(cron_expr, now_after)
-                    except Exception:
-                        nxt2 = now_after + 3600.0
-                wait_min = max(0.0, (nxt2 - now_after) / 60.0)
-                nxt_str = datetime.fromtimestamp(nxt2).strftime("%Y-%m-%d %H:%M:%S")
-                msg = (
-                    f"NAS 巡检推送成功（Cron={cron_expr}），"
-                    f"下次约在 {wait_min:.1f} 分钟后（{nxt_str}）"
-                )
-                log.info(msg)
-                print(msg, flush=True)
+                state["retry_count"] = 0
+                log.info("NAS 巡检推送成功")
             else:
-                cur = int(state.get("retry_backoff_sec") or RETRY_BACKOFF_BASE_SEC)
-                cur = max(RETRY_BACKOFF_BASE_SEC, min(cur, RETRY_BACKOFF_MAX_SEC))
-                wait_sec = cur
-                next_bo = min(cur * 2, RETRY_BACKOFF_MAX_SEC)
-                state["retry_until_ts"] = now_after + float(wait_sec)
-                state["retry_backoff_sec"] = next_bo
-                msg = (
-                    f"NAS 巡检将在 {wait_sec} 秒后重试"
-                    f"（指数退避，下次失败等待上限 {next_bo} 秒）"
-                )
-                log.warning(msg)
-                print(msg, flush=True)
+                attempts = int(state.get("retry_count") or 0) + 1
+                if attempts > RETRY_MAX_ATTEMPTS:
+                    state["last_success_ts"] = now_after
+                    state["retry_until_ts"] = 0.0
+                    state["retry_backoff_sec"] = RETRY_BACKOFF_BASE_SEC
+                    state["retry_count"] = 0
+                    log.warning("NAS 巡检推送连续失败 %s 次，放弃本周期，等待下次计划时间", attempts)
+                else:
+                    cur = int(state.get("retry_backoff_sec") or RETRY_BACKOFF_BASE_SEC)
+                    cur = max(RETRY_BACKOFF_BASE_SEC, min(cur, RETRY_BACKOFF_MAX_SEC))
+                    state["retry_until_ts"] = now_after + float(cur)
+                    state["retry_backoff_sec"] = min(cur * 2, RETRY_BACKOFF_MAX_SEC)
+                    state["retry_count"] = attempts
+                    log.warning(
+                        "NAS 巡检推送失败，%s 秒后重试（%s/%s）", cur, attempts, RETRY_MAX_ATTEMPTS
+                    )
             _save_state(sp, state)
 
         except Exception as e:
             log.error("NAS 巡检线程异常: %s", e, exc_info=True)
-            print(f"NAS 巡检线程异常: {e}", flush=True)
         time.sleep(30)
 
 

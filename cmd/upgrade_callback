@@ -72,6 +72,7 @@ if [ ! -f "${REQ_FILE}" ]; then
 fi
 
 mkdir -p "${TRIM_PKGVAR}" "${TRIM_PKGVAR}/config" "${TRIM_PKGVAR}/data/logs" "${TRIM_PKGVAR}/data/cursor"
+chmod 600 "${TRIM_PKGVAR}/config/config.json" 2>/dev/null || true
 
 VENV_DIR="${TRIM_PKGVAR}/venv"
 PY_TARGET="${TRIM_PKGVAR}/python_modules"

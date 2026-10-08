@@ -99,6 +99,50 @@ if [ ! -f "${TRIM_PKGVAR}/config/config.json" ]; then
     fi
 fi
 
+# 安装向导设置的访问密码：只写入 PBKDF2 盐值与哈希（与 web/auth_service.py 一致），明文不落盘、不输出。
+# 未经向导安装（变量为空）时跳过，应用启动后走初始化码流程。
+if [ -n "${wizard_web_password:-}" ]; then
+    set +e
+    FNMB_PW="${wizard_web_password}" \
+    FNMB_PW2="${wizard_web_password_confirm:-}" \
+    FNMB_CFG="${TRIM_PKGVAR}/config/config.json" \
+    python3 - <<'PY'
+import hashlib
+import json
+import os
+import secrets
+import sys
+import tempfile
+
+pw = os.environ["FNMB_PW"].strip()
+if len(pw) < 8:
+    sys.exit(2)
+if pw != os.environ.get("FNMB_PW2", "").strip():
+    sys.exit(3)
+cfg = os.environ["FNMB_CFG"]
+with open(cfg, encoding="utf-8") as f:
+    data = json.load(f)
+salt = secrets.token_hex(16)
+data["web_password_salt"] = salt
+data["web_password_hash"] = hashlib.pbkdf2_hmac("sha256", pw.encode("utf-8"), bytes.fromhex(salt), 100000).hex()
+data.pop("web_password_enabled", None)
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(cfg))
+with os.fdopen(fd, "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+os.chmod(tmp, 0o600)
+os.replace(tmp, cfg)
+PY
+    _pw_rc=$?
+    set -e
+    case "${_pw_rc}" in
+        0) rm -f "${TRIM_PKGVAR}/config/.setup_code" ;;
+        2) fail_user_visible "安装失败：访问密码长度至少 8 位。" ;;
+        3) fail_user_visible "安装失败：两次输入的访问密码不一致。" ;;
+        *) fail_user_visible "安装失败：写入访问密码失败（${TRIM_PKGVAR}/config/config.json）。" ;;
+    esac
+fi
+chmod 600 "${TRIM_PKGVAR}/config/config.json" 2>/dev/null || true
+
 # 创建 venv 并安装依赖。NAS 上部分卷不支持 venv 默认的符号链接，优先 --copies；仍失败则 pip install --target
 _append_venv_log() {
     local f="$1"

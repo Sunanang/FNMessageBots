@@ -1,0 +1,37 @@
+[
+    {
+        "stepTitle": "设置访问密码",
+        "items": [
+            {
+                "type": "tips",
+                "helpText": "从飞牛桌面打开本应用时沿用 NAS 登录态（仅管理员可访问）。此密码用于其他方式访问配置页时的登录验证，安装后仅保存加盐哈希，不保存明文。"
+            },
+            {
+                "type": "password",
+                "field": "wizard_web_password",
+                "label": "访问密码",
+                "rules": [
+                    {
+                        "required": true,
+                        "message": "请输入访问密码"
+                    },
+                    {
+                        "min": 8,
+                        "message": "密码长度不能少于 8 位"
+                    }
+                ]
+            },
+            {
+                "type": "password",
+                "field": "wizard_web_password_confirm",
+                "label": "确认密码",
+                "rules": [
+                    {
+                        "required": true,
+                        "message": "请再次输入访问密码"
+                    }
+                ]
+            }
+        ]
+    }
+]

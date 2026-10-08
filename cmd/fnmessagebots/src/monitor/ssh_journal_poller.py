@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import os
@@ -35,6 +36,24 @@ SSH_JOURNAL_EVENTS: Set[str] = {
 
 _STATE_FILENAME = "ssh_journal_poller_state.json"
 
+# 开启「忽略本机回环」时只静默这两类；失败 / 无效用户仍推送，避免内网穿透场景下漏掉暴力破解
+SSH_LOOPBACK_QUIET_EVENTS = frozenset({SSH_LOGIN_SUCCESS, SSH_DISCONNECTED})
+
+
+def is_loopback_ip(ip: str) -> bool:
+    try:
+        addr = ipaddress.ip_address((ip or "").strip())
+    except ValueError:
+        return False
+    mapped = getattr(addr, "ipv4_mapped", None)
+    return bool(addr.is_loopback or (mapped is not None and mapped.is_loopback))
+
+
+def should_ignore_loopback_ssh(event_type: str, event_data: Dict[str, Any]) -> bool:
+    if event_type not in SSH_LOOPBACK_QUIET_EVENTS:
+        return False
+    return is_loopback_ip(str(event_data.get("IP") or event_data.get("ip") or ""))
+
 # Accepted publickey/password/keyboard-interactive for user from ip port N ssh2
 _RE_ACCEPTED = re.compile(
     r"Accepted\s+\S+\s+for\s+(\S+)\s+from\s+(\S+)\s+port\s+\d+",
@@ -55,10 +74,6 @@ _RE_DISCONNECT = re.compile(
 # Disconnected from authenticating user X IP port N
 _RE_DISCONNECT_AUTH = re.compile(
     r"Disconnected\s+from\s+authenticating\s+user\s+(\S+)\s+(\S+)\s+port\s+\d+",
-    re.IGNORECASE,
-)
-_RE_SESSION_CLOSED = re.compile(
-    r"pam_unix\(sshd:session\):\s+session\s+closed\s+for\s+user\s+(\S+)",
     re.IGNORECASE,
 )
 
@@ -107,10 +122,7 @@ def parse_ssh_journal_message(message: str) -> Optional[Tuple[str, Dict[str, Any
     if m:
         return SSH_DISCONNECTED, {"user": m.group(1), "IP": m.group(2)}
 
-    m = _RE_SESSION_CLOSED.search(msg)
-    if m:
-        return SSH_DISCONNECTED, {"user": m.group(1), "IP": ""}
-
+    # pam「session closed」行不带 IP，同一次断开已由上方 Disconnected 行推送，不再单独解析
     return None
 
 
@@ -123,8 +135,10 @@ class SshJournalPoller:
         poll_interval: int = 5,
         monitor_events: Optional[List[str]] = None,
         journal_units: Optional[List[str]] = None,
+        ignore_loopback: bool = False,
     ):
         self.cursor_dir = Path(cursor_dir)
+        self.ignore_loopback = bool(ignore_loopback)
         self.poll_interval = max(1, int(poll_interval or 5))
         self.monitor_events = set(monitor_events or [])
         self.journal_units = list(journal_units or ["ssh", "sshd"])
@@ -148,11 +162,14 @@ class SshJournalPoller:
         self,
         monitor_events: Optional[List[str]] = None,
         poll_interval: Optional[int] = None,
+        ignore_loopback: Optional[bool] = None,
     ) -> None:
         if monitor_events is not None:
             self.monitor_events = set(monitor_events)
         if poll_interval is not None:
             self.poll_interval = max(1, int(poll_interval))
+        if ignore_loopback is not None:
+            self.ignore_loopback = bool(ignore_loopback)
 
     def set_poll_batch_summary(
         self,
@@ -327,6 +344,8 @@ class SshJournalPoller:
     def _emit(self, event_type: str, event_data: Dict[str, Any], raw_msg: str, ts: str) -> None:
         if self.monitor_events and event_type not in self.monitor_events:
             return
+        if self.ignore_loopback and should_ignore_loopback_ssh(event_type, event_data):
+            return
         handler = self.event_handlers.get(event_type)
         if not handler:
             return
@@ -400,10 +419,6 @@ class SshJournalPoller:
             ",".join(self.journal_units),
             self.poll_interval,
         )
-        print(
-            f"SSH journal 轮询已启动（units={','.join(self.journal_units)}，间隔 {self.poll_interval}s）",
-            flush=True,
-        )
         while self.running:
             try:
                 if SSH_JOURNAL_EVENTS & self.monitor_events:
@@ -423,10 +438,6 @@ class SshJournalPoller:
             return
         if not self.is_available():
             self.logger.warning("SSH journal 不可用，跳过 SshJournalPoller（将回退 logger_data 中的 Sshd*）")
-            print(
-                "SSH journal 不可用：请确认镜像含 journalctl，并挂载 /var/log/journal 与 /etc/machine-id",
-                flush=True,
-            )
             return
         self.running = True
         self._thread = threading.Thread(target=self._run_loop, name="SshJournalPoller", daemon=False)

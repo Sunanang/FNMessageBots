@@ -60,9 +60,12 @@
   "dnd_start_time": "22:00",
   "dnd_end_time": "07:00",
   "pushplus_params": "",
+  "wecom_app_params": "",
+  "webhook_params": "",
+  "meow_params": "",
   "user_display_map": {},
-  "web_password_enabled": true,
   "title_prefix": "飞牛NAS",
   "minimal_push_enabled": false,
+  "ssh_ignore_loopback": false,
   "nas_patrol_enabled": false
 }

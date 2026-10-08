@@ -138,7 +138,6 @@ def check_and_notify_wan_ip_change(
             _save_state(sp, state)
             msg = f"外网 IP 已记录基线: {current}（source={source}，不推送）"
             log.info(msg)
-            print(msg, flush=True)
             return current
 
         if current == last:
@@ -171,7 +170,6 @@ def check_and_notify_wan_ip_change(
     ts = event_data["changed_at"]
     msg = f"外网 IP 变化: {last} → {current}（source={source}）"
     log.warning(msg)
-    print(msg, flush=True)
     try:
         app.notifier.send_notification(
             event_type=WAN_IP_CHANGED,
@@ -197,7 +195,6 @@ def check_and_notify_wan_ip_change(
 def wan_ip_monitor_worker_loop(app: Any) -> None:
     log = logging.getLogger(__name__)
     log.info("外网 IP 监控线程已启动（间隔 %ss）", WAN_IP_CHECK_INTERVAL_SEC)
-    print(f"外网 IP 监控线程已启动（间隔 {WAN_IP_CHECK_INTERVAL_SEC}s）", flush=True)
     # 启动后稍等再检，避免与 APP_START 抢推送
     for _ in range(15):
         if not getattr(app, "running", True):

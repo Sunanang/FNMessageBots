@@ -2,6 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
+  <meta name="robots" content="noindex, nofollow" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   {% if favicon_url %}
   <link rel="icon" href="{{ favicon_url }}" />
@@ -179,7 +180,7 @@
 <body>
   <main class="history-main">
       <div class="top-bar">
-        <a class="btn btn-ghost" href="/">返回配置页</a>
+        <a class="btn btn-ghost" href="./">返回配置页</a>
       </div>
       <h1>推送记录</h1>
       <p class="page-hint">最多存储一万条数据，超过限制会自动删除。</p>
@@ -239,8 +240,8 @@
     if (reset) { offset = 0; document.getElementById("tbody").innerHTML = ""; }
     var params = "limit=" + pageSize + "&offset=" + offset;
     if (currentFilter !== "") params += "&success=" + currentFilter;
-    fetch("/api/push-history?" + params, fetchOpts).then(function(r){
-      if (r.status === 401) { window.location.href = "/"; return; }
+    fetch("api/push-history?" + params, fetchOpts).then(function(r){
+      if (r.status === 401) { window.location.href = "./"; return; }
       return r.json();
     }).then(function(json){
       if (!json || !json.ok || !Array.isArray(json.data)) return;
