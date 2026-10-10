@@ -3,8 +3,8 @@ services:
     build: .
     container_name: fn-message-bots
     restart: unless-stopped
-    ports:
-      - 18080:18080
+    # 巡检读取 NAS 的网卡/IP；host 模式不再配置 ports，端口由 UI_PORT 控制。
+    network_mode: host
     # 挂载遵循最小化原则：默认只挂主日志库、SSH journal 与配置目录，其余按勾选的事件再取消注释，一律只读
     volumes:
       - ./data/logs:/app/data/logs:rw
@@ -16,6 +16,9 @@ services:
       - /var/log/journal:/var/log/journal:ro
       - /run/log/journal:/run/log/journal:ro
       - /etc/machine-id:/etc/machine-id:ro
+      # 巡检版本信息来自宿主，而不是 Python 镜像。
+      - /etc/os-release:/host/etc/os-release:ro
+      - /var/lib/dpkg/status:/host/dpkg/status:ro
       # 可选：备份事件
       # - /usr/trim/var/backup_service:/usr/trim/var/backup_service:ro
       # 可选：影视事件
@@ -32,16 +35,20 @@ services:
       #   - "999"
       # 可选：飞牛开放 API 网关（用于巡检读取飞牛版本，需配合下方 TRIM_API_TOKEN）
       # - /var/run/trim_open_gateway_apiscope.socket:/var/run/trim_open_gateway_apiscope.socket
-      # 可选：只读挂载宿主的 dpkg status，巡检可解析 trim 版本（API 不可用时的回退）
-      # - /var/lib/dpkg/status:/host/dpkg/status:ro
       # 可选：宿主主机名（巡检用，避免显示容器 ID）
       # - /etc/hostname:/host/etc/hostname:ro
       # 可选：UPS 巡检（挂 /etc/nut 目录；无 ups.conf 时跳过 UPS，不导致启动失败）
       # - /etc/nut:/etc/nut:ro
     environment:
       - TZ=Asia/Shanghai
+      # 安装时可在同目录 .env 中填写 UI_PORT=所需端口（默认 18080）。
+      - UI_PORT=${UI_PORT:-18080}
+      # 自定义桥接网络时可显式指定宿主内网 IP（例如 NAS_LAN_IP=192.168.1.100）
+      # - NAS_LAN_IP=
       # 可选：预置初始 Web 密码（至少 8 位）；不填则首次访问需输入启动日志中的初始化码
       # - FNMB_WEB_PASSWORD=
+      # 反向代理：仅填写应用看到的、由自己控制的代理 IP / CIDR；代理需正确传递 X-Forwarded-For
+      # - FNMB_TRUSTED_PROXIES=127.0.0.1/32,::1/128
       # 可选：飞牛开放 API 参数（不填时巡检回退 dpkg / 本地探测读取版本）
       # - TRIM_API_TOKEN=
       # - TRIM_APPNAME=FnMessageBot

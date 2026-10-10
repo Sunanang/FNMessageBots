@@ -9,6 +9,7 @@ import logging
 import sqlite3
 import threading
 import time
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -237,29 +238,28 @@ class DBLogPoller:
         except Exception as e:
             self.logger.warning("写入游标失败: %s", e)
 
-    def _get_max_log_id(self) -> int:
+    def _get_max_log_id(self) -> Optional[int]:
         """获取 log 表当前最大 id；启动时用此值作为游标，只处理此后新写入的记录。"""
         try:
-            conn = connect_readonly_with_fallback(self.db_path, timeout=5.0)
-            row = conn.execute("SELECT COALESCE(MAX(id), 0) AS mx FROM log").fetchone()
-            conn.close()
-            return int(row[0]) if row else 0
+            with closing(connect_readonly_with_fallback(self.db_path, timeout=5.0)) as conn:
+                row = conn.execute("SELECT COALESCE(MAX(id), 0) AS mx FROM log").fetchone()
+                if row is None:
+                    raise RuntimeError("最新日志 ID 查询未返回结果")
+                return int(row[0])
         except Exception as e:
-            self.logger.warning("获取 log 表最大 id 失败: %s，将从头轮询", e)
-            return 0
+            self.logger.warning("获取 log 表最大 id 失败: %s，等待重试对齐，不推送历史", e)
+            return None
 
     def _fetch_new_rows(self, after_id: int) -> List[Dict[str, Any]]:
         """查询 id > after_id 的记录，按 id 升序。"""
         try:
-            conn = connect_readonly_with_fallback(self.db_path, timeout=5.0)
-            conn.row_factory = sqlite3.Row
-            cur = conn.execute(
-                "SELECT id, serviceId, uid, uname, logtime, loglevel, eventId, parameter, category FROM log WHERE id > ? ORDER BY id ASC",
-                (after_id,),
-            )
-            rows = [dict(r) for r in cur.fetchall()]
-            conn.close()
-            return rows
+            with closing(connect_readonly_with_fallback(self.db_path, timeout=5.0)) as conn:
+                conn.row_factory = sqlite3.Row
+                cur = conn.execute(
+                    "SELECT id, serviceId, uid, uname, logtime, loglevel, eventId, parameter, category FROM log WHERE id > ? ORDER BY id ASC",
+                    (after_id,),
+                )
+                return [dict(r) for r in cur.fetchall()]
         except Exception as e:
             self.logger.error("查询数据库失败: %s", e)
             return []
@@ -341,13 +341,17 @@ class DBLogPoller:
         return last_id if not rows else rows[-1].get("id", last_id)
 
     def _run_loop(self) -> None:
-        # 启动时将游标对齐到当前库最大 id：不补推历史日志，仅从启用轮询这一刻之后的新增记录开始推送
-        last_id = self._get_max_log_id()
-        self._write_last_id(last_id)
-        self.logger.info("数据库轮询启动，仅处理 id > %s 的新记录，间隔 %s 秒", last_id, self.poll_interval)
+        # 每次启动先成功对齐当前最大 id；失败时重试，仅推送对齐之后的新增记录。
+        last_id: Optional[int] = None
         while self.running:
             try:
-                last_id = self._poll_once(last_id)
+                if last_id is None:
+                    last_id = self._get_max_log_id()
+                    if last_id is not None:
+                        self._write_last_id(last_id)
+                        self.logger.info("数据库轮询已对齐，仅处理 id > %s 的新记录，间隔 %s 秒", last_id, self.poll_interval)
+                if last_id is not None:
+                    last_id = self._poll_once(last_id)
             except Exception as e:
                 self.logger.error("轮询异常: %s", e, exc_info=True)
             for _ in range(self.poll_interval):

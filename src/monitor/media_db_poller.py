@@ -253,6 +253,7 @@ class MediaDBPoller:
                         fb[str(g)] = 0
         except Exception as e:
             self.logger.warning("构建 fetch 快照失败: %s", e)
+            raise
         state["fetch_by_guid"] = fb
         state["initialized"] = True
         self.logger.info(
@@ -419,6 +420,8 @@ class MediaDBPoller:
     def _run_loop(self) -> None:
         self._load_dedup()
         state = self._load_state()
+        # 每次启动重新建立基线；读取失败时保持未初始化，恢复后也不补历史。
+        state["initialized"] = False
         self.logger.info("MediaDBPoller 启动 db=%s", self.db_path or "(未配置)")
         while self.running:
             try:
@@ -446,32 +449,6 @@ class MediaDBPoller:
                     return
                 time.sleep(1)
 
-    def _align_state_to_latest(self) -> None:
-        """每次启用时对齐到当前数据库水位，避免补发停用期间的存量记录。"""
-        if not self.db_path or not os.path.exists(self.db_path):
-            return
-        try:
-            conn = self._connect()
-        except Exception as e:
-            self.logger.warning("MediaDBPoller 启动对齐失败（连接数据库失败）: %s", e)
-            return
-        try:
-            state = self._load_state()
-            try:
-                self._baseline(conn, state)
-                self._save_state(state)
-            except sqlite3.Error as e:
-                self.logger.warning(
-                    "MediaDBPoller 启动对齐失败（将在线程内重试 baseline）: %s",
-                    e,
-                    exc_info=True,
-                )
-        finally:
-            try:
-                conn.close()
-            except Exception:
-                pass
-
     def start(self) -> None:
         if self.running:
             return
@@ -481,7 +458,6 @@ class MediaDBPoller:
         if not (_TRIM_EVENTS & self.monitor_events):
             self.logger.info("monitor_events 未包含影视库文件事件，跳过 MediaDBPoller")
             return
-        self._align_state_to_latest()
         self.running = True
         self._thread = threading.Thread(target=self._run_loop, name="MediaDBPoller", daemon=False)
         self._thread.start()

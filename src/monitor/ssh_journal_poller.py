@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from .models import JournalEntry
+from utils.access_guidance import journal_permission_action
 
 SSH_LOGIN_SUCCESS = "SSH_LOGIN_SUCCESS"
 SSH_AUTH_FAILED = "SSH_AUTH_FAILED"
@@ -190,9 +191,14 @@ class SshJournalPoller:
             return False
         # 试读一条（可能无权限）；-n 0 只拿 cursor
         code, out, err = self._run_journalctl(["-n", "0", "--show-cursor"])
-        if code != 0:
+        denied = any(marker in err.lower() for marker in (
+            "permission denied", "access denied", "insufficient permissions",
+            "not seeing messages from other users",
+        ))
+        if code != 0 or denied:
             self.logger.warning(
-                "journalctl 不可用或无权读取 SSH journal（请挂载 /var/log/journal 与 /etc/machine-id）: %s",
+                "journalctl 不可用或无权读取 SSH journal。%s 详情: %s",
+                journal_permission_action(),
                 (err or out or "").strip()[:240],
             )
             return False
@@ -257,6 +263,7 @@ class SshJournalPoller:
 
     def _align_cursor(self, state: Dict[str, Any]) -> None:
         """对齐到当前 journal 末尾，不补推历史。"""
+        since = f"@{time.time():.6f}"
         code, out, err = self._run_journalctl(["-n", "0", "--show-cursor"])
         if code != 0:
             self.logger.warning("SSH journal 对齐失败: %s", (err or out)[:240])
@@ -264,31 +271,33 @@ class SshJournalPoller:
         cur = self._extract_show_cursor(out)
         if cur:
             state["cursor"] = cur
+            state.pop("since", None)
             state["aligned"] = True
             self._save_state(state)
             self.logger.info("SSH journal 已对齐当前游标（不推送历史）")
         else:
-            # 无日志时也可能没有 cursor；标记 aligned，下次用 --since now 思路仍靠 after-cursor 空
+            # 空 journal 没有游标；固定起始时间，后续轮询接收此后首条新日志。
+            state["cursor"] = ""
+            state["since"] = since
             state["aligned"] = True
             self._save_state(state)
             self.logger.info("SSH journal 对齐完成（暂无 cursor，等待新日志）")
 
-    def _fetch_entries(self, cursor: str) -> Tuple[List[Dict[str, Any]], str]:
+    def _fetch_entries(self, cursor: str, since: str = "") -> Tuple[List[Dict[str, Any]], str]:
         """返回 (entries, new_cursor)。entries 为 journal -o json 对象列表。
 
         必须带 ``__CURSOR``（不是 CURSOR），否则游标不前进会每轮重复推送。
-        无游标时不回退 ``-n 50``，避免把历史当增量刷屏。
+        无游标时使用固定起始时间，避免遗漏首条事件或把历史当增量刷屏。
         """
-        if not cursor:
+        if not cursor and not since:
             return [], cursor
         extra = [
             "-o",
             "json",
             "--output-fields=MESSAGE,__CURSOR,__REALTIME_TIMESTAMP",
-            "--after-cursor",
-            cursor,
             "--show-cursor",
         ]
+        extra.extend(["--after-cursor", cursor] if cursor else ["--since", since])
         code, out, err = self._run_journalctl(extra)
         if code != 0:
             self.logger.warning("读取 SSH journal 失败: %s", (err or out)[:240])
@@ -389,13 +398,11 @@ class SshJournalPoller:
             self._align_cursor(state)
             return
         cursor = str(state.get("cursor") or "")
-        if not cursor:
-            # 对齐时未拿到 cursor：再试一次，绝不无游标扫历史
-            self._align_cursor(state)
-            cursor = str(state.get("cursor") or "")
-            if not cursor:
-                return
-        entries, new_cursor = self._fetch_entries(cursor)
+        if not cursor and not state.get("since"):
+            # 兼容旧版保存的空游标状态；时间只记录一次，空闲轮询不再重新对齐。
+            state["since"] = f"@{time.time():.6f}"
+            self._save_state(state)
+        entries, new_cursor = self._fetch_entries(cursor, str(state.get("since") or ""))
         for obj in entries:
             msg = obj.get("MESSAGE")
             if isinstance(msg, list):
@@ -411,9 +418,8 @@ class SshJournalPoller:
             self._save_state(state)
 
     def _run_loop(self) -> None:
-        state = self._load_state()
-        if not state.get("aligned") or not state.get("cursor"):
-            self._align_cursor(state)
+        # 每次启动重新对齐；停机期间的日志不补推，对齐失败时也不能沿用旧游标。
+        state: Dict[str, Any] = {"version": 1, "cursor": "", "aligned": False}
         self.logger.info(
             "SSH journal 轮询启动 units=%s interval=%ss",
             ",".join(self.journal_units),
@@ -422,7 +428,10 @@ class SshJournalPoller:
         while self.running:
             try:
                 if SSH_JOURNAL_EVENTS & self.monitor_events:
-                    self._poll_once(state)
+                    if not state.get("aligned"):
+                        self._align_cursor(state)
+                    if state.get("aligned"):
+                        self._poll_once(state)
             except Exception as e:
                 self.logger.error("SSH journal 轮询异常: %s", e, exc_info=True)
             for _ in range(self.poll_interval):

@@ -8,6 +8,7 @@ import logging
 import sqlite3
 import threading
 import time
+from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -164,20 +165,19 @@ class BackupDBPoller:
         conn.row_factory = sqlite3.Row
         return conn
 
-    def _get_latest_watermark(self) -> Dict[str, int]:
+    def _get_latest_watermark(self) -> Optional[Dict[str, int]]:
         try:
-            conn = self._connect()
-            row = conn.execute(
-                """
-                SELECT
-                  id,
-                  COALESCE(finished_time, start_time, 0) AS event_time
-                FROM operations
-                ORDER BY event_time DESC, id DESC
-                LIMIT 1
-                """
-            ).fetchone()
-            conn.close()
+            with closing(self._connect()) as conn:
+                row = conn.execute(
+                    """
+                    SELECT
+                      id,
+                      COALESCE(finished_time, start_time, 0) AS event_time
+                    FROM operations
+                    ORDER BY event_time DESC, id DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
             if not row:
                 return {"last_finished_time": 0, "last_id": 0}
             return {
@@ -185,8 +185,8 @@ class BackupDBPoller:
                 "last_id": int(row["id"] or 0),
             }
         except Exception as e:
-            self.logger.warning("获取备份数据库最新水位失败: %s", e)
-            return {"last_finished_time": 0, "last_id": 0}
+            self.logger.warning("获取备份数据库最新水位失败: %s，等待重试对齐，不推送历史", e)
+            return None
 
     def _fetch_rows_with_lookback(self, from_event_time: int) -> List[Dict[str, Any]]:
         sql = """
@@ -220,10 +220,8 @@ class BackupDBPoller:
         ORDER BY COALESCE(o.finished_time, o.start_time, 0) ASC, o.id ASC
         """
         try:
-            conn = self._connect()
-            rows = [dict(r) for r in conn.execute(sql, (int(from_event_time),)).fetchall()]
-            conn.close()
-            return rows
+            with closing(self._connect()) as conn:
+                return [dict(r) for r in conn.execute(sql, (int(from_event_time),)).fetchall()]
         except Exception as e:
             self.logger.error("查询备份数据库失败: %s", e)
             return []
@@ -356,18 +354,16 @@ class BackupDBPoller:
 
     def _run_loop(self):
         self._load_dedup()
-        cursor = self._read_cursor()
-        if int(cursor.get("last_finished_time") or 0) <= 0 and int(cursor.get("last_id") or 0) <= 0:
-            cursor = self._get_latest_watermark()
-            self._write_cursor(cursor["last_finished_time"], cursor["last_id"])
-            self.logger.info(
-                "备份轮询启动，仅处理水位之后的新记录: finished_time=%s id=%s",
-                cursor["last_finished_time"],
-                cursor["last_id"],
-            )
+        cursor: Optional[Dict[str, int]] = None
         while self.running:
             try:
-                cursor = self._poll_once(cursor)
+                if cursor is None:
+                    cursor = self._get_latest_watermark()
+                    if cursor is not None:
+                        self._write_cursor(cursor["last_finished_time"], cursor["last_id"])
+                        self.logger.info("备份轮询已对齐当前水位（不补历史）: %s", cursor)
+                if cursor is not None:
+                    cursor = self._poll_once(cursor)
             except Exception as e:
                 self.logger.error("备份轮询异常: %s", e, exc_info=True)
             for _ in range(self.poll_interval):
@@ -375,23 +371,12 @@ class BackupDBPoller:
                     return
                 time.sleep(1)
 
-    def _align_cursor_to_latest(self) -> None:
-        """每次启用时对齐到当前最新水位，避免补发停用期间的存量记录。"""
-        latest = self._get_latest_watermark()
-        self._write_cursor(latest["last_finished_time"], latest["last_id"])
-        self.logger.info(
-            "备份轮询启用时已对齐当前水位（不补历史）: finished_time=%s id=%s",
-            latest["last_finished_time"],
-            latest["last_id"],
-        )
-
     def start(self):
         if self.running:
             return
         if not (BACKUP_POLL_EVENTS & set(self.monitor_events or [])):
             self.logger.info("monitor_events 未包含备份任务事件，跳过 BackupDBPoller")
             return
-        self._align_cursor_to_latest()
         self.running = True
         self._thread = threading.Thread(target=self._run_loop, name="BackupDBPoller", daemon=False)
         self._thread.start()

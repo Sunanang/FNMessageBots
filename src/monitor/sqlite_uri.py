@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import sqlite3
 from typing import Optional
+from urllib.parse import quote
 
 
 def _abs_db_path(db_path: str) -> str:
@@ -24,15 +25,15 @@ def _abs_db_path(db_path: str) -> str:
 
 
 def sqlite_readonly_uri(db_path: str) -> str:
-    """返回 ``file:/绝对路径?mode=ro``（单斜杠 + 未编码 ``@``，与常见 NAS 行为一致）。"""
+    """返回 ``file:/绝对路径?mode=ro``（保留路径中的 ``@``，编码 URI 分隔符，避免特殊文件名被截断）。"""
     p = _abs_db_path(db_path)
-    return f"file:{p}?mode=ro"
+    return f"file:{quote(p, safe='/@:')}?mode=ro"
 
 
 def sqlite_readonly_immutable_uri(db_path: str) -> str:
     """返回 ``file:/绝对路径?mode=ro&immutable=1``，用于部分 NAS 只读/WAL 场景兜底。"""
     p = _abs_db_path(db_path)
-    return f"file:{p}?mode=ro&immutable=1"
+    return f"file:{quote(p, safe='/@:')}?mode=ro&immutable=1"
 
 
 def _sqlite_err_retriable_with_immutable(exc: sqlite3.Error) -> bool:

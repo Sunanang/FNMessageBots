@@ -294,6 +294,7 @@ class PhotoDBPoller:
                 ] = now
         except Exception as e:
             self.logger.warning("相册过期基线去重失败: %s", e)
+            raise
         state["initialized"] = True
         state["face_pending"] = self._empty_face_pending()
         self.logger.info(
@@ -647,6 +648,9 @@ class PhotoDBPoller:
     def _run_loop(self) -> None:
         self._load_dedup()
         state = self._load_state()
+        # 每次启动重新建立基线；读取失败时保持未初始化，恢复后也不补历史。
+        state["initialized"] = False
+        state["face_pending"] = self._empty_face_pending()
         self.logger.info(
             "PhotoDBPoller 启动 db=%s（人脸识别冷却汇总 %ss）",
             self.db_path or "(未配置)",
@@ -689,26 +693,6 @@ class PhotoDBPoller:
                     return
                 time.sleep(1)
 
-    def _align_state_to_latest(self) -> None:
-        """每次启用时对齐到当前数据库水位，避免补发停用期间的存量记录。"""
-        if not self.db_path or not os.path.exists(self.db_path):
-            return
-        try:
-            conn = self._connect()
-        except Exception as e:
-            self.logger.warning("PhotoDBPoller 启动对齐失败（连接数据库失败）: %s", e)
-            return
-        try:
-            state = self._load_state()
-            self._baseline(conn, state)
-            self._save_state(state)
-            self._save_dedup()
-        finally:
-            try:
-                conn.close()
-            except Exception:
-                pass
-
     def start(self) -> None:
         if self.running:
             return
@@ -718,7 +702,6 @@ class PhotoDBPoller:
         if not (PHOTO_POLL_EVENTS & self.monitor_events):
             self.logger.info("monitor_events 未包含相册事件，跳过 PhotoDBPoller")
             return
-        self._align_state_to_latest()
         self.running = True
         self._thread = threading.Thread(target=self._run_loop, name="PhotoDBPoller", daemon=False)
         self._thread.start()

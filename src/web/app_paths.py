@@ -21,8 +21,9 @@ def get_base_dir() -> Path:
 
 BASE_DIR = get_base_dir()
 CONFIG_FILE = BASE_DIR / "config" / "config.json"
-ICON_FILE = BASE_DIR / "assets" / "icons" / "app-icon.png"
-GITHUB_ICON_FILE = BASE_DIR / "assets" / "icons" / "github.svg"
-SUPPORT_QR_DIR = BASE_DIR / "assets" / "icons"
+# APP_HOME 在 FPK 中是可写的数据目录；图片随代码安装，不应从数据目录查找。
+ASSETS_DIR = Path(__file__).resolve().parent.parent.parent / "assets"
+ICON_FILE = ASSETS_DIR / "icons" / "app-icon.png"
+SUPPORT_QR_DIR = ASSETS_DIR / "icons"
 SUPPORT_QR_FILENAMES = frozenset({"wechat_pay.jpg", "ali_pay.jpg"})
 

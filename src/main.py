@@ -9,7 +9,6 @@ import time
 from pathlib import Path
 import threading
 import sqlite3
-import stat
 from typing import Any, Callable, Dict, List, Optional
 
 # 添加src目录到Python路径，解决模块导入问题
@@ -45,6 +44,8 @@ from monitor.ssh_journal_poller import SSH_JOURNAL_EVENTS, SshJournalPoller
 from monitor.sqlite_uri import probe_readonly_sqlite
 from notifier.unified_notifier import UnifiedNotifier
 from web.ui_app import start_ui_server_in_background
+from web.access_diagnostics import database_access_issue
+from utils.access_guidance import journal_permission_action
 
 # 仅当 monitor_events 包含对应事件时才轮询各库（避免空跑）
 TRIMMEDIA_POLL_EVENTS = frozenset({"TRIM_RESOURCE_ADDED", "TRIM_SCRAPE_SUCCESS"})
@@ -56,6 +57,7 @@ class Application:
     
     def __init__(self):
         """初始化应用"""
+        self._reload_lock = threading.RLock()
         self.config = None
         self.notifier = None
         self.event_processor = None
@@ -195,76 +197,16 @@ class Application:
                 self.logger.warning("%s 不可访问: %s (%s)", label, db_path, e)
             else:
                 print(f"⚠ {label} 不可访问: {db_path}（{e}）")
-            self._print_db_permission_hint(label, db_path)
+            self._print_db_permission_hint(label, db_path, e)
             return False
 
-    def _unix_mode_str(self, mode: int) -> str:
-        """将 mode 转成人类可读的 rwx 形式。"""
-        return stat.filemode(mode)
-
-    def _print_db_permission_hint(self, label: str, db_path: str) -> None:
-        """输出路径权限诊断与修复建议（不自动提权/修复）。"""
-        p = Path(db_path)
-        parts = [Path("/")]
-        for item in p.parts[1:-1]:
-            parts.append(parts[-1] / item)
-
-        blocked_dir = None
-        blocked_reason = ""
-        for d in parts:
-            try:
-                st = d.stat()
-                can_enter = os.access(d, os.X_OK)
-                can_read_dir = os.access(d, os.R_OK)
-                if not can_enter or not can_read_dir:
-                    blocked_dir = d
-                    blocked_reason = (
-                        f"目录权限不足（mode={self._unix_mode_str(st.st_mode)}，"
-                        f"need: 读取+进入目录）"
-                    )
-                    break
-            except FileNotFoundError:
-                blocked_dir = d
-                blocked_reason = "目录不存在"
-                break
-            except PermissionError:
-                blocked_dir = d
-                blocked_reason = "当前进程无权限访问该目录"
-                break
-            except Exception as ex:
-                blocked_dir = d
-                blocked_reason = f"目录检查失败: {ex}"
-                break
-
-        if blocked_dir is not None:
-            print(f"  → {label} 诊断：{blocked_dir} {blocked_reason}")
-            print("  → 建议修复（任选其一）：")
-            print(f"     1) chmod 755 '{blocked_dir}'")
-            print(f"     2) chown -R <服务用户>:<服务组> '{blocked_dir}' && chmod 750 '{blocked_dir}'")
-            return
-
-        try:
-            st = p.stat()
-            if not os.access(p, os.R_OK):
-                print(
-                    f"  → {label} 诊断：文件不可读（mode={self._unix_mode_str(st.st_mode)}）：{p}"
-                )
-                print("  → 建议修复（任选其一）：")
-                print(f"     1) chmod 644 '{p}'")
-                print(f"     2) chown <服务用户>:<服务组> '{p}' && chmod 640 '{p}'")
-                return
-        except FileNotFoundError:
-            print(f"  → {label} 诊断：数据库文件不存在：{p}")
-            return
-        except PermissionError:
-            print(f"  → {label} 诊断：当前进程无权限访问数据库文件：{p}")
-            return
-        except Exception as ex:
-            print(f"  → {label} 诊断：文件检查失败：{p} ({ex})")
-            return
-
-        # 到这里说明路径权限看起来正常，但 sqlite 仍打不开（例如文件损坏/被锁）
-        print("  → 路径权限检查通过，但数据库仍不可读；请检查文件是否损坏或被占用。")
+    def _print_db_permission_hint(self, label: str, db_path: str, error: Exception) -> None:
+        """使用与保存页面一致的诊断，避免缺失或坏库被误判为权限问题。"""
+        diagnostic = database_access_issue(label, db_path, sqlite_error=error)
+        if diagnostic:
+            print(f"  → {label}：{diagnostic['message']} {diagnostic['action']}")
+            if diagnostic["commands"]:
+                print(diagnostic["commands"])
 
     def _report_external_db_access(self) -> None:
         """对当前启用的外部数据库做读权限探测，便于快速发现权限问题。"""
@@ -389,7 +331,7 @@ class Application:
             ):
                 print(
                     "已勾选 SSH 事件，但 journal 不可用：将回退 logger_data 中的 Sshd*；"
-                    "请挂载 /var/log/journal 与 /etc/machine-id，并确保镜像含 journalctl"
+                    + journal_permission_action()
                 )
 
             self._register_db_event_handlers()
@@ -653,6 +595,10 @@ class Application:
         print(f"已注册 {registered} 个事件处理器")
 
     def reload_config(self) -> None:
+        with self._reload_lock:
+            self._reload_config_locked()
+
+    def _reload_config_locked(self) -> None:
         """保存配置后热加载：从配置文件重新加载并更新通知器与轮询器，无需重启容器。"""
         from web.ui_app import CONFIG_FILE
         if not self.config:

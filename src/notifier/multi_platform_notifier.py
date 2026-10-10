@@ -9,6 +9,7 @@ import logging
 import hashlib
 import urllib.parse
 import threading
+from contextlib import closing
 import re
 import smtplib
 import ssl
@@ -1942,7 +1943,7 @@ class MultiPlatformNotifier:
                 return "--"
             return f"{v}℃"
 
-        def _size(v: str) -> str:
+        def _size(v: str, precision: int = 1) -> str:
             if v in {"--", "—"}:
                 return "--"
             try:
@@ -1950,8 +1951,8 @@ class MultiPlatformNotifier:
             except (TypeError, ValueError):
                 return "--"
             if gb >= 1024:
-                return f"{gb / 1024:.1f}TB"
-            return f"{gb:.1f}GB"
+                return f"{gb / 1024:.{precision}f}TB"
+            return f"{gb:.{precision}f}GB"
 
         host = _v("hostname")
         lan_ip = _v("lan_ip")
@@ -2004,19 +2005,15 @@ class MultiPlatformNotifier:
                     head = label or dev or "unknown"
                 free_gb = str(d.get("free_gb") or "--")
                 free_text = _size(free_gb)
-                size_text = _size(str(d.get("size_gb") or "--"))
+                size_text = _size(str(d.get("size_gb") or "--"), precision=2)
+                filesystem_size_text = _size(str(d.get("filesystem_size_gb") or "--"))
                 temp_c = _temp(str(d.get("temp_c") or "--"))
                 status = str(d.get("status") or "--")
                 if status == "健康":
                     status = "正常"
                 lines.append(f"{head}:")
-                if size_text != "--":
-                    free_show = free_text if free_text != "--" else "--"
-                    lines.append(f"剩余空间: {free_show} / {size_text}")
-                elif free_text != "--":
-                    lines.append(f"剩余空间: {free_text}")
-                else:
-                    lines.append("剩余空间: -- / --")
+                lines.append(f"硬盘容量: {size_text}")
+                lines.append(f"存储空间剩余: {free_text} / {filesystem_size_text}")
                 lines.append(f"温度: {temp_c}")
                 lines.append(f"健康状态: {status}")
                 if i < n - 1:
@@ -2141,22 +2138,21 @@ class MultiPlatformNotifier:
         now = time.time()
         if now - self._nas_uid_name_cache_loaded_at > 60:
             try:
-                conn = connect_readonly_with_fallback(
+                with closing(connect_readonly_with_fallback(
                     self.logger_user_lookup_db_path,
                     timeout=3.0,
                     prefer_immutable=True,
-                )
-                cur = conn.execute(
-                    "SELECT uid, uname FROM log WHERE uid IS NOT NULL AND uname IS NOT NULL "
-                    "AND TRIM(uname) != '' ORDER BY id DESC LIMIT 20000"
-                )
-                mapping = {}
-                for u, n in cur.fetchall():
-                    su = str(u or "").strip()
-                    sn = str(n or "").strip()
-                    if su and sn and su not in mapping:
-                        mapping[su] = sn
-                conn.close()
+                )) as conn:
+                    cur = conn.execute(
+                        "SELECT uid, uname FROM log WHERE uid IS NOT NULL AND uname IS NOT NULL "
+                        "AND TRIM(uname) != '' ORDER BY id DESC LIMIT 20000"
+                    )
+                    mapping = {}
+                    for u, n in cur.fetchall():
+                        su = str(u or "").strip()
+                        sn = str(n or "").strip()
+                        if su and sn and su not in mapping:
+                            mapping[su] = sn
                 self._nas_uid_name_cache = mapping
                 self._nas_uid_name_cache_loaded_at = now
             except Exception:

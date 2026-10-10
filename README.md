@@ -75,11 +75,13 @@ python tools/log_manager.py cleanup 30
 | `dedup_window` | 去重时间窗口（秒） |
 | `log_retention_days` | 原始推送日志保留天数 |
 | `max_log_age` | 应用运行日志 `monitor_*.log` 保留天数 |
-| `dnd_enabled` / `dnd_start_time` / `dnd_end_time` | 勿扰开关与时段（HH:MM，可跨日） |
+| `dnd_enabled` / `dnd_start_time` / `dnd_end_time` | 勿扰开关与时段（HH:MM，可跨日，与巡检 Cron 一样使用系统本地时区） |
 | `ssh_ignore_loopback` | 忽略来源为 127.0.0.1 / ::1 的 SSH 登录成功与断开（默认关闭；失败告警不受影响；SSH 经 frp 等内网穿透接入时勿开启）。环境变量 `SSH_IGNORE_LOOPBACK` |
-首次在 Web 中设置密码后，会在同文件写入 `web_password_salt`、`web_password_hash`（请勿手工泄露）。旧版的 `web_password_enabled` 已废弃，不再能关闭鉴权。
+首次在 Web 中设置密码后，会在同文件写入 `web_password_salt`、`web_password_hash`（请勿手工泄露）。旧版的 `web_password_enabled` 和 `FNMB_DISABLE_AUTH` 已废弃，不再能关闭鉴权。FPK 和 Docker 首次访问或连续 15 分钟无操作后需输入应用密码，未过期时重新打开或刷新配置页可直接进入；飞牛管理员身份不能代替应用密码。连续 15 分钟无操作后自动返回登录页，后台统计刷新不会续期，未保存的配置不会自动提交。
 
 **首次设置密码**：为防止局域网内他人抢先设密，首次设置需填写初始化码。初始化码在启动时打印到日志（`docker logs 容器名`），同时写入配置目录的 `.setup_code`（权限 600），设置密码后自动失效。也可用环境变量 `FNMB_WEB_PASSWORD` 预置初始密码（至少 8 位）。
+
+**反向代理**：本机访问也需要初始化码。若使用反代，设置 `FNMB_TRUSTED_PROXIES` 为应用实际看到的代理 IP / CIDR（逗号分隔），并配置代理正确传递 `X-Forwarded-For`；仅信任自己控制的代理，避免 `0.0.0.0/0`。网关登录限流按 NAS 用户区分。
 
 ### 3. 常用环境变量
 
@@ -91,7 +93,6 @@ python tools/log_manager.py cleanup 30
 - `LOG_RETENTION_DAYS`、`MAX_LOG_AGE`
 - `UI_PORT`：Web 端口（默认 `18080`）；`UI_HOST`：监听地址（默认 `0.0.0.0`，仅本机访问可设 `127.0.0.1`）
 - `FNMB_WEB_PASSWORD`：未设密码时作为初始 Web 密码（至少 8 位）
-- `FNMB_DISABLE_AUTH=1`：关闭应用内鉴权，仅在前面已有自建反代鉴权时使用，**切勿直接暴露到局域网**
 - `LOGTIME_DISPLAY_OFFSET_SECONDS`：修正日志时间显示（默认 `28800`，即 +8 小时；若显示不准可调整）
 - `NOTIFY_RESTART_ENABLED`、`NOTIFY_RESTART_CONSECUTIVE`、`NOTIFY_RESTART_WINDOW`、`NOTIFY_RESTART_COOLDOWN`：通知链路失败重启策略（默认关闭；推送限流/额度用尽时重启无法恢复，反而会重复推送）
 - `APP_HOME`：自定义应用根目录（影响 `config.json` 解析路径，一般 Docker 内为 `/app`）
@@ -114,19 +115,25 @@ services:
     image: sunanang/fn-message-bots:latest
     container_name: fn-message-bot
     restart: unless-stopped
-    ports:
-      - 18080:18080
+    network_mode: host                   # 巡检使用 NAS 的网卡/IP，端口由 UI_PORT 控制
     volumes:
       - ./data/logs:/app/data/logs:rw       # 数据目录，可修改
       - ./data/cursor:/app/data/cursor:rw   # 数据目录，可修改
       - /usr/trim/var/eventlogger_service:/usr/trim/var/eventlogger_service:ro  # 飞牛系统 eventlogger 目录，路径勿改
+      - /etc/os-release:/host/etc/os-release:ro # 宿主操作系统版本
+      - /var/lib/dpkg/status:/host/dpkg/status:ro # 宿主飞牛 trim 版本
       # - /var/run/docker.sock:/var/run/docker.sock  # 可选：勾选 Docker 容器事件时启用，等同授予 Docker API 访问能力
       - ./config:/app/config:rw             # 配置目录，可修改
     environment:
       - TZ=Asia/Shanghai
+      - UI_PORT=${UI_PORT:-18080}          # 安装时可在同目录 .env 中填写 UI_PORT=19080
 ```
 
-浏览器访问 `http://<本机IP>:18080` 打开 Web 配置页。`./data/logs`、`./data/cursor`、`./config` 为相对 compose 文件所在目录的路径，可按需调整左侧宿主机路径。
+安装前可在 Compose 同目录的 `.env` 文件中填写 `UI_PORT=19080`（示例端口，可自行选择）；不填则使用 `18080`。浏览器访问 `http://<本机IP>:所选端口` 打开 Web 配置页。`./data/logs`、`./data/cursor`、`./config` 为相对 compose 文件所在目录的路径，可按需调整左侧宿主机路径。
+
+巡检默认使用 host 网络，避免把容器的 `172.x` 地址当作 NAS 内网 IP；host 模式不配置 `ports`，修改监听端口请设置 `UI_PORT`。若保留自定义桥接网络及端口映射，请设置 `NAS_LAN_IP=<NAS 的内网 IPv4>`。原有容器需按更新后的 Compose 重建，才能使用新增挂载及网络配置。
+
+系统版本优先读取宿主的 `/etc/os-release`；飞牛版本优先开放 API / `TRIM_SYS_VERSION`，再读取宿主版本文件或 dpkg 包信息。容器未挂载宿主版本文件且无其他可靠来源时显示 `--`。硬盘温度通过 sysfs 的设备链接匹配传感器，无法确认传感器归属或无读取权限时显示 `--`，不再借用其他硬盘温度；普通用户 FPK 版无需为了读取可访问的 hwmon 温度而提升整个进程权限。
 
 **从源码构建**：若使用仓库根目录自带的 `docker-compose.yml`（`build: .`、服务名可能为 `fn-message-bots`），同样在项目根执行 `docker compose up -d` 即可。
 
@@ -152,6 +159,7 @@ PYTHONPATH=. LOGGER_DB_PATH=./logger_data.db3 WECHAT_WEBHOOK_URL=xxx python3 src
 ├── data/logs             # 运行日志与推送存储
 ├── data/cursor           # 轮询游标等
 ├── tools/log_manager.py
+├── tests/                # 采集、权限诊断与配置接口回归（模拟网络、临时数据库）
 ├── docs/                 # 文档（notification-channels 与各推送渠道子页）
 ├── scripts/              # 辅助脚本（如推送历史种子数据等）
 ├── .github/workflows/    # Docker 多架构 manifest 合并
@@ -168,6 +176,10 @@ PYTHONPATH=. LOGGER_DB_PATH=./logger_data.db3 WECHAT_WEBHOOK_URL=xxx python3 src
 ```
 
 ## 故障排除
+
+配置加载或保存后会按已勾选的功能检查数据源。权限不足时，保存按钮下方显示授权方式、可复制命令及 FAQ；文件缺失、表结构不兼容或服务未运行时给出对应原因。普通用户 FPK 的命令针对 `FnMessageBot`，Docker 提示针对挂载及容器 UID/GID。应用不自动执行授权，也不因一个数据源不可用阻止其他配置生效。
+
+回归测试：安装项目运行依赖后，在项目根目录运行 `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v`。测试覆盖 IP、版本、多硬盘温度、权限诊断与配置保存接口，只读写临时配置和数据库，不请求公网接口、不发送通知。页面交互测试可在已有 Playwright 运行时执行 `node tests/check_warning_ui.cjs`，也可用 `FNMB_PLAYWRIGHT_MODULE` 和 `FNMB_BROWSER_EXECUTABLE` 指定已有运行时。
 
 - **收不到通知**：检查 Webhook / PushPlus、网络与 `docker compose logs`。
 - **时间不对**：调整 `LOGTIME_DISPLAY_OFFSET_SECONDS`（默认已为 +8 小时）。
