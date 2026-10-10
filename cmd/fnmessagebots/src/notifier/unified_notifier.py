@@ -14,7 +14,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Set, Tuple
-from zoneinfo import ZoneInfo
 
 from config import TITLE_PREFIX_DEFAULT
 from utils.logtime_display import get_logtime_display_offset_seconds
@@ -275,13 +274,13 @@ class UnifiedNotifier:
             return 0
 
     def _in_dnd_window(self) -> bool:
-        """当前时间是否在勿扰时段内（使用 Asia/Shanghai）。"""
+        """当前时间是否在勿扰时段内（与 Cron 一致，使用系统本地时区）。"""
         enabled = getattr(self.config, "dnd_enabled", False)
         if not enabled:
             return False
         start_s = getattr(self.config, "dnd_start_time", "22:00") or "22:00"
         end_s = getattr(self.config, "dnd_end_time", "07:00") or "07:00"
-        now = datetime.now(ZoneInfo("Asia/Shanghai"))
+        now = datetime.now()
         current = now.hour * 60 + now.minute
         start_m = self._dnd_minutes_since_midnight(start_s)
         end_m = self._dnd_minutes_since_midnight(end_s)
@@ -315,14 +314,14 @@ class UnifiedNotifier:
 
     def _calc_latest_dnd_period(self) -> Tuple[Optional[datetime], Optional[datetime]]:
         """
-        计算“最近一个已结束的勿扰时段”时间窗（Asia/Shanghai）。
+        计算“最近一个已结束的勿扰时段”时间窗（系统本地时区）。
         返回 (start_dt, end_dt)。若当前在勿扰时段内或无法确定，返回 (None, None)。
         """
         if not getattr(self.config, "dnd_enabled", False):
             return None, None
         start_s = getattr(self.config, "dnd_start_time", "22:00") or "22:00"
         end_s = getattr(self.config, "dnd_end_time", "07:00") or "07:00"
-        now = datetime.now(ZoneInfo("Asia/Shanghai"))
+        now = datetime.now()
         start_m = self._dnd_minutes_since_midnight(start_s)
         end_m = self._dnd_minutes_since_midnight(end_s)
         current_m = now.hour * 60 + now.minute

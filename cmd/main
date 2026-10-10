@@ -47,24 +47,6 @@ resolve_app_code_dir() {
     return 1
 }
 
-build_cmd() {
-    local app_code_dir app_main py pypath
-    app_code_dir="$(resolve_app_code_dir)" || return 1
-    app_main="${app_code_dir}/src/main.py"
-
-    if [ -x "${TRIM_PKGVAR}/venv/bin/python" ] && [ ! -f "${TRIM_PKGVAR}/.use_python_target" ]; then
-        py="${TRIM_PKGVAR}/venv/bin/python"
-        pypath="${app_code_dir}"
-    elif [ -f "${TRIM_PKGVAR}/.use_python_target" ] && [ -d "${TRIM_PKGVAR}/python_modules" ]; then
-        py="python3"
-        pypath="${app_code_dir}:${TRIM_PKGVAR}/python_modules"
-    else
-        return 1
-    fi
-
-    # 配置页经统一网关（${TRIM_APPDEST}/app.sock，NAS 登录态）访问；18230 只监听本机，不对局域网开放
-    printf '%s' "export APP_HOME=\"${TRIM_PKGVAR}\"; export UI_HOST=\"127.0.0.1\"; export UI_PORT=\"18230\"; export FNMB_GATEWAY_SOCKET=\"${GATEWAY_SOCKET}\"; export FNMB_GATEWAY_PREFIX=\"${GATEWAY_PREFIX}\"; export PYTHONUNBUFFERED=1; export PYTHONPATH=\"${pypath}\"; cd \"${TRIM_PKGVAR}\"; \"${py}\" -u \"${app_main}\""
-}
 
 fail_user_visible() {
     local msg="$1"
@@ -76,7 +58,7 @@ fail_user_visible() {
 
 log_msg() {
     mkdir -p "${TRIM_PKGVAR}" 2>/dev/null || true
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> ${LOG_FILE}
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOG_FILE}"
 }
 
 start_process() {
@@ -85,14 +67,30 @@ start_process() {
     fi
 
     log_msg "Starting process ..."
-    local cmd_line
-    if ! cmd_line="$(build_cmd)"; then
-        fail_user_visible "启动失败：未找到应用代码或未安装依赖（无 venv 且无 python_modules）。应用根: $(_app_install_root)。请重新安装应用。"
+    local app_code_dir app_main py pypath ui_port
+    source "$(dirname "${BASH_SOURCE[0]}")/ui_port" || fail_user_visible "启动失败：缺少端口配置脚本，请重新安装。"
+    ui_port="$(read_fnmb_ui_port)" || return 1
+    app_code_dir="$(resolve_app_code_dir)" || fail_user_visible "启动失败：未找到应用代码，请重新安装。"
+    app_main="${app_code_dir}/src/main.py"
+    if [ -x "${TRIM_PKGVAR}/venv/bin/python" ] && [ ! -f "${TRIM_PKGVAR}/.use_python_target" ]; then
+        py="${TRIM_PKGVAR}/venv/bin/python"
+        pypath="${app_code_dir}"
+    elif [ -f "${TRIM_PKGVAR}/.use_python_target" ] && [ -d "${TRIM_PKGVAR}/python_modules" ]; then
+        py="python3"
+        pypath="${app_code_dir}:${TRIM_PKGVAR}/python_modules"
+    else
+        fail_user_visible "启动失败：未安装依赖（无 venv 且无 python_modules），请重新安装应用。"
     fi
-    # run cmd to start process
-    bash -c "${cmd_line}" >> ${LOG_FILE} 2>&1 &
+    # 在子进程中直接 exec，不拼接 shell 命令；记录的 PID 就是 Python PID。
+    (
+        export APP_HOME="${TRIM_PKGVAR}" UI_HOST="127.0.0.1" UI_PORT="${ui_port}"
+        export FNMB_GATEWAY_SOCKET="${GATEWAY_SOCKET}" FNMB_GATEWAY_PREFIX="${GATEWAY_PREFIX}"
+        export PYTHONUNBUFFERED=1 PYTHONPATH="${pypath}"
+        cd "${TRIM_PKGVAR}" || exit 1
+        exec "${py}" -u "${app_main}"
+    ) >> "${LOG_FILE}" 2>&1 &
     # write pid to pidfile
-    printf "%s" "$!" > ${PID_FILE}
+    printf "%s" "$!" > "${PID_FILE}"
     # log_msg "CMD = ${CMD}"
     # log_msg "pid = $!"
     return 0
@@ -113,7 +111,7 @@ stop_process() {
         fi
 
         log_msg "send TERM signal to PID:${pid}..."
-        kill -TERM ${pid} >> ${LOG_FILE} 2>&1
+        kill -TERM ${pid} >> "${LOG_FILE}" 2>&1
 
         local count=0
         while check_process "${pid}" && [ $count -lt 10 ]; do
@@ -131,6 +129,7 @@ stop_process() {
             log_msg "process killed... "
         fi
     fi
+    rm -f "${PID_FILE}"
     rm -f "${GATEWAY_SOCKET}" 2>/dev/null || true
 
     return 0
@@ -138,6 +137,7 @@ stop_process() {
 
 check_process() {
     local pid=$1
+    case "$pid" in ""|*[!0-9]*|0|1) return 1 ;; esac
     if kill -0 "${pid}" 2>/dev/null; then
         return 0  # process exist
     else

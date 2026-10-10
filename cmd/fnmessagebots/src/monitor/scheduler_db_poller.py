@@ -9,6 +9,7 @@ import logging
 import sqlite3
 import threading
 import time
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -229,8 +230,8 @@ class SchedulerDBPoller:
         conn.row_factory = sqlite3.Row
         return conn
 
-    def _get_latest_watermark(self) -> Dict[str, Any]:
-        """获取当前数据库最新已完成记录的水位，用于首次启动时初始化游标。"""
+    def _get_latest_watermark(self) -> Optional[Dict[str, Any]]:
+        """获取当前数据库最新已完成记录的水位，每次启动时重新对齐。"""
         sql = """
         SELECT id, finished_at
         FROM task_results
@@ -240,9 +241,8 @@ class SchedulerDBPoller:
         LIMIT 1
         """
         try:
-            conn = self._connect()
-            row = conn.execute(sql).fetchone()
-            conn.close()
+            with closing(self._connect()) as conn:
+                row = conn.execute(sql).fetchone()
             if not row:
                 return {"last_finished_at": "", "last_id": 0}
             return {
@@ -250,8 +250,8 @@ class SchedulerDBPoller:
                 "last_id": int(row["id"] or 0),
             }
         except Exception as e:
-            self.logger.warning("获取任务计划数据库最新水位失败: %s", e)
-            return {"last_finished_at": "", "last_id": 0}
+            self.logger.warning("获取任务计划数据库最新水位失败: %s，等待重试对齐，不推送历史", e)
+            return None
 
     def _fetch_rows(self, from_finished_at_ts: float) -> List[Dict[str, Any]]:
         """查询 finished_at >= from_finished_at_ts 的已完成记录，联表获取任务名。
@@ -287,10 +287,8 @@ class SchedulerDBPoller:
         ORDER BY datetime(r.finished_at) ASC, r.id ASC
         """
         try:
-            conn = self._connect()
-            rows = [dict(r) for r in conn.execute(sql, (from_str,)).fetchall()]
-            conn.close()
-            return rows
+            with closing(self._connect()) as conn:
+                return [dict(r) for r in conn.execute(sql, (from_str,)).fetchall()]
         except Exception as e:
             self.logger.error("查询任务计划数据库失败: %s", e)
             return []
@@ -421,19 +419,16 @@ class SchedulerDBPoller:
 
     def _run_loop(self) -> None:
         self._load_dedup()
-        cursor = self._read_cursor()
-        # 首次启动：初始化水位，避免补发历史记录
-        if not cursor.get("last_finished_at") and cursor.get("last_id") == 0:
-            cursor = self._get_latest_watermark()
-            self._write_cursor(cursor["last_finished_at"], cursor["last_id"])
-            self.logger.info(
-                "任务计划轮询启动，仅处理水位之后的新记录: finished_at=%s id=%s",
-                cursor["last_finished_at"],
-                cursor["last_id"],
-            )
+        cursor: Optional[Dict[str, Any]] = None
         while self.running:
             try:
-                cursor = self._poll_once(cursor)
+                if cursor is None:
+                    cursor = self._get_latest_watermark()
+                    if cursor is not None:
+                        self._write_cursor(cursor["last_finished_at"], cursor["last_id"])
+                        self.logger.info("任务计划轮询已对齐当前水位（不补历史）: %s", cursor)
+                if cursor is not None:
+                    cursor = self._poll_once(cursor)
             except Exception as e:
                 self.logger.error("任务计划轮询异常: %s", e, exc_info=True)
             for _ in range(self.poll_interval):
@@ -441,23 +436,12 @@ class SchedulerDBPoller:
                     return
                 time.sleep(1)
 
-    def _align_cursor_to_latest(self) -> None:
-        """每次启用时对齐到当前最新水位，避免补发停用期间的存量记录。"""
-        latest = self._get_latest_watermark()
-        self._write_cursor(latest["last_finished_at"], latest["last_id"])
-        self.logger.info(
-            "任务计划轮询启用时已对齐当前水位（不补历史）: finished_at=%s id=%s",
-            latest["last_finished_at"],
-            latest["last_id"],
-        )
-
     def start(self) -> None:
         if self.running:
             return
         if not (SCHEDULER_POLL_EVENTS & set(self.monitor_events or [])):
             self.logger.info("monitor_events 未包含任务计划事件，跳过 SchedulerDBPoller")
             return
-        self._align_cursor_to_latest()
         self.running = True
         self._thread = threading.Thread(target=self._run_loop, name="SchedulerDBPoller", daemon=False)
         self._thread.start()

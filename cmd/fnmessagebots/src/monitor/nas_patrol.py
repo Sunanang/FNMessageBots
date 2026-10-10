@@ -5,7 +5,7 @@ NAS 定时巡检：按 Cron 表达式调度，采集本机 CPU/内存/磁盘状�
 
 from __future__ import annotations
 
-import glob
+import http.client
 import json
 import logging
 import os
@@ -349,38 +349,65 @@ def _fmt_boot_time(ts: float) -> str:
 
 
 def _pick_lan_ip() -> str:
+    """优先使用默认路由上的活动网卡，桥接容器可显式指定 NAS_LAN_IP。"""
+    override = (os.getenv("NAS_LAN_IP") or "").strip()
+    if override:
+        try:
+            addr = ipaddress.IPv4Address(override)
+            if not (addr.is_loopback or addr.is_link_local or addr.is_unspecified or addr.is_multicast):
+                return str(addr)
+        except ValueError:
+            pass
+        logging.getLogger(__name__).warning("NAS_LAN_IP 不是有效的内网 IPv4，已忽略")
     if not psutil:
         return "--"
     try:
-        for _name, addrs in psutil.net_if_addrs().items():
+        interfaces = psutil.net_if_addrs()
+        stats = psutil.net_if_stats()
+        default_interface = _default_ipv4_interface()
+        candidates: List[Tuple[int, int, str, str]] = []
+        for name, addrs in interfaces.items():
+            if re.match(r"^(lo$|docker|br-|virbr|veth|cni|flannel|tun|tap|wg|tailscale|zt)", name):
+                continue
+            if name in stats and not stats[name].isup:
+                continue
             for a in addrs:
                 if getattr(a, "family", None) != socket.AF_INET:
                     continue
                 ip = str(getattr(a, "address", "") or "").strip()
-                if not ip or ip.startswith("127."):
-                    continue
                 try:
-                    obj = ipaddress.ip_address(ip)
+                    obj = ipaddress.IPv4Address(ip)
                 except ValueError:
                     continue
-                if obj.is_private:
-                    return ip
-        for _name, addrs in psutil.net_if_addrs().items():
-            for a in addrs:
-                if getattr(a, "family", None) == socket.AF_INET:
-                    ip = str(getattr(a, "address", "") or "").strip()
-                    if ip and not ip.startswith("127."):
-                        return ip
-    except Exception:
+                if obj.is_loopback or obj.is_link_local or obj.is_unspecified or obj.is_multicast:
+                    continue
+                candidates.append((0 if name == default_interface else 1, 0 if obj.is_private else 1, name, ip))
+        if candidates:
+            return min(candidates)[3]
+    except Exception as e:
+        logging.getLogger(__name__).warning("内网 IP 检测失败: %s", e)
         return "--"
     return "--"
 
 
-def _http_get_ip(url: str, *, family: int, timeout: float = 3.0) -> str:
+def _default_ipv4_interface() -> str:
+    """读取 Linux 默认路由，多个出口时选 UP 且 metric 最低的一项。"""
+    routes: List[Tuple[int, str]] = []
+    try:
+        for line in Path("/proc/net/route").read_text(encoding="utf-8").splitlines()[1:]:
+            parts = line.split()
+            if len(parts) >= 8 and parts[1] == "00000000" and int(parts[3], 16) & 1:
+                routes.append((int(parts[6]), parts[0]))
+    except (OSError, ValueError):
+        pass
+    return min(routes)[1] if routes else ""
+
+
+def _http_get_ip(url: str, *, family: int, timeout: float = 3.0, _redirects: int = 2) -> str:
     """GET 公网 IP 接口，强制使用指定地址族（避免双栈误走另一族）。"""
     parsed = urllib.parse.urlparse(url)
     host = parsed.hostname
-    if not host:
+    if not host or parsed.scheme not in {"http", "https"}:
         return ""
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     path = parsed.path or "/"
@@ -399,30 +426,30 @@ def _http_get_ip(url: str, *, family: int, timeout: float = 3.0) -> str:
                 ctx = ssl.create_default_context()
                 sock = ctx.wrap_socket(sock, server_hostname=host)
             req = (
-                f"GET {path} HTTP/1.0\r\n"
-                f"Host: {host}\r\n"
+                f"GET {path} HTTP/1.1\r\n"
+                f"Host: {parsed.netloc}\r\n"
                 f"User-Agent: FNMessageBots\r\n"
                 f"Accept: text/plain\r\n"
                 f"Connection: close\r\n\r\n"
             ).encode("ascii")
             sock.sendall(req)
-            raw = b""
-            while True:
-                chunk = sock.recv(4096)
-                if not chunk:
-                    break
-                raw += chunk
-                if len(raw) > 65536:
-                    break
-            text = raw.decode("utf-8", errors="ignore")
-            if "\r\n\r\n" in text:
-                body = text.split("\r\n\r\n", 1)[1]
-            elif "\n\n" in text:
-                body = text.split("\n\n", 1)[1]
-            else:
-                body = text
-            line = (body or "").strip().splitlines()
-            return line[0].strip() if line else ""
+            # 标准 HTTP 解析处理状态码和 chunked，避免把错误页/分块长度当成 IP。
+            with http.client.HTTPResponse(sock) as response:
+                response.begin()
+                if response.status in {301, 302, 303, 307, 308}:
+                    location = response.getheader("Location")
+                    if location and _redirects > 0:
+                        return _http_get_ip(
+                            urllib.parse.urljoin(url, location), family=family,
+                            timeout=timeout, _redirects=_redirects - 1,
+                        )
+                    raise ValueError("公网 IP 接口重定向无效或次数过多")
+                if response.status != 200:
+                    raise ValueError(f"公网 IP 接口 HTTP {response.status}")
+                body = response.read(4097)
+                if len(body) > 4096:
+                    raise ValueError("公网 IP 接口响应过长")
+                return body.decode("utf-8", errors="strict").strip()
         except Exception as e:
             last_err = e
         finally:
@@ -454,9 +481,10 @@ def _pick_wan_ip() -> str:
             try:
                 text = _http_get_ip(u, family=socket.AF_INET, timeout=3.0)
                 ip_obj = ipaddress.ip_address(text)
-                if ip_obj.version == 4:
-                    return text
-            except Exception:
+                if ip_obj.version == 4 and ip_obj.is_global and not ip_obj.is_multicast:
+                    return str(ip_obj)
+            except Exception as e:
+                logging.getLogger(__name__).debug("公网 IPv4 查询失败 (%s): %s", u, e)
                 continue
         if round_i == 0:
             time.sleep(0.5)
@@ -470,20 +498,41 @@ def _pick_wan_ip() -> str:
     for u in v6_urls:
         try:
             text = _http_get_ip(u, family=socket.AF_INET6, timeout=3.0)
-            ipaddress.ip_address(text)
-            return text
-        except Exception:
+            ip_obj = ipaddress.ip_address(text)
+            if ip_obj.version == 6 and ip_obj.is_global and not ip_obj.is_multicast:
+                return str(ip_obj)
+        except Exception as e:
+            logging.getLogger(__name__).debug("公网 IPv6 查询失败 (%s): %s", u, e)
             continue
+    logging.getLogger(__name__).warning("外网 IP 检测失败：所有 IPv4/IPv6 查询源均未返回有效公网地址")
     return "--"
 
 
 def _read_system_version() -> str:
-    # 系统版本（操作系统）
-    out = _run_cmd(["sh", "-lc", "grep PRETTY_NAME /etc/os-release | cut -d '\"' -f2"], timeout=3.0)
-    ver = str(out or "").strip().splitlines()
-    if ver and ver[0].strip():
-        return ver[0].strip()
+    """读取宿主机 OS；容器中缺少宿主挂载时不使用镜像自身的 Debian 版本。"""
+    paths = ["/host/etc/os-release", "/rootfs/etc/os-release", "/mnt/host/etc/os-release"]
+    if not _in_container():
+        paths.extend(["/etc/os-release", "/usr/lib/os-release"])
+    for filename in paths:
+        try:
+            values = {}
+            for line in Path(filename).read_text(encoding="utf-8").splitlines():
+                key, sep, value = line.partition("=")
+                if sep:
+                    values[key.strip()] = value.strip().strip("\"'")
+            version = values.get("PRETTY_NAME") or " ".join(
+                v for v in (values.get("NAME"), values.get("VERSION_ID")) if v
+            )
+            if version:
+                return version[:160]
+        except (OSError, UnicodeError):
+            continue
+    logging.getLogger(__name__).warning("未读到宿主系统版本：Docker 请只读挂载 /etc/os-release 到 /host/etc/os-release")
     return "--"
+
+
+def _in_container() -> bool:
+    return Path("/.dockerenv").exists() or Path("/run/.containerenv").exists()
 
 
 def _looks_like_container_hostname(s: str) -> bool:
@@ -700,48 +749,40 @@ def _read_fnos_version(logger_db_fnos: str = "") -> str:
     except Exception:
         pass
 
-    vlog = (logger_db_fnos or "").strip()
-    if vlog:
-        return vlog[:160]
     for rel in (
-        "/etc/fnos-release",
-        "/etc/fnos_version",
-        "/usr/trim/etc/version",
-        "/usr/trim/etc/fnos_version",
-        "/usr/trim/VERSION",
-        "/run/fnos/version",
+        "/etc/fnos-release", "/etc/fnos_version", "/usr/trim/etc/version",
+        "/usr/trim/etc/fnos_version", "/usr/trim/VERSION", "/run/fnos/version",
     ):
         try:
-            p = Path(rel)
-            if not p.is_file():
-                continue
-            lines = p.read_text(encoding="utf-8", errors="ignore").strip().splitlines()
-            if lines and lines[0].strip():
-                return lines[0].strip()[:160]
-        except Exception:
+            lines = Path(rel).read_text(encoding="utf-8").strip().splitlines()
+            if lines:
+                version = _sanitize_fnos_version_candidate(lines[0])
+                if version:
+                    return version
+        except (OSError, UnicodeError):
             continue
 
-    # 容器内通常没有飞牛的 trim 包；若把「宿主的 dpkg status」只读挂进容器，可解析出与宿主机 dpkg 一致的版本
+    # 当前宿主的版本文件/包信息优先于日志；旧事件中的版本号可能已经过期。
     ver_host = _fnos_trim_version_from_host_dpkg_status()
     if ver_host:
         return _format_fnos_version_display(ver_host)
+    if not _in_container():
+        try:
+            proc = subprocess.run(
+                [_resolve_cmd("dpkg-query"), "-W", "-f=${Version}", "trim"],
+                capture_output=True, text=True, timeout=3.0, check=False,
+            )
+            if proc.returncode == 0:
+                version = _sanitize_fnos_version_candidate(proc.stdout.strip())
+                if version:
+                    return version
+        except (OSError, subprocess.SubprocessError):
+            pass
 
-    # 容器自身 dpkg（仅当镜像/环境内确实安装了 trim 时有效）
-    for sh_line in (
-        "dpkg -s trim 2>/dev/null | grep Version | awk '{print $2}' || true",
-        "dpkg-query -W -f='${Version}\\n' trim 2>/dev/null || true",
-    ):
-        out = _run_cmd(["sh", "-lc", sh_line], timeout=3.0)
-        raw_lines = (out or "").strip().splitlines()
-        if not raw_lines or not raw_lines[0].strip():
-            continue
-        raw = raw_lines[0].strip()
-        low = raw.lower()
-        if "dpkg-query" in low or "not installed" in low or "no information" in low or "no packages" in low:
-            continue
-        if low.startswith("e:"):
-            continue
-        return _format_fnos_version_display(raw)
+    version = _sanitize_fnos_version_candidate(logger_db_fnos)
+    if version:
+        logging.getLogger(__name__).warning("忽略历史日志中的飞牛版本，无法确认是否为当前版本: %s", version)
+    logging.getLogger(__name__).warning("未读到飞牛版本：请检查开放 API、TRIM_SYS_VERSION 或宿主 dpkg status 挂载")
     return "--"
 
 
@@ -762,10 +803,10 @@ def _fnos_trim_version_from_host_dpkg_status() -> str:
         "/rootfs/var/lib/dpkg/status",
         "/mnt/host/var/lib/dpkg/status",
     )
+    if not _in_container():
+        candidates += ("/var/lib/dpkg/status",)
     for rel in candidates:
         p = Path(rel)
-        if not p.is_file():
-            continue
         v = _fnos_trim_version_stream_dpkg_status(p)
         if v:
             return v
@@ -1338,6 +1379,61 @@ def _patrol_readable_unresolved_device_label(dev_path: str, mount: str) -> str:
     return raw or "unknown"
 
 
+def _smartctl_sat_retry_needed(block_path: str, output: str) -> bool:
+    """仅 USB 桥接识别/透传失败时尝试 SAT，不把权限不足当成设备类型错误。"""
+    low = (output or "").lower()
+    if any(marker in low for marker in ("permission denied", "operation not permitted", "access denied")):
+        return False
+    if "unknown usb bridge" in low:
+        return True
+    if not any(marker in low for marker in (
+        "please specify device type", "unable to detect device type",
+        "unsupported field in scsi command", "unsupported scsi opcode",
+        "read device identity failed",
+    )):
+        return False
+    nb = _normalize_block_name(os.path.basename(block_path))
+    if not _valid_sysfs_block_token(nb):
+        return False
+    try:
+        device = Path(f"/sys/class/block/{nb}/device").resolve(strict=True)
+        return any(re.fullmatch(r"usb\d+", part) for part in device.parts)
+    except (OSError, RuntimeError):
+        return False
+
+
+def _run_smartctl(block_path: str, options: List[str], timeout: float) -> str:
+    out = _run_cmd(["smartctl", *options, block_path], timeout=timeout)
+    if _smartctl_sat_retry_needed(block_path, out):
+        return _run_cmd(["smartctl", *options, "-d", "sat", block_path], timeout=timeout) or out
+    return out
+
+
+def _parse_smart_health_output(out: str) -> str:
+    try:
+        obj = json.loads(out)
+        if isinstance(obj, dict):
+            passed = (obj.get("smart_status") or {}).get("passed")
+            if isinstance(passed, bool):
+                return "健康" if passed else "异常"
+            warning = (obj.get("nvme_smart_health_information_log") or {}).get("critical_warning")
+            if warning is not None:
+                value = int(warning, 0) if isinstance(warning, str) else int(warning)
+                return "健康" if value == 0 else "异常"
+    except (ValueError, TypeError, AttributeError):
+        pass
+    low = (out or "").lower()
+    if re.search(r"(?:test result:\s*passed\b|smart health status:\s*ok\b)", low):
+        return "健康"
+    if re.search(r"(?:test result:\s*failed\b|smart health status:\s*(?:failed|bad)\b)", low):
+        return "异常"
+    match = re.search(r"critical_warning\s*[:=]\s*(0x[0-9a-f]+|\d+)", low)
+    if match:
+        raw = match.group(1)
+        return "健康" if int(raw, 16 if raw.startswith("0x") else 10) == 0 else "异常"
+    return "--"
+
+
 def _smart_health_for_block_path(block_path: str) -> str:
     """对 ``/dev/...`` 绝对路径做 SMART 健康判断（含 mapper、分区）。"""
     bp = str(block_path or "").strip()
@@ -1347,27 +1443,10 @@ def _smart_health_for_block_path(block_path: str) -> str:
     nb = _normalize_block_name(base) or base
     if not _valid_sysfs_block_token(nb) and not bp.startswith("/dev/mapper/"):
         return "--"
-    out = _run_cmd(["smartctl", "-H", bp], timeout=2.5)
-    if out:
-        low = out.lower()
-        if "test result: passed" in low or "smart overall-health self-assessment test result: passed" in low:
-            return "健康"
-        fail_markers = (
-            "test result: failed",
-            "overall-health self-assessment test result: failed",
-            "smart overall-health self-assessment test result: failed",
-            "prefail",
-        )
-        if any(k in low for k in fail_markers):
-            return "异常"
-        m = re.search(r"critical_warning\s*[:=]\s*(0x[0-9a-fA-F]+|\d+)", out)
-        if m:
-            raw = m.group(1).strip().lower()
-            try:
-                val = int(raw, 16) if raw.startswith("0x") else int(raw)
-                return "健康" if val == 0 else "异常"
-            except Exception:
-                pass
+    out = _run_smartctl(bp, ["-H"], timeout=2.5)
+    health = _parse_smart_health_output(out)
+    if health != "--":
+        return health
 
     if "nvme" in nb.lower():
         out_nvme_json = _run_cmd(["nvme", "smart-log", "-o", "json", bp], timeout=2.5)
@@ -1391,7 +1470,7 @@ def _smart_health_for_block_path(block_path: str) -> str:
                     return "健康" if val == 0 else "异常"
                 except Exception:
                     pass
-        ctrl = nb.split("n")[0] if "n" in nb else nb
+        ctrl = _nvme_controller_name(nb)
         smart_candidates = [
             Path(f"/sys/class/nvme/{ctrl}/smart_log/critical_warning"),
             Path(f"/sys/class/nvme/{ctrl}/device/critical_warning"),
@@ -1406,15 +1485,6 @@ def _smart_health_for_block_path(block_path: str) -> str:
             except Exception:
                 continue
 
-    sys_key = nb if _valid_sysfs_block_token(nb) else ""
-    if sys_key:
-        sys_state = Path(f"/sys/block/{sys_key}/device/state")
-        try:
-            s = sys_state.read_text(encoding="utf-8", errors="ignore").strip().lower()
-            if s in {"running", "active", "live"}:
-                return "健康"
-        except Exception:
-            pass
     return "--"
 
 
@@ -1426,18 +1496,6 @@ def _smart_health_for_disk(dev_base: str) -> str:
     if not _valid_sysfs_block_token(dev_base):
         return "--"
     return _smart_health_for_block_path(f"/dev/{dev_base}")
-
-
-def _patrol_sysfs_disk_running(dev_base: str) -> bool:
-    """内核块设备 ``running/active/live`` 视为在线可用（无 smartctl 时的弱信号）。"""
-    db = str(dev_base or "").strip()
-    if not db or not _valid_sysfs_block_token(db):
-        return False
-    try:
-        s = Path(f"/sys/block/{db}/device/state").read_text(encoding="utf-8", errors="ignore").strip().lower()
-        return s in {"running", "active", "live"}
-    except OSError:
-        return False
 
 
 def _smart_health_for_patrol_partition(dev_path: str, physical: str) -> str:
@@ -1571,6 +1629,8 @@ def _parse_celsius_from_smartctl_text(out: str) -> str:
     """文本解析：先主 Temperature:，再 Sensor 1；忽略 Sensor 2+；ATA 用 RAW。"""
     main_temp: Optional[str] = None
     sensor1: Optional[str] = None
+    ata194: Optional[str] = None
+    ata190: Optional[str] = None
 
     for line in (out or "").splitlines():
         low = line.lower().strip()
@@ -1612,19 +1672,18 @@ def _parse_celsius_from_smartctl_text(out: str) -> str:
                     pass
             continue
 
-        # ATA 194 / 190：取「-」后的 RAW，避免把 VALUE/THRESH 当温度
+        # ATA 194 / 190：RAW 是第十列；WHEN_FAILED 可能是 In_the_past，不能只匹配 "-"。
         if "temperature_celsius" in low or re.match(r"^190\s+", low) or re.match(r"^194\s+", low):
-            # 优先 194 行；190 仅作后备（下面用 found 顺序控制）
-            m = re.search(r"-\s+(\d+)\s*(?:\(|$)", line)
+            fields = line.split(None, 9)
+            m = re.match(r"(-?\d+)(?:\s|\(|$)", fields[9]) if len(fields) == 10 else None
             if m:
                 try:
                     v = int(m.group(1))
                     if _celsius_ok(v):
                         if "temperature_celsius" in low or re.match(r"^194\s+", low):
-                            if main_temp is None:
-                                main_temp = _fmt_celsius(v)
-                        elif sensor1 is None:
-                            sensor1 = _fmt_celsius(v)
+                            ata194 = _fmt_celsius(v)
+                        else:
+                            ata190 = _fmt_celsius(v)
                 except (TypeError, ValueError):
                     pass
             continue
@@ -1633,7 +1692,22 @@ def _parse_celsius_from_smartctl_text(out: str) -> str:
         return main_temp
     if sensor1:
         return sensor1
+    if ata194:
+        return ata194
+    if ata190:
+        return ata190
     return "--"
+
+
+def _parse_smart_temperature_output(out: str) -> str:
+    """兼容 JSON 和文本结果；采集与保存检查使用同样的温度解析。"""
+    try:
+        temp = _parse_celsius_from_smartctl_json(json.loads(out))
+        if temp not in {"--", "—"}:
+            return temp
+    except (ValueError, TypeError):
+        pass
+    return _parse_celsius_from_smartctl_text(out)
 
 
 def _sysfs_temp_path_sort_key(p: Path) -> Tuple[int, str]:
@@ -1647,27 +1721,51 @@ def _sysfs_temp_path_sort_key(p: Path) -> Tuple[int, str]:
     return (idx, str(p))
 
 
-def _hwmon_temp1_for_block(nb: str) -> str:
+def _nvme_controller_name(block_name: str) -> str:
+    match = re.fullmatch(r"(nvme\d+)(?:n\d+)?(?:p\d+)?", block_name)
+    return match.group(1) if match else ""
+
+
+def _disk_hwmon_dirs(nb: str) -> List[Path]:
+    """用 sysfs 设备链接绑定传感器，禁止仅按 nvme/drivetemp 的通用名称匹配。"""
     if not _valid_sysfs_block_token(nb):
-        return ""
-    patterns = (
-        f"/sys/block/{nb}/../../hwmon/hwmon*/temp1_input",
-        f"/sys/block/{nb}/device/hwmon*/temp1_input",
-        f"/sys/block/{nb}/device/hwmon/hwmon*/temp1_input",
-    )
-    for pat in patterns:
+        return []
+    device_paths = [Path(f"/sys/class/block/{nb}"), Path(f"/sys/class/block/{nb}/device")]
+    ctrl = _nvme_controller_name(nb)
+    if ctrl:
+        device_paths.extend([Path(f"/sys/class/nvme/{ctrl}"), Path(f"/sys/class/nvme/{ctrl}/device")])
+    roots: Set[Path] = set()
+    for device in device_paths:
         try:
-            matches = sorted(glob.glob(pat))
-        except Exception:
+            roots.add(device.resolve(strict=True))
+        except (OSError, RuntimeError):
             continue
-        for f in matches:
+    matches: Set[Path] = set()
+    for root in roots:
+        for parent in (root, root / "hwmon"):
+            for hw in _safe_glob(parent, "hwmon*"):
+                if re.fullmatch(r"hwmon\d+", hw.name):
+                    matches.add(hw)
+    for hw in _safe_glob(Path("/sys/class/hwmon"), "hwmon*"):
+        try:
+            device = (hw / "device").resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if any(device == root or root in device.parents for root in roots):
+            matches.add(hw)
+    return sorted(matches, key=str)
+
+
+def _hwmon_temp1_for_block(nb: str) -> str:
+    for hw in _disk_hwmon_dirs(nb):
+        for path in (hw / "temp1_input", hw / "device" / "temp1_input"):
             try:
-                raw = Path(f).read_text(encoding="utf-8", errors="ignore").strip()
-                c = int(raw) // 1000
+                c = int(path.read_text(encoding="utf-8").strip()) / 1000.0
+                if _celsius_ok(c):
+                    # 保留飞牛主温度取整的展示方式。
+                    return str(int(c))
             except (OSError, ValueError):
                 continue
-            if _celsius_ok(c):
-                return str(c)
     return ""
 
 
@@ -1684,17 +1782,14 @@ def _smart_temp_for_block_path(block_path: str) -> str:
         return hw
 
     # 1) smartctl JSON（避免文本列对齐误解析）
-    out_json = _run_cmd(["smartctl", "-A", "-j", bp], timeout=3.0)
+    out_json = _run_smartctl(bp, ["-A", "-j"], timeout=3.0)
     if out_json:
-        try:
-            parsed = _parse_celsius_from_smartctl_json(json.loads(out_json))
-            if parsed not in {"--", "—"}:
-                return parsed
-        except Exception:
-            pass
+        parsed = _parse_smart_temperature_output(out_json)
+        if parsed not in {"--", "—"}:
+            return parsed
 
     # 2) smartctl 文本
-    out = _run_cmd(["smartctl", "-A", bp], timeout=2.5)
+    out = _run_smartctl(bp, ["-A"], timeout=2.5)
     if out:
         parsed = _parse_celsius_from_smartctl_text(out)
         if parsed not in {"--", "—"}:
@@ -1740,63 +1835,16 @@ def _smart_temp_for_block_path(block_path: str) -> str:
                         if c is not None:
                             return _fmt_celsius(c)
 
-    # 4) sysfs / hwmon：优先 temp1
-    sys_paths: List[Path] = []
-    if _valid_sysfs_block_token(nb):
-        block_hwmon = Path(f"/sys/block/{nb}/device/hwmon")
-        if _safe_path_exists(block_hwmon):
-            for p in _safe_glob(block_hwmon, "hwmon*/temp*_input"):
-                sys_paths.append(p)
-        if nb.startswith("nvme"):
-            ctrl = nb.split("n")[0] if "n" in nb else nb
-            nvme_hwmon = Path(f"/sys/class/nvme/{ctrl}/device/hwmon")
-            if _safe_path_exists(nvme_hwmon):
-                for p in _safe_glob(nvme_hwmon, "hwmon*/temp*_input"):
-                    sys_paths.append(p)
-            sys_paths.append(Path(f"/sys/class/nvme/{ctrl}/smart_log/temperature"))
+    # hwmon 已在最前面按设备映射读取；这里只尝试该 NVMe 控制器的专用节点。
+    ctrl = _nvme_controller_name(nb)
+    if ctrl:
         try:
-            for hm in Path("/sys/class/hwmon").iterdir():
-                try:
-                    name = (hm / "name").read_text(encoding="utf-8", errors="ignore").strip().lower()
-                except OSError:
-                    name = ""
-                if name not in {"drivetemp", "nvme", "sata"} and nb.lower() not in name:
-                    try:
-                        link = os.path.realpath(str(hm / "device"))
-                        if f"/{nb}" not in link and not link.endswith(f"/{nb}"):
-                            continue
-                    except OSError:
-                        if name not in {"drivetemp", "nvme"}:
-                            continue
-                for p in _safe_glob(hm, "temp*_input"):
-                    sys_paths.append(p)
-        except OSError:
-            pass
-
-    seen_paths: Set[str] = set()
-    ordered = sorted(sys_paths, key=_sysfs_temp_path_sort_key)
-    for temp_path in ordered:
-        sp = str(temp_path)
-        if sp in seen_paths:
-            continue
-        seen_paths.add(sp)
-        # 跳过 temp2+（飞牛展示用 Sensor1/temp1）
-        m_idx = re.search(r"temp(\d+)_input$", temp_path.name.lower())
-        if m_idx and int(m_idx.group(1)) >= 2:
-            continue
-        try:
-            raw = temp_path.read_text(encoding="utf-8", errors="ignore").strip()
-            if not raw:
-                continue
-            v = int(raw)
-            if abs(v) > 1000:
-                c = v / 1000.0
-            else:
-                c = float(v)
-            if _celsius_ok(c):
+            raw = Path(f"/sys/class/nvme/{ctrl}/smart_log/temperature").read_text(encoding="utf-8")
+            c = _nvme_kelvin_or_celsius(int(raw.strip()))
+            if c is not None:
                 return _fmt_celsius(c)
-        except Exception:
-            continue
+        except (OSError, ValueError):
+            pass
     return "--"
 
 
@@ -2051,6 +2099,7 @@ def _patrol_list_visible_whole_disks() -> List[str]:
 
 
 def _disk_size_gb_for_disk(dev_base: str) -> str:
+    """读取整盘容量，不使用分区或文件系统容量代替；保留两位小数。"""
     dev = str(dev_base or "").strip()
     if not dev or not _valid_sysfs_block_token(dev):
         return "--"
@@ -2058,7 +2107,7 @@ def _disk_size_gb_for_disk(dev_base: str) -> str:
     try:
         sectors = int(sys_size.read_text(encoding="utf-8", errors="ignore").strip())
         if sectors > 0:
-            return f"{sectors * 512 / (1024**3):.1f}"
+            return f"{sectors * 512 / (1024**3):.2f}"
     except Exception:
         pass
     out = _run_cmd(["lsblk", "-b", "-dnro", "SIZE", f"/dev/{dev}"], timeout=2.0)
@@ -2068,7 +2117,7 @@ def _disk_size_gb_for_disk(dev_base: str) -> str:
             continue
         size = int(raw)
         if size > 0:
-            return f"{size / (1024**3):.1f}"
+            return f"{size / (1024**3):.2f}"
     return "--"
 
 
@@ -2349,7 +2398,7 @@ def _patrol_disk_space_gb_for_row(
     physical: str,
     vol_space_by_physical: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> Tuple[str, str]:
-    """巡检单行 (剩余GB, 总容量GB)；优先 /vol 文件系统容量，再挂载点 df、findmnt。"""
+    """关联存储卷的 (剩余GB, 文件系统总容量GB)，不混入物理整盘容量。"""
     phy = str(physical or "").strip()
     m0 = str(mount or "").strip()
 
@@ -2370,12 +2419,10 @@ def _patrol_disk_space_gb_for_row(
             return fm_free, fm_tot
 
         free_s = _patrol_disk_free_gb_for_row(m0, phy, vol_space_by_physical)
-        hw_size = _disk_size_gb_for_disk(phy)
-        if free_s not in {"--", "—"} and hw_size not in {"--", "—"}:
-            return free_s, hw_size
+        if free_s not in {"--", "—"}:
+            return free_s, "--"
 
-    hw_size = _disk_size_gb_for_disk(phy) if phy else "--"
-    return "--", hw_size if hw_size not in {"--", "—"} else "--"
+    return "--", "--"
 
 
 def _patrol_scan_vol_space_by_physical() -> Dict[str, Dict[str, str]]:
@@ -2663,48 +2710,27 @@ def _psutil_disk_temp_fallback(device_name: str) -> str:
             return 1
         return 5
 
-    # 1) 先按设备名匹配，再按 label 优先级
+    # psutil 会把多个盘的同名 chip 合并；仅接收带明确设备/控制器标识的条目。
+    tokens = [dev]
+    ctrl = _nvme_controller_name(dev)
+    if ctrl:
+        tokens.append(ctrl)
     candidates: List[Tuple[int, str]] = []
     for chip, entries in temps.items():
-        chip_s = str(chip or "").lower()
-        for e in entries or []:
-            label = str(getattr(e, "label", "") or "")
-            blob = f"{chip_s} {label.lower()}"
-            if dev not in blob and not (dev.startswith("nvme") and "nvme" in chip_s):
+        for entry in entries or []:
+            label = str(getattr(entry, "label", "") or "")
+            identity = f"{chip} {label}".lower()
+            if not any(re.search(r"(?<![a-z0-9])" + re.escape(token) + r"(?![a-z0-9])", identity) for token in tokens):
                 continue
             rank = _label_rank(label)
             if rank >= 99:
                 continue
-            t = _to_temp(getattr(e, "current", None))
-            if t != "--":
-                candidates.append((rank, t))
+            value = _to_temp(getattr(entry, "current", None))
+            if value != "--":
+                candidates.append((rank, value))
     if candidates:
-        candidates.sort(key=lambda x: x[0])
+        candidates.sort(key=lambda item: item[0])
         return candidates[0][1]
-
-    # 2) nvme/sata/drivetemp：取该 chip 下 rank 最低的一条（跳过 Sensor2）
-    preferred_chips: List[str] = []
-    if dev.startswith("nvme"):
-        preferred_chips = ["nvme", "drivetemp", "sata"]
-    else:
-        preferred_chips = ["drivetemp", "sata", "nvme"]
-    for pref in preferred_chips:
-        chip_cands: List[Tuple[int, str]] = []
-        for chip, entries in temps.items():
-            chip_s = str(chip or "").lower()
-            if pref not in chip_s:
-                continue
-            for e in entries or []:
-                label = str(getattr(e, "label", "") or "")
-                rank = _label_rank(label)
-                if rank >= 99:
-                    continue
-                t = _to_temp(getattr(e, "current", None))
-                if t != "--":
-                    chip_cands.append((rank, t))
-        if chip_cands:
-            chip_cands.sort(key=lambda x: x[0])
-            return chip_cands[0][1]
     return "--"
 
 
@@ -2734,10 +2760,6 @@ def _patrol_vol_row_health_temp(dev_open: str, physicals: List[str]) -> Tuple[st
         if hp0 not in {"--", "—"}:
             hs.append(hp0)
 
-    for p in phys:
-        if _patrol_sysfs_disk_running(p):
-            hs.append("健康")
-
     if any(h == "异常" for h in hs):
         health = "异常"
     elif any(h == "健康" for h in hs):
@@ -2764,13 +2786,7 @@ def _patrol_vol_row_health_temp(dev_open: str, physicals: List[str]) -> Tuple[st
             temp = _psutil_disk_temp_fallback(bn)
     temp_reason = "" if temp not in {"--", "—"} else tr_fail
 
-    health_reason = ""
-    if health in {"--", "—"}:
-        if any(_patrol_sysfs_disk_running(p) for p in phys) or temp not in {"--", "—"}:
-            health = "正常"
-            health_reason = ""
-        else:
-            health_reason = hr_fail
+    health_reason = hr_fail if health in {"--", "—"} else ""
     return health, temp, health_reason, temp_reason
 
 
@@ -2817,7 +2833,7 @@ def _patrol_fn_compose_vol_mounts_ready() -> bool:
 def _collect_disk_items() -> List[Dict[str, str]]:
     """按物理整盘（sda / nvme0n1…）生成巡检行，不再按 /volN 卷数分行。
 
-    温度/健康对整盘路径探测；剩余空间仍尽量从关联的 /vol 挂载反查（有则填，无则 --）。
+    容量/温度/健康对整盘路径探测；存储卷的剩余空间及总容量从关联挂载反查。
     """
     items: List[Dict[str, str]] = []
     vol_space_by_physical = _patrol_scan_vol_space_by_physical()
@@ -2836,9 +2852,6 @@ def _collect_disk_items() -> List[Dict[str, str]]:
         temp = _smart_temp_for_disk(physical)
         if temp in {"--", "—"}:
             temp = _psutil_disk_temp_fallback(physical)
-        if health in {"--", "—"}:
-            if _patrol_sysfs_disk_running(physical) or temp not in {"--", "—"}:
-                health = "正常"
         health_reason = (
             ""
             if health not in {"--", "—"}
@@ -2850,14 +2863,16 @@ def _collect_disk_items() -> List[Dict[str, str]]:
             else "未读到温度（smartctl/nvme/sysfs 均未取得，可能是命令缺失、权限或设备映射限制）"
         )
         m_pick = _patrol_best_mount_for_physical(physical)
-        free_s, size_s = _patrol_disk_space_gb_for_row(m_pick, physical, vol_space_by_physical)
+        free_s, filesystem_size = _patrol_disk_space_gb_for_row(m_pick, physical, vol_space_by_physical)
+        disk_size = _disk_size_gb_for_disk(physical)
         items.append(
             {
                 "name": "",
                 "device": physical,
                 "mount_point": m_pick,
                 "free_gb": free_s if free_s else "--",
-                "size_gb": size_s if size_s else "--",
+                "size_gb": disk_size if disk_size else "--",
+                "filesystem_size_gb": filesystem_size if filesystem_size else "--",
                 "temp_c": temp,
                 "status": health,
                 "temp_reason": temp_reason,
@@ -2974,11 +2989,15 @@ def _send_patrol_notification(
     try:
         from monitor.wan_ip_monitor import check_and_notify_wan_ip_change
 
-        check_and_notify_wan_ip_change(
+        reported_ip = check_and_notify_wan_ip_change(
             app,
             source="patrol",
             known_ip=str(payload.get("wan_ip") or ""),
         )
+        if reported_ip:
+            payload["wan_ip"] = reported_ip
+            if "外网IP" in payload.get("missing_fields", []):
+                payload["missing_fields"].remove("外网IP")
     except Exception as e:
         if logger:
             logger.warning("巡检触发外网 IP 检测失败: %s", e)
@@ -3038,31 +3057,6 @@ def run_nas_patrol_now(app: Any) -> tuple[bool, str]:
         print(f"NAS 巡检：{msg}", flush=True)
         return True, msg
     return False, "巡检推送失败，请查看容器日志与推送记录。"
-
-
-def _patrol_star_interval_seconds(cron_expr: str) -> Optional[int]:
-    """识别 ``*/N * * * *``，返回间隔秒数；其它表达式返回 None。"""
-    try:
-        from utils.cron_util import normalize_cron_expr
-
-        s = normalize_cron_expr(cron_expr or "")
-    except Exception:
-        s = re.sub(r"\s+", " ", (cron_expr or "").strip())
-    parts = s.split(" ")
-    if len(parts) != 5:
-        return None
-    if parts[1:] != ["*", "*", "*", "*"]:
-        return None
-    m = re.fullmatch(r"\*/(\d+)", parts[0])
-    if not m:
-        return None
-    try:
-        n = int(m.group(1))
-    except ValueError:
-        return None
-    if 1 <= n <= 59:
-        return n * 60
-    return None
 
 
 def nas_patrol_worker_loop(app: Any) -> None:
@@ -3129,12 +3123,8 @@ def nas_patrol_worker_loop(app: Any) -> None:
                     state["retry_until_ts"] = 0.0
                     state["retry_backoff_sec"] = RETRY_BACKOFF_BASE_SEC
                     _save_state(sp, state)
-                    interval_s0 = _patrol_star_interval_seconds(cron_expr)
                     try:
-                        if interval_s0 is not None:
-                            nxt = now + float(interval_s0)
-                        else:
-                            nxt = next_cron_timestamp(cron_expr, now)
+                        nxt = next_cron_timestamp(cron_expr, now)
                         wait_min = max(0.0, (nxt - now) / 60.0)
                         nxt_str = datetime.fromtimestamp(nxt).strftime("%Y-%m-%d %H:%M:%S")
                     except Exception as e:
@@ -3168,30 +3158,20 @@ def nas_patrol_worker_loop(app: Any) -> None:
                 state["last_success_ts"] = now
                 _save_state(sp, state)
 
-            interval_s = _patrol_star_interval_seconds(cron_expr)
-            # */N * * * *：只用「距上次成功 N 分钟」，避开 croniter 时区偏差（曾出现 +8 小时）
-            if interval_s is not None:
-                base_ls = last_success if last_success > 0 else now
-                next_ts = base_ls + float(interval_s)
-                if next_ts < now - 5:
-                    next_ts = now
-            else:
-                try:
-                    next_ts = next_cron_timestamp(
-                        cron_expr, last_success if last_success > 0 else now
-                    )
-                except Exception as e:
-                    msg = f"NAS 巡检 Cron 无效 ({cron_expr}): {e}"
-                    log.error(msg)
-                    time.sleep(60)
-                    continue
+            try:
+                next_ts = next_cron_timestamp(
+                    cron_expr, last_success if last_success > 0 else now
+                )
+            except Exception as e:
+                msg = f"NAS 巡检 Cron 无效 ({cron_expr}): {e}"
+                log.error(msg)
+                time.sleep(60)
+                continue
 
             due = now >= next_ts
             if not due:
                 due_at = next_ts
                 sleep_s = min(60.0, max(5.0, due_at - now))
-                if interval_s is not None:
-                    sleep_s = min(sleep_s, float(interval_s))
                 # 下次触发时间不变只记一次
                 if abs(due_at - _last_wait_due) > 1:
                     nxt_str = datetime.fromtimestamp(due_at).strftime("%Y-%m-%d %H:%M:%S")
@@ -3200,8 +3180,7 @@ def nas_patrol_worker_loop(app: Any) -> None:
                 time.sleep(sleep_s)
                 continue
 
-            reason = "间隔已到" if interval_s is not None else "Cron 触发"
-            log.info("NAS 巡检开始采集并推送（Cron=%s，%s）", cron_expr, reason)
+            log.info("NAS 巡检开始采集并推送（Cron=%s）", cron_expr)
             ok = _send_patrol_notification(app, log)
             now_after = time.time()
             if ok:

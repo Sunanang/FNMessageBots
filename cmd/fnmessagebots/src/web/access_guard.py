@@ -80,11 +80,24 @@ def is_loopback_request(environ) -> bool:
         return False
 
 
-def auth_disabled_by_env() -> bool:
-    """仅手装 Docker 等自建反代场景可显式关闭应用内鉴权。"""
-    return (os.getenv("FNMB_DISABLE_AUTH") or "").strip().lower() in ("1", "true", "yes", "on")
-
-
+def client_address(environ) -> str:
+    """仅信任显式配置的反代；从转发链右端剥离可信代理地址。"""
+    peer = (environ.get("REMOTE_ADDR") or "unknown").strip()
+    try:
+        trusted = [ipaddress.ip_network(v.strip(), strict=False)
+                   for v in os.getenv("FNMB_TRUSTED_PROXIES", "").split(",") if v.strip()]
+        peer_ip = ipaddress.ip_address(peer)
+        if not any(peer_ip in network for network in trusted):
+            return peer
+        forwarded = [ipaddress.ip_address(v.strip()) for v in
+                     (environ.get("HTTP_X_FORWARDED_FOR") or "").split(",") if v.strip()]
+        for address in reversed(forwarded):
+            if not any(address in network for network in trusted):
+                return str(address)
+        return str(forwarded[0]) if forwarded else peer
+    except ValueError:
+        # 无效地址/配置不能扩大信任范围。
+        return peer
 class SetupCodeStore:
     """未设密码时生成一次性初始化码：写入配置目录（0600）并打印到运行日志。"""
 
@@ -143,10 +156,20 @@ class LoginRateLimiter:
         self._fails: Dict[str, List[float]] = {}
         self._locked_until: Dict[str, float] = {}
         self._lock = threading.Lock()
+        self._last_cleanup = 0.0
+
+    def _cleanup(self, now: float) -> None:
+        if 0 <= now - self._last_cleanup < 60:
+            return
+        self._locked_until = {key: until for key, until in self._locked_until.items() if until > now}
+        self._fails = {key: recent for key, times in self._fails.items()
+                       if (recent := [t for t in times if now - t < LOGIN_FAILURE_WINDOW_SECONDS])}
+        self._last_cleanup = now
 
     def retry_after(self, key: str) -> int:
         now = time.time()
         with self._lock:
+            self._cleanup(now)
             until = self._locked_until.get(key, 0.0)
             if until > now:
                 return int(until - now) + 1
@@ -156,6 +179,7 @@ class LoginRateLimiter:
     def record_failure(self, key: str) -> None:
         now = time.time()
         with self._lock:
+            self._cleanup(now)
             fails = [t for t in self._fails.get(key, []) if now - t < LOGIN_FAILURE_WINDOW_SECONDS]
             fails.append(now)
             if len(fails) >= LOGIN_MAX_FAILURES:

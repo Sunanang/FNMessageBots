@@ -271,6 +271,7 @@ class TrimActivityPoller:
                 }
         except Exception as e:
             self.logger.warning("构建 trimactivity token 快照失败: %s", e)
+            raise
         state["token_status"] = token_status
         state["initialized"] = True
         self.logger.info(
@@ -469,6 +470,8 @@ class TrimActivityPoller:
     def _run_loop(self) -> None:
         self._load_dedup()
         state = self._load_state()
+        # 每次启动重新建立基线；读取失败时保持未初始化，恢复后也不补历史。
+        state["initialized"] = False
         self.logger.info("TrimActivityPoller 启动 db=%s patterns=%s", self.db_path or "(未配置)", self.app_name_patterns)
         while self.running:
             try:
@@ -500,32 +503,6 @@ class TrimActivityPoller:
                     return
                 time.sleep(1)
 
-    def _align_state_to_latest(self) -> None:
-        """每次启用时对齐到当前数据库水位，避免补发停用期间的存量记录。"""
-        if not self.db_path or not os.path.exists(self.db_path):
-            return
-        try:
-            conn = self._connect()
-        except Exception as e:
-            self.logger.warning("TrimActivityPoller 启动对齐失败（连接数据库失败）: %s", e)
-            return
-        try:
-            state = self._load_state()
-            try:
-                self._baseline(conn, state)
-                self._save_state(state)
-            except sqlite3.Error as e:
-                self.logger.warning(
-                    "TrimActivityPoller 启动对齐失败（将在线程内重试 baseline）: %s",
-                    e,
-                    exc_info=True,
-                )
-        finally:
-            try:
-                conn.close()
-            except Exception:
-                pass
-
     def start(self) -> None:
         if self.running:
             return
@@ -538,7 +515,6 @@ class TrimActivityPoller:
         if not (_ACTIVITY_EVENTS & self.monitor_events):
             self.logger.info("monitor_events 未包含 MEDIA_LOGIN_SUCC/MEDIA_LOGOUT，跳过 TrimActivityPoller")
             return
-        self._align_state_to_latest()
         self.running = True
         self._thread = threading.Thread(target=self._run_loop, name="TrimActivityPoller", daemon=False)
         self._thread.start()

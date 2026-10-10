@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import stat as stat_mod
 from typing import Optional
+from utils.access_guidance import docker_permission_commands, in_container
 
 try:
     import docker as docker_sdk  # type: ignore
@@ -16,7 +17,7 @@ def _mode_str(mode: int) -> str:
     return stat_mod.filemode(mode)
 
 
-def _permission_hint(st: os.stat_result) -> str:
+def _permission_hint(st: os.stat_result, sock_path: str = "/var/run/docker.sock") -> str:
     sock_gid = int(st.st_gid)
     proc_uid = os.getuid()
     proc_gid = os.getgid()
@@ -26,11 +27,15 @@ def _permission_hint(st: os.stat_result) -> str:
         f"当前进程 uid={proc_uid} gid={proc_gid}，附属组 GID={proc_groups}；",
         f"socket 权限 {_mode_str(st.st_mode)}，属主 uid={st.st_uid} gid={sock_gid}。",
     ]
-    if not in_docker_gid:
+    if not in_container():
+        lines.append(
+            f"在 NAS SSH 执行 {docker_permission_commands(sock_path)}，"
+            "在应用中心停止并重新启动应用后再检查；Docker 组等同于宿主 root 级控制能力。"
+        )
+    elif not in_docker_gid:
         lines.append(
             f"在 compose 的 fn-message-bots 服务下增加 "
             f'group_add: ["{sock_gid}"]（或执行 stat -c \'%g\' /var/run/docker.sock 核对 GID）后重建容器；'
-            f"也可临时使用 user: \"0:0\" 以 root 运行（请自行评估安全风险）。"
         )
     return " ".join(lines)
 
@@ -45,13 +50,13 @@ def check_docker_socket_access(sock_path: str) -> Optional[str]:
     try:
         st = os.stat(sp)
     except FileNotFoundError:
-        return (
-            f"Docker：容器内未找到 {sp}。"
-            f"请确认 compose 已挂载宿主 /var/run/docker.sock。"
-            f"{faq}"
-        )
+        action = ("请确认 Compose 已挂载宿主 socket。" if in_container()
+                  else "请确认 Docker 已安装、服务已启动，且 socket 路径正确。")
+        return f"Docker：未找到 {sp}。{action}{faq}"
     except PermissionError:
         return f"Docker：无法访问 {sp}（stat 被拒绝）。{faq}"
+    except OSError as exc:
+        return f"Docker：无法检查 {sp}（{exc}）。{faq}"
 
     if not stat_mod.S_ISSOCK(st.st_mode):
         return (
@@ -68,12 +73,12 @@ def check_docker_socket_access(sock_path: str) -> Optional[str]:
         except Exception as api_err:
             if os.access(sp, os.R_OK | os.W_OK):
                 return (
-                    f"Docker：已挂载 {sp} 且文件可读写，但连接 Docker Engine 失败（{api_err}）。"
+                    f"Docker：{sp} 可读写，但连接 Docker Engine 失败（{api_err}）。"
                     f"请确认宿主 Docker 服务正常。{faq}"
                 )
             return (
-                f"Docker：已挂载 {sp} 但当前进程无法读写（{api_err}）。"
-                f"{_permission_hint(st)} {faq}"
+                f"Docker：{sp} 当前进程无法读写（{api_err}）。"
+                f"{_permission_hint(st, sp)} {faq}"
             )
         finally:
             if client is not None:
@@ -86,6 +91,6 @@ def check_docker_socket_access(sock_path: str) -> Optional[str]:
         return None
 
     return (
-        f"Docker：已挂载 {sp} 但当前进程无法读写。"
-        f"{_permission_hint(st)} {faq}"
+        f"Docker：{sp} 当前进程无法读写。"
+        f"{_permission_hint(st, sp)} {faq}"
     )

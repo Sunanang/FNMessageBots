@@ -2,7 +2,7 @@
     ".url": {
         "FnMessageBot.Application": {
             "title": "日志推送",
-            "icon": "images/icon-{0}.png",
+            "icon": "images/icon-{0}.webp",
             "type": "iframe",
             "protocol": "",
             "gatewayPrefix": "/app/FnMessageBot",

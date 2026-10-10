@@ -5,10 +5,9 @@ import os
 import re
 import secrets
 import socket
-import sqlite3
-import stat
 import sys
 import threading
+from functools import wraps
 from pathlib import Path
 from utils.value_parser import as_bool
 
@@ -19,7 +18,7 @@ if __name__ == "__main__":
     if _src.exists() and str(_src) not in sys.path:
         sys.path.insert(0, str(_src))
 
-from flask import Flask, jsonify, request, render_template, send_from_directory, abort, redirect
+from flask import Flask, jsonify, request, render_template, send_from_directory, abort, redirect, url_for, g
 
 from notifier.channel_params import validate_channel_json
 from notifier.multi_platform_notifier import MultiPlatformNotifier
@@ -27,9 +26,8 @@ from web.access_guard import GatewayPrefixMiddleware
 from web.access_guard import LoginRateLimiter
 from web.access_guard import SetupCodeStore
 from web.access_guard import StripGatewayHeadersMiddleware
-from web.access_guard import auth_disabled_by_env as _auth_disabled_by_env
 from web.access_guard import gateway_identity as _gateway_identity_from_environ
-from web.access_guard import is_loopback_request as _is_loopback_request_environ
+from web.access_guard import client_address
 from web.auth_service import PASSWORD_MIN_LENGTH
 from web.auth_service import apply_new_password as _apply_new_password
 from web.auth_service import get_password_config as _get_password_config
@@ -38,8 +36,8 @@ from web.auth_service import verify_password as _verify_password
 from web.api_helpers import build_notifier_from_raw as _build_notifier_from_raw
 from web.api_helpers import parse_success_filter as _parse_success_filter
 from web.app_paths import BASE_DIR
+from web.app_paths import ASSETS_DIR
 from web.app_paths import CONFIG_FILE
-from web.app_paths import GITHUB_ICON_FILE
 from web.app_paths import ICON_FILE
 from web.app_paths import SUPPORT_QR_DIR
 from web.app_paths import SUPPORT_QR_FILENAMES
@@ -70,19 +68,33 @@ from web.event_catalog import EVENT_IDS_HIDDEN_IN_UI
 from web.event_catalog import OLD_DEFAULT_SELECTED_EVENTS_WITH_EXTRA
 from web.event_catalog import build_events_for_ui
 from config_db_paths import apply_discovered_db_paths
-from monitor.docker_events_poller import DOCKER_POLL_EVENTS
-from monitor.docker_socket_access import check_docker_socket_access
 from web.push_history_service import get_record as get_push_history_record
 from web.push_history_service import get_stats as get_push_history_stats
 from web.push_history_service import list_records as list_push_history_records
 from web.session_service import create_session as _create_session
 from web.session_service import touch_session as _touch_session
-from monitor.sqlite_uri import connect_readonly_with_fallback
+from web.session_service import session_remaining_seconds as _session_remaining_seconds
+from web.session_service import delete_session as _delete_session
+from web.access_diagnostics import collect_access_warnings as _collect_external_db_access_warnings
+from web.access_diagnostics import warning_messages
 
 # 配置页密码：会话空闲超时（秒），超时后需重新输入密码
-SESSION_IDLE_SECONDS = 300
+SESSION_IDLE_SECONDS = 15 * 60
 AUTH_COOKIE_NAME = "fnmb_session"
 _TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
+_config_lock = threading.RLock()
+
+
+def _config_transaction(fn):
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        with _config_lock:
+            return fn(*args, **kwargs)
+    return wrapped
+
+
+def _auth_cookie_path() -> str:
+    return (request.script_root or "").rstrip("/") + "/"
 
 
 def _session_cookie_secure() -> bool:
@@ -100,7 +112,7 @@ def _auth_cookie_kwargs() -> dict:
         "max_age": SESSION_IDLE_SECONDS,
         "httponly": True,
         "samesite": "Lax",
-        "path": "/",
+        "path": _auth_cookie_path(),
         "secure": _session_cookie_secure(),
     }
 
@@ -110,7 +122,11 @@ def _has_password_set() -> bool:
 
 
 def _get_session_id_from_cookie() -> str:
-    return (request.cookies.get(AUTH_COOKIE_NAME) or "").strip()
+    # 浏览器可能同时持有旧根路径和网关路径的同名 Cookie；按服务端作用域选有效会话。
+    for sid in request.cookies.getlist(AUTH_COOKIE_NAME):
+        if _session_remaining_seconds(sid, SESSION_IDLE_SECONDS, scope=_auth_cookie_path()) > 0:
+            return sid
+    return ""
 
 
 _setup_codes = SetupCodeStore(CONFIG_FILE.parent / ".setup_code")
@@ -122,27 +138,27 @@ def _gateway_identity():
 
 
 def _is_authenticated() -> bool:
-    """统一网关的 NAS 管理员、显式关闭鉴权的部署，或持有有效会话。"""
+    """两版均要求应用密码会话；网关管理员身份不能代替应用登录。"""
     gw = _gateway_identity()
-    if gw is not None:
-        return bool(gw["is_admin"])
-    if _auth_disabled_by_env():
-        return True
-    return _touch_session(_get_session_id_from_cookie(), SESSION_IDLE_SECONDS)
+    if gw is not None and not gw["is_admin"]:
+        return False
+    return _session_remaining_seconds(_get_session_id_from_cookie(), SESSION_IDLE_SECONDS, scope=_auth_cookie_path()) > 0
 
 
 def _setup_requires_code() -> bool:
-    """网关管理员与本机回环请求可直接设密，其余来源需要初始化码。"""
+    """仅可信网关管理员免初始化码；TCP 包括回环和反代均需要码。"""
     gw = _gateway_identity()
     if gw is not None and gw["is_admin"]:
         return False
-    return not _is_loopback_request_environ(request.environ)
+    return True
 
 
 def _client_key() -> str:
-    return (request.remote_addr or "unknown").strip()
+    gw = _gateway_identity()
+    return f"gateway:{gw['uid']}" if gw is not None else client_address(request.environ)
 
 
+@_config_transaction
 def _apply_initial_password_from_env() -> None:
     """FNMB_WEB_PASSWORD：未设密码时用作初始密码（手装 Docker 可在 compose 中预置）。"""
     pw = (os.getenv("FNMB_WEB_PASSWORD") or "").strip()
@@ -196,158 +212,6 @@ def _events_catalog_bundle():
     )
 
 
-def _mode_str(mode: int) -> str:
-    return stat.filemode(mode)
-
-
-def _docker_socket_access_warning(sock_path: str) -> str | None:
-    """勾选 Docker 容器事件时检测 socket；详见 /faq#faq-docker-sock。"""
-    return check_docker_socket_access(sock_path)
-
-
-def _check_db_access_issue(db_path: str, probe_sql: str = "SELECT 1") -> str:
-    """检查数据库可读性并返回可读提示；无问题时返回空字符串。"""
-    path = (db_path or "").strip()
-    if not path:
-        return ""
-
-    p = Path(path)
-    chain = [Path("/")]
-    for item in p.parts[1:-1]:
-        chain.append(chain[-1] / item)
-
-    for d in chain:
-        try:
-            st = d.stat()
-            can_enter = os.access(d, os.X_OK)
-            can_read = os.access(d, os.R_OK)
-            if not can_enter or not can_read:
-                return (
-                    f"{path}: 目录 `{d}` 权限不足（{_mode_str(st.st_mode)}）。"
-                    f" 建议 `chmod 755 '{d}'`，或 `chown/chmod 750` 给服务用户。"
-                )
-        except FileNotFoundError:
-            return f"{path}: 目录不存在 `{d}`。"
-        except PermissionError:
-            return f"{path}: 当前进程无权限访问目录 `{d}`。"
-        except Exception as e:
-            return f"{path}: 目录检查失败 `{d}`（{e}）。"
-
-    try:
-        st = p.stat()
-        if not os.access(p, os.R_OK):
-            return (
-                f"{path}: 文件不可读（{_mode_str(st.st_mode)}）。"
-                f" 建议 `chmod 644 '{p}'`，或 `chown/chmod 640` 给服务用户。"
-            )
-    except FileNotFoundError:
-        return f"{path}数据库文件不存在。"
-    except PermissionError:
-        return f"{path}: 当前进程无权限访问数据库文件 `{p}`。"
-    except Exception as e:
-        return f"{path}: 文件检查失败 `{p}`（{e}）。"
-
-    try:
-        conn = connect_readonly_with_fallback(path, timeout=2.0, table_probe_sql=probe_sql)
-        conn.close()
-    except Exception as e:
-        return f"{path}: 路径权限看起来正常，但数据库探测失败（{e}）。"
-    return ""
-
-
-def _collect_external_db_access_warnings(raw_cfg: dict, events: list[str]) -> list[str]:
-    """按已选择事件收集外部数据库权限/可读性告警。"""
-    monitor_events = set(events or [])
-    warnings: list[str] = []
-
-    backup_events = {"BACKUP_TASK_SUCCESS", "BACKUP_TASK_FAILED", "BACKUP_TASK_PARTIAL_SUCCESS"}
-    trimmedia_events = {"TRIM_RESOURCE_ADDED", "TRIM_SCRAPE_SUCCESS"}
-    trimactivity_events = {"MEDIA_LOGIN_SUCC", "MEDIA_LOGOUT"}
-    photo_events = {"PHOTO_SHARE_CREATED", "PHOTO_SHARE_EXPIRED", "PHOTO_DEVICE_REGISTERED", "FACE_RECOGNITION_UPDATED"}
-
-    if monitor_events & backup_events:
-        backup_db_path = (raw_cfg.get("backup_db_path") or "").strip()
-        if not backup_db_path:
-            warnings.append(
-                "备份库: 未找到数据库（config 中 backup_db_path 为空，且容器内未探测到 basic_backup.db3；"
-                "请确认 compose 已挂载 backup_service 目录）。"
-            )
-        else:
-            issue = _check_db_access_issue(
-                backup_db_path,
-                "SELECT id FROM operations ORDER BY id DESC LIMIT 1",
-            )
-            if issue:
-                warnings.append(f"备份库: {issue}")
-
-    if monitor_events & trimmedia_events:
-        trim_media_db_path = (raw_cfg.get("trim_media_db_path") or "").strip()
-        if not trim_media_db_path:
-            warnings.append(
-                "影视库: 未找到 trimmedia.db（请确认 compose 已挂载 trim.media/database 或填写 trim_media_db_path）。"
-            )
-        else:
-            issue = _check_db_access_issue(
-                trim_media_db_path,
-                "SELECT guid FROM item LIMIT 1",
-            )
-            if issue:
-                warnings.append(f"影视库: {issue}")
-
-    if monitor_events & trimactivity_events:
-        trim_activity_db_path = (raw_cfg.get("trim_activity_db_path") or "").strip()
-        if not trim_activity_db_path:
-            warnings.append(
-                "影视库: 未找到 trimactivity.db（请确认 compose 已挂载 trim.media/database 或填写 trim_activity_db_path）。"
-            )
-        else:
-            issue = _check_db_access_issue(
-                trim_activity_db_path,
-                "SELECT token FROM user_token LIMIT 1",
-            )
-            if issue:
-                warnings.append(f"影视库: {issue}")
-
-    if monitor_events & photo_events:
-        photo_db_path = (raw_cfg.get("photo_db_path") or "").strip()
-        if not photo_db_path:
-            warnings.append(
-                "相册库: 未找到 photo.db（请确认 compose 已挂载 trim.photos/db 或填写 photo_db_path）。"
-            )
-        else:
-            issue = _check_db_access_issue(
-                photo_db_path,
-                "SELECT id FROM share_link LIMIT 1",
-            )
-            if issue:
-                warnings.append(f"相册库: {issue}")
-
-    docker_ev = set(DOCKER_POLL_EVENTS)
-    if monitor_events & docker_ev:
-        sock = (raw_cfg.get("docker_socket_path") or "").strip() or "/var/run/docker.sock"
-        docker_warn = _docker_socket_access_warning(sock)
-        if docker_warn:
-            warnings.append(docker_warn)
-
-    scheduler_events = {"SCHEDULER_TASK_SUCCESS", "SCHEDULER_TASK_FAILED", "SCHEDULER_TASK_CONDITION_FAILED"}
-    if monitor_events & scheduler_events:
-        scheduler_db_path = (raw_cfg.get("scheduler_db_path") or "").strip()
-        if not scheduler_db_path:
-            warnings.append(
-                "任务计划库: 未找到 scheduler.db（请挂载 fn-scheduler 数据目录并在 config 填写 scheduler_db_path，"
-                "常见为 /var/apps/fn-scheduler/var/scheduler.db）。"
-            )
-        else:
-            issue = _check_db_access_issue(
-                scheduler_db_path,
-                "SELECT id FROM task_results LIMIT 1",
-            )
-            if issue:
-                warnings.append(f"任务计划库: {issue}")
-
-    return warnings
-
-
 def create_app(on_config_saved=None) -> Flask:
     """创建 Flask 应用。on_config_saved: 保存配置成功后的回调（用于热加载，无需重启）。"""
     app = Flask(__name__, template_folder=str(_TEMPLATE_DIR))
@@ -357,12 +221,10 @@ def create_app(on_config_saved=None) -> Flask:
     # 页面均位于根路径下一级，统一用相对地址，兼容统一网关的 /app/<appname>/ 前缀
     icon_url = f"assets/icons/app-icon.png?v={icon_ver}" if icon_ver else ""
     favicon_url = f"favicon.ico?v={icon_ver}" if icon_ver else ""
-    gh_ver = str(int(GITHUB_ICON_FILE.stat().st_mtime)) if GITHUB_ICON_FILE.exists() else ""
-    github_icon_url = f"assets/icons/github.svg?v={gh_ver}" if gh_ver else "assets/icons/github.svg"
     _apply_initial_password_from_env()
-    if not _has_password_set() and not _auth_disabled_by_env():
+    if not _has_password_set():
         _setup_codes.ensure()
-    assets_dir = BASE_DIR / "assets"
+    assets_dir = ASSETS_DIR
 
     @app.get("/assets/<path:filename>")
     def serve_assets(filename: str):
@@ -385,6 +247,10 @@ def create_app(on_config_saved=None) -> Flask:
     @app.after_request
     def _no_index(resp):
         resp.headers.setdefault("X-Robots-Tag", "noindex, nofollow, noarchive")
+        if request.path == "/" or request.path.startswith("/api/") or resp.mimetype == "text/html":
+            resp.headers["Cache-Control"] = "no-store"
+        if getattr(g, "refresh_auth_cookie", False) and _is_authenticated():
+            resp.set_cookie(AUTH_COOKIE_NAME, _get_session_id_from_cookie(), **_auth_cookie_kwargs())
         return resp
 
     CHANNEL_OPTIONS = [
@@ -408,6 +274,8 @@ def create_app(on_config_saved=None) -> Flask:
         "/api/auth/status",
         "/api/auth/login",
         "/api/auth/set-password",
+        "/api/auth/logout",
+        "/session-guard.js",
     }
     PUBLIC_PREFIXES = ("/assets/",)
 
@@ -432,6 +300,11 @@ def create_app(on_config_saved=None) -> Flask:
         if config_error:
             return jsonify(_config_load_error_payload(config_error)), 500
         if _is_authenticated():
+            # 写操作代表用户交互；统计、配置读取和身份轮询均不续期。
+            if request.method == "POST" and not _touch_session(_get_session_id_from_cookie(), SESSION_IDLE_SECONDS, scope=_auth_cookie_path()):
+                return jsonify({"ok": False, "message": "会话已过期，请重新输入密码。"}), 401
+            if request.method == "POST":
+                g.refresh_auth_cookie = True
             return None
         if path.startswith("/api/"):
             return jsonify({
@@ -463,11 +336,31 @@ def create_app(on_config_saved=None) -> Flask:
             "authenticated": authenticated,
             "via_gateway": _gateway_identity() is not None,
             "password_min_length": PASSWORD_MIN_LENGTH,
+            "idle_seconds": SESSION_IDLE_SECONDS,
+            "remaining_seconds": _session_remaining_seconds(_get_session_id_from_cookie(), SESSION_IDLE_SECONDS, scope=_auth_cookie_path()),
         })
 
+    @app.post("/api/auth/activity")
+    def auth_activity():
+        """前端仅在真实用户交互后调用；鉴权钩子已刷新活跃时间。"""
+        return jsonify({"ok": True, "authenticated": True, "idle_seconds": SESSION_IDLE_SECONDS,
+                        "remaining_seconds": _session_remaining_seconds(_get_session_id_from_cookie(), SESSION_IDLE_SECONDS, scope=_auth_cookie_path())})
+
+    @app.post("/api/auth/logout")
+    def auth_logout():
+        _delete_session(_get_session_id_from_cookie(), scope=_auth_cookie_path())
+        resp = jsonify({"ok": True})
+        resp.delete_cookie(AUTH_COOKIE_NAME, path=_auth_cookie_path(), secure=_session_cookie_secure(), httponly=True, samesite="Lax")
+        return resp
+
+    @app.get("/session-guard.js")
+    def session_guard_js():
+        return send_from_directory(str(_TEMPLATE_DIR.parent / "static"), "session-guard.js")
+
     @app.post("/api/auth/set-password")
+    @_config_transaction
     def auth_set_password():
-        """首次设置密码：网关管理员/本机可直接设置，其余来源须提供初始化码。"""
+        """首次设置密码：可信网关管理员可直接设置，TCP 来源须提供初始化码。"""
         config_error = _current_config_load_error()
         if config_error:
             return jsonify(_config_load_error_payload(config_error)), 500
@@ -499,7 +392,8 @@ def create_app(on_config_saved=None) -> Flask:
             return jsonify({"ok": False, "message": f"保存失败：{e}"}), 500
         _setup_codes.clear()
         _login_limiter.reset(key)
-        session_id = _create_session()
+        _delete_session(_get_session_id_from_cookie(), scope=_auth_cookie_path())
+        session_id = _create_session(SESSION_IDLE_SECONDS, scope=_auth_cookie_path())
         resp = jsonify({"ok": True, "message": "密码设置成功。"})
         resp.set_cookie(AUTH_COOKIE_NAME, session_id, **_auth_cookie_kwargs())
         return resp
@@ -528,7 +422,8 @@ def create_app(on_config_saved=None) -> Flask:
             _login_limiter.record_failure(key)
             return jsonify({"ok": False, "message": "密码错误。"}), 401
         _login_limiter.reset(key)
-        session_id = _create_session()
+        _delete_session(_get_session_id_from_cookie(), scope=_auth_cookie_path())
+        session_id = _create_session(SESSION_IDLE_SECONDS, scope=_auth_cookie_path())
         resp = jsonify({"ok": True, "message": "登录成功。"})
         resp.set_cookie(AUTH_COOKIE_NAME, session_id, **_auth_cookie_kwargs())
         return resp
@@ -537,7 +432,7 @@ def create_app(on_config_saved=None) -> Flask:
     def get_config():
         raw = _load_raw_config()
 
-        # 迁移：旧版默认多勾了「应用启动/自启动失败、UPS 开启/关闭」或「应用生命周期」时，改为新默认并回写
+        # 兼容旧版默认事件：仅在返回数据中迁移，用户保存时再写入，GET 不回写配置
         raw_events = raw.get("monitor_events")
         if isinstance(raw_events, list):
             raw_set = set(raw_events)
@@ -547,12 +442,10 @@ def create_app(on_config_saved=None) -> Flask:
             old_full_default = new_default_set | APP_LIFECYCLE_EVENTS
             if raw_set == old_default_with_extra:
                 raw["monitor_events"] = DEFAULT_SELECTED_EVENTS
-                _save_raw_config(raw)
                 monitor_events = DEFAULT_SELECTED_EVENTS
             elif raw_set == old_full_default:
                 filtered = [e for e in raw_events if e not in APP_LIFECYCLE_EVENTS]
                 raw["monitor_events"] = filtered
-                _save_raw_config(raw)
                 monitor_events = filtered
             else:
                 monitor_events = raw_events
@@ -600,10 +493,13 @@ def create_app(on_config_saved=None) -> Flask:
             "nas_patrol_cron": _cron,
             "channel_options": CHANNEL_OPTIONS,
         }
-        db_access_warnings = _collect_external_db_access_warnings(raw, monitor_events)
-        return jsonify({"ok": True, "data": data, "warnings": db_access_warnings})
+        # 保存后刷新表单无需重复探测设备，保留保存响应中的检查结果。
+        db_access_warnings = (_collect_external_db_access_warnings(raw, monitor_events)
+                              if request.args.get("check_access") != "0" else [])
+        return jsonify({"ok": True, "data": data, "warnings": warning_messages(db_access_warnings), "warning_details": db_access_warnings})
 
     @app.post("/api/save-config")
+    @_config_transaction
     def save_config():
         payload = request.get_json(silent=True) or {}
 
@@ -767,26 +663,20 @@ def create_app(on_config_saved=None) -> Flask:
             return jsonify({"ok": False, "message": f"配置写入失败（{e}），请检查 config 目录是否可写。"}), 500
 
         db_access_warnings = _collect_external_db_access_warnings(raw, events)
-        if nas_patrol_cron and not nas_patrol_enabled:
-            db_access_warnings = list(db_access_warnings or [])
-            db_access_warnings.append(
-                "已填写巡检 Cron，但未勾选「巡检任务」：定时不会自动执行（「立即巡检一次」仍可用）。"
-            )
-
         if callable(on_config_saved):
             try:
                 on_config_saved()
             except Exception as e:
                 return jsonify({
                     "ok": True,
-                    "message": f"配置已保存，但热加载失败（{e}），请重启容器后生效。",
-                    "warnings": db_access_warnings,
+                    "message": f"配置已保存，但热加载失败（{e}），请停止并重新启动应用后生效。",
+                    "warnings": warning_messages(db_access_warnings), "warning_details": db_access_warnings,
                 }), 200
 
         return jsonify({
             "ok": True,
-            "message": "配置已保存，监控已热加载生效，无需重启容器。",
-            "warnings": db_access_warnings,
+            "message": "配置已保存，以下数据源仍需处理。" if db_access_warnings else "配置已保存，监控已热加载生效。",
+            "warnings": warning_messages(db_access_warnings), "warning_details": db_access_warnings,
         })
 
     @app.post("/api/test")
@@ -851,7 +741,11 @@ def create_app(on_config_saved=None) -> Flask:
 
             ok, message = run_nas_patrol_now(runtime)
             if ok:
-                return jsonify({"ok": True, "message": message})
+                raw = _load_raw_config()
+                access_warnings = _collect_external_db_access_warnings(
+                    raw, raw.get("monitor_events") or [], include_patrol=True)
+                return jsonify({"ok": True, "message": message,
+                                "warnings": warning_messages(access_warnings), "warning_details": access_warnings})
             return jsonify({"ok": False, "message": message}), 500
         except Exception as e:
             return jsonify({"ok": False, "message": f"巡检执行异常：{e}"}), 500
@@ -924,12 +818,12 @@ def create_app(on_config_saved=None) -> Flask:
     def support_page():
         """支持作者：展示 README 中与捐赠说明一致的收款二维码。"""
         wechat_src = (
-            "support/img/wechat_pay.jpg"
+            url_for("support_qr", name="wechat_pay.jpg")
             if SUPPORT_QR_DIR.is_dir() and (SUPPORT_QR_DIR / "wechat_pay.jpg").is_file()
             else ""
         )
         ali_src = (
-            "support/img/ali_pay.jpg"
+            url_for("support_qr", name="ali_pay.jpg")
             if SUPPORT_QR_DIR.is_dir() and (SUPPORT_QR_DIR / "ali_pay.jpg").is_file()
             else ""
         )
@@ -947,12 +841,13 @@ def create_app(on_config_saved=None) -> Flask:
 
     @app.get("/")
     def index():
-        """单页应用（模板见 templates/index.html）。"""
+        """重新打开或刷新时复用未过期的会话，不恢复已过期会话。"""
+        if _touch_session(_get_session_id_from_cookie(), SESSION_IDLE_SECONDS, scope=_auth_cookie_path()):
+            g.refresh_auth_cookie = True
         return render_template(
             "index.html",
             icon_url=icon_url,
             favicon_url=favicon_url,
-            github_icon_url=github_icon_url,
         )
 
 
@@ -975,11 +870,14 @@ def start_ui_server_in_background(on_config_saved=None):
 
     app = create_app(on_config_saved=on_config_saved)
     host = (os.getenv("UI_HOST") or "0.0.0.0").strip() or "0.0.0.0"
-    port = int(os.getenv("UI_PORT", "18080"))
-
-    tcp_server = make_server(host, port, StripGatewayHeadersMiddleware(app.wsgi_app), threaded=True)
-    print(f"配置 UI 监听 http://{host}:{port}")
-    thread = _serve_forever(tcp_server, "FnMessageBots-UI")
+    threads = []
+    try:
+        port = int(os.getenv("UI_PORT", "18080"))
+        tcp_server = make_server(host, port, StripGatewayHeadersMiddleware(app.wsgi_app), threaded=True)
+        print(f"配置 UI 监听 http://{host}:{port}")
+        threads.append(_serve_forever(tcp_server, "FnMessageBots-UI"))
+    except (Exception, SystemExit) as e:
+        print(f"TCP 配置入口启动失败（{e}），继续尝试统一网关")
 
     sock_path = (os.getenv("FNMB_GATEWAY_SOCKET") or "").strip()
     if sock_path:
@@ -991,10 +889,12 @@ def start_ui_server_in_background(on_config_saved=None):
                 f"unix://{sock_path}", 0, GatewayPrefixMiddleware(app.wsgi_app, prefix), threaded=True
             )
             print(f"统一网关 Socket 已监听：{sock_path}（前缀 {prefix or '/'}）")
-            _serve_forever(gw_server, "FnMessageBots-Gateway")
-        except Exception as e:
-            print(f"统一网关 Socket 监听失败（{e}），仅提供 TCP 访问")
-    return thread
+            threads.append(_serve_forever(gw_server, "FnMessageBots-Gateway"))
+        except (Exception, SystemExit) as e:
+            print(f"统一网关 Socket 监听失败（{e}）")
+    if not threads:
+        raise RuntimeError("配置 UI 的所有入口均启动失败，请检查端口和 Socket 权限")
+    return threads[0]
 
 
 if __name__ == "__main__":

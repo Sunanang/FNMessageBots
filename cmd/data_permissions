@@ -1,0 +1,30 @@
+#!/bin/bash
+# 仅处理应用自己的数据目录；普通身份不能修改旧 root 文件时，提前给出修复命令。
+prepare_app_data_permissions() {
+    local data_dir account group repair root_entry
+    account="${TRIM_USERNAME:-FnMessageBot}"
+    group="$(id -gn "${account}")" || fail_user_visible "无法找到应用用户 ${account}，请检查应用权限配置。"
+    data_dir="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "${TRIM_PKGVAR}")" || return 1
+    case "${data_dir}" in
+        */"${TRIM_APPNAME:-FnMessageBot}"|/var/apps/"${TRIM_APPNAME:-FnMessageBot}"/var) ;;
+        *) fail_user_visible "应用数据目录异常，拒绝修改权限：${data_dir}" ;;
+    esac
+    [ -d "${data_dir}" ] || return 0
+    printf -v repair 'sudo chown -hR -P -- %q %q' "${account}:${group}" "${data_dir}"
+    if [ "$(id -u)" = "0" ]; then
+        # -h -P 保证只改目录中的链接本身，不跟随链接修改系统 Python 等外部文件。
+        chown -hR -P -- "${account}:${group}" "${data_dir}" || fail_user_visible "应用数据权限迁移失败。停止应用后在 NAS SSH 执行：${repair}；完成后重新安装或升级。"
+        return 0
+    fi
+    root_entry="$(find -P "${data_dir}" -xdev -user root -print -quit 2>/dev/null)" || \
+        fail_user_visible "无法检查旧应用数据权限。停止应用后在 NAS SSH 执行：${repair}；完成后重新安装或升级。"
+    if [ -n "${root_entry}" ] || [ ! -w "${data_dir}" ]; then
+        fail_user_visible "旧版本应用数据仍由 root 管理，普通版无法读写。停止应用后在 NAS SSH 执行：${repair}；完成后重新安装或升级。"
+    fi
+    local entry
+    for entry in config/config.json info.log app.pid; do
+        if [ -e "${data_dir}/${entry}" ] && { [ ! -r "${data_dir}/${entry}" ] || [ ! -w "${data_dir}/${entry}" ]; }; then
+            fail_user_visible "应用数据不可读写：${data_dir}/${entry}。请检查该文件的属主和权限，再重新安装或升级。"
+        fi
+    done
+}

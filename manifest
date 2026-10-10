@@ -10,5 +10,4 @@ maintainer            = Lando
 distributor           = Lando
 desktop_uidir         = ui
 desktop_applaunchname = FnMessageBot.Application
-service_port          = 18230
-checkport             = true
+checkport             = false

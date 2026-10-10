@@ -83,12 +83,22 @@ if [ ! -f "${REQ_FILE}" ]; then
     fail_user_visible "安装失败：未找到依赖文件 requirements.txt（${REQ_FILE}）。${_INSTALL_FAIL_DOCKER_HINT}"
 fi
 
+source "$(dirname "${BASH_SOURCE[0]}")/data_permissions"
+prepare_app_data_permissions
+
 mkdir -p "${TRIM_PKGVAR}" "${TRIM_PKGVAR}/config" "${TRIM_PKGVAR}/data/logs" "${TRIM_PKGVAR}/data/cursor"
 
 if ! touch "${TRIM_PKGVAR}/.fnmb_wtest" 2>/dev/null; then
     fail_user_visible "安装失败：无法在数据目录写入（${TRIM_PKGVAR}）。${_INSTALL_FAIL_DOCKER_HINT}"
 fi
 rm -f "${TRIM_PKGVAR}/.fnmb_wtest"
+
+source "$(dirname "${BASH_SOURCE[0]}")/ui_port"
+if [ "${wizard_ui_port+x}" = x ]; then
+    save_fnmb_ui_port "${wizard_ui_port}"
+else
+    save_fnmb_ui_port
+fi
 
 # 初始化配置（仅首次）
 if [ ! -f "${TRIM_PKGVAR}/config/config.json" ]; then
@@ -216,5 +226,7 @@ elif [ -f "${TRIM_PKGVAR}/.use_python_target" ] && [ -d "${PY_TARGET}" ]; then
 elif ! _install_with_venv; then
     _install_with_target
 fi
+
+prepare_app_data_permissions
 
 exit 0

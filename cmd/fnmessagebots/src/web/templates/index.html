@@ -499,6 +499,18 @@
     .warning-panel-item:last-of-type {
       margin-bottom: 0;
     }
+    .warning-panel-item details { margin-top: 8px; }
+    .warning-panel-item summary { cursor: pointer; }
+    .warning-panel-item pre {
+      overflow: auto;
+      max-height: 300px;
+      padding: 10px;
+      border: 1px solid currentColor;
+      border-radius: 6px;
+      white-space: pre;
+      font-size: 12px;
+      line-height: 1.5;
+    }
     .warning-panel-item a {
       color: #2563eb;
       text-decoration: underline;
@@ -613,9 +625,6 @@
     }
     html[data-theme="dark"] .home-footer .footer-link {
       color: #d1d5db;
-    }
-    html[data-theme="dark"] .home-footer .footer-github-icon {
-      filter: invert(1) brightness(1.05);
     }
     .license-footer {
       margin: 0;
@@ -798,6 +807,7 @@
       font-size: 13px;
     }
   </style>
+  <script src="{{ url_for('session_guard_js') }}"></script>
 </head>
 <body>
   <div id="auth-gate" class="auth-page" style="display:none;">
@@ -821,7 +831,7 @@
       </div>
       <div id="auth-login" style="display:none;">
         <div class="auth-title">输入访问密码</div>
-        <div class="auth-sub">会话有效期为 5 分钟，关闭页面后若未超时无需重新输入</div>
+        <div class="auth-sub">登录后连续 15 分钟无操作才需重新输入密码；未过期时打开或刷新可直接进入</div>
         <form class="auth-form" id="form-login">
           <div class="field-label">密码</div>
           <input type="password" id="login-password" placeholder="请输入密码" autocomplete="current-password" />
@@ -829,6 +839,7 @@
         </form>
         <div id="auth-login-msg" class="auth-msg"></div>
       </div>
+      <button type="button" id="auth-retry-btn" class="btn btn-ghost" style="display:none; margin-top:16px;">重新连接</button>
     </div>
     <p class="license-footer">© 2024 Sunanang · FnMessageBot · MIT License terms apply.</p>
   </div>
@@ -966,7 +977,7 @@
             <input type="checkbox" id="input-dnd-enabled" />
             <span>勿扰模式</span>
           </div>
-          <div class="field-helper" style="margin-bottom: 10px;">开启后，在设定时段内不推送消息；结束后将本时段事件汇总为一条推送。</div>
+          <div class="field-helper" style="margin-bottom: 10px;">按系统本地时区，在设定时段内不推送消息；结束后将本时段事件汇总为一条推送。</div>
           <div class="system-grid" style="grid-template-columns: 1fr 1fr;">
             <div>
               <div class="field-label">开始时间</div>
@@ -1002,7 +1013,7 @@
       <div class="footer-actions">
         <button class="btn btn-primary" id="save-btn" type="button">保存配置</button>
       </div>
-      <div id="warning-panel" class="warning-panel"></div>
+      <div id="warning-panel" class="warning-panel" role="status" aria-live="polite"></div>
 
       <div class="section test-section">
         <div class="section-title">
@@ -1017,7 +1028,9 @@
 
       <div class="home-footer">
         <a class="footer-link" href="https://github.com/Sunanang/FNMessageBots" target="_blank" rel="noopener noreferrer">
-          <img class="footer-github-icon" src="{{ github_icon_url }}" alt="" width="18" height="18" decoding="async" />
+          <svg class="footer-github-icon" width="18" height="18" viewBox="0 0 32 32" fill="currentColor" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
+            <path fill-rule="evenodd" clip-rule="evenodd" d="M16 0C7.16 0 0 7.16 0 16C0 23.08 4.58 29.06 10.94 31.18C11.74 31.32 12.04 30.84 12.04 30.42C12.04 30.04 12.02 28.78 12.02 27.44C8 28.18 6.96 26.46 6.64 25.56C6.46 25.1 5.68 23.68 5 23.3C4.44 23 3.64 22.26 4.98 22.24C6.24 22.22 7.14 23.4 7.44 23.88C8.88 26.3 11.18 25.62 12.1 25.2C12.24 24.16 12.66 23.46 13.12 23.06C9.56 22.66 5.84 21.28 5.84 15.16C5.84 13.42 6.46 11.98 7.48 10.86C7.32 10.46 6.76 8.82 7.64 6.62C7.64 6.62 8.98 6.2 12.04 8.26C13.32 7.9 14.68 7.72 16.04 7.72C17.4 7.72 18.76 7.9 20.04 8.26C23.1 6.18 24.44 6.62 24.44 6.62C25.32 8.82 24.76 10.46 24.6 10.86C25.62 11.98 26.24 13.4 26.24 15.16C26.24 21.3 22.5 22.66 18.94 23.06C19.52 23.56 20.02 24.52 20.02 26.02C20.02 28.16 20 29.88 20 30.42C20 30.84 20.3 31.34 21.1 31.18C27.42 29.06 32 23.06 32 16C32 7.16 24.84 0 16 0V0Z" />
+          </svg>
           开源地址
         </a>
         <span class="footer-sep" aria-hidden="true">·</span>
@@ -1086,14 +1099,42 @@
 
     let setupRequiresCode = false;
     let passwordMinLength = 8;
+    let authRequestNumber = 0;
+
+    window.addEventListener("fnmb-session-expired", () => {
+      authRequestNumber += 1;
+      renderPersistentWarnings([]);
+      setStatus(false, "");
+    });
 
     async function initAuth() {
-      const res = await fetch("api/auth/status", fetchOpts);
-      const data = await res.json();
+      const requestNumber = ++authRequestNumber;
       const authGate = document.getElementById("auth-gate");
       const appMain = document.getElementById("app-main");
+      const retryButton = document.getElementById("auth-retry-btn");
+      let data;
+      try {
+        const res = await fetch("api/auth/status", fetchOpts);
+        data = await res.json();
+        if (requestNumber !== authRequestNumber) return;
+        if (!res.ok || !data.ok) throw new Error(data.message || "无法读取登录状态，请稍后重试。");
+      } catch (error) {
+        if (requestNumber !== authRequestNumber) return;
+        window.fnmbSession.start({authenticated: false});
+        authGate.style.display = "flex";
+        appMain.style.display = "none";
+        document.getElementById("auth-set-password").style.display = "none";
+        document.getElementById("auth-login").style.display = "block";
+        const message = document.getElementById("auth-login-msg");
+        message.textContent = error.message || "无法连接应用，请稍后重试。";
+        message.className = "auth-msg error";
+        retryButton.style.display = "inline-flex";
+        return;
+      }
+      retryButton.style.display = "none";
       setupRequiresCode = !!data.setup_requires_code;
       passwordMinLength = data.password_min_length || 8;
+      window.fnmbSession.start(data);
       document.getElementById("set-pw-code-wrap").style.display = setupRequiresCode ? "block" : "none";
       if (data.authenticated) {
         authGate.style.display = "none";
@@ -1108,6 +1149,8 @@
       document.getElementById("auth-set-msg").textContent = "";
       document.getElementById("auth-login-msg").textContent = "";
     }
+
+    document.getElementById("auth-retry-btn").addEventListener("click", initAuth);
 
     document.getElementById("form-set-password").addEventListener("submit", async function(e) {
       e.preventDefault();
@@ -1142,6 +1185,7 @@
       if (json.ok) {
         msgEl.textContent = "设置成功，正在进入配置页…";
         msgEl.className = "auth-msg ok";
+        document.getElementById("form-set-password").reset();
         initAuth();
       } else {
         msgEl.textContent = json.message || "设置失败";
@@ -1170,6 +1214,7 @@
       if (json.ok) {
         msgEl.textContent = "登录成功，正在进入配置页…";
         msgEl.className = "auth-msg ok";
+        document.getElementById("form-login").reset();
         initAuth();
       } else {
         msgEl.textContent = json.message || "登录失败";
@@ -1179,7 +1224,7 @@
 
     function setStatus(ok, message) {
       statusBar.className = "status-bar " + (ok ? "status-ok" : "status-error");
-      statusBar.innerHTML = message ? "<span>" + message + "</span>" : "";
+      statusBar.textContent = message || "";
     }
 
     function showToast(ok, message) {
@@ -1199,55 +1244,78 @@
     function renderPersistentWarnings(warnings) {
       if (!warningPanel) return;
       const list = Array.isArray(warnings) ? warnings.filter(Boolean) : [];
-      if (!list.length) {
-        warningPanel.classList.remove("show");
-        warningPanel.innerHTML = "";
-        return;
-      }
-      function isMediaOrPhotoDbLine(s) {
-        return /^(影视库|相册库):/.test(String(s));
-      }
-      function escapeHtml(s) {
-        return String(s)
-          .replace(/&/g, "&amp;")
-          .replace(/</g, "&lt;")
-          .replace(/>/g, "&gt;")
-          .replace(/"/g, "&quot;");
-      }
-      function formatWarningItemHtml(item) {
-        var s = String(item);
-        var marker = "常见问题 · 第13条";
-        if (s.indexOf("Docker：") === 0 && s.indexOf(marker) >= 0) {
-          var i = s.indexOf(marker);
-          var before = escapeHtml(s.slice(0, i));
-          var after = escapeHtml(s.slice(i + marker.length));
-          return (
-            before +
-            '<a href="faq#faq-docker-sock" target="_blank" rel="noopener noreferrer">' +
-            marker +
-            "</a>" +
-            after
-          );
+      warningPanel.replaceChildren();
+      warningPanel.classList.toggle("show", list.length > 0);
+      if (!list.length) return;
+      const title = document.createElement("div");
+      title.className = "warning-panel-title";
+      title.textContent = "功能检查结果：以下问题需要处理";
+      warningPanel.appendChild(title);
+      const faqAnchors = new Set(["faq-external-db", "faq-ssh-journal", "faq-docker-sock", "faq-patrol"]);
+      list.forEach(item => {
+        const info = typeof item === "string" ? {message: item} : item;
+        const row = document.createElement("div");
+        row.className = "warning-panel-item";
+        const message = document.createElement("div");
+        message.textContent = (info.title ? info.title + "：" : "") + (info.message || "");
+        row.appendChild(message);
+        if (info.action) {
+          const action = document.createElement("div");
+          action.textContent = info.action;
+          row.appendChild(action);
         }
-        return escapeHtml(s);
-      }
-      const mediaPhotoLines = list.filter(isMediaOrPhotoDbLine);
-      const otherLines = list.filter(function(s) { return !isMediaOrPhotoDbLine(s); });
-      const ordered = otherLines.concat(mediaPhotoLines);
-      const lines = ordered.map(function(item) {
-        return '<div class="warning-panel-item">- ' + formatWarningItemHtml(item) + "</div>";
-      }).join("");
-      var faq10 = "";
-      if (mediaPhotoLines.length) {
-        faq10 =
-          '<p class="warning-panel-faq-link">' +
-          '影视 / 相册数据库路径、挂载与权限说明请查看 ' +
-          '<a href="faq#faq-external-db" target="_blank" rel="noopener noreferrer">常见问题 · 第12条</a>。' +
-          "</p>";
-      }
-      warningPanel.classList.add("show");
-      warningPanel.innerHTML =
-        '<div class="warning-panel-title">数据库路径权限告警（保存后检测）</div>' + lines + faq10;
+        if (info.commands) {
+          const details = document.createElement("details");
+          const summary = document.createElement("summary");
+          summary.textContent = "查看操作命令（在 NAS SSH 中执行）";
+          details.appendChild(summary);
+          const pre = document.createElement("pre");
+          pre.textContent = info.commands;
+          details.appendChild(pre);
+          const copy = document.createElement("button");
+          copy.type = "button";
+          copy.className = "btn btn-ghost";
+          copy.textContent = "复制命令";
+          copy.addEventListener("click", async () => {
+            try {
+              if (navigator.clipboard && window.isSecureContext) {
+                await navigator.clipboard.writeText(info.commands);
+              } else {
+                const textarea = document.createElement("textarea");
+                textarea.value = info.commands;
+                textarea.style.position = "fixed";
+                textarea.style.opacity = "0";
+                document.body.appendChild(textarea);
+                try {
+                  textarea.select();
+                  if (!document.execCommand("copy")) throw new Error("copy unavailable");
+                } finally {
+                  textarea.remove();
+                }
+              }
+              showToast(true, "命令已复制；请按提示在 NAS 上执行");
+            } catch (e) {
+              showToast(false, "复制失败，请手动选中命令复制");
+            }
+          });
+          details.appendChild(copy);
+          row.appendChild(details);
+        }
+        if (info.risk) {
+          const risk = document.createElement("div");
+          risk.textContent = "权限范围：" + info.risk;
+          row.appendChild(risk);
+        }
+        if (faqAnchors.has(info.faq)) {
+          const link = document.createElement("a");
+          link.href = "faq#" + info.faq;
+          link.target = "_blank";
+          link.rel = "noopener noreferrer";
+          link.textContent = "查看对应 FAQ 与验证方法";
+          row.appendChild(link);
+        }
+        warningPanel.appendChild(row);
+      });
     }
 
     const PUSHPLUS_PLACEHOLDER = '{"token":"你的token","title":"{title}","content":"消息内容","template":"html","channel":"wechat"}';
@@ -1882,9 +1950,9 @@
       }
     }
 
-    async function loadConfig() {
+    async function loadConfig(refreshWarnings = true) {
       try {
-        const res = await fetch("api/config", fetchOpts);
+        const res = await fetch(refreshWarnings ? "api/config" : "api/config?check_access=0", fetchOpts);
         const json = await res.json();
         if (res.status === 401) {
           initAuth();
@@ -1894,7 +1962,7 @@
           setStatus(false, json.message || "加载配置失败");
           return;
         }
-        renderPersistentWarnings(json.warnings || []);
+        if (refreshWarnings) renderPersistentWarnings(json.warning_details || json.warnings || []);
         const data = json.data;
         document.getElementById("app-title").textContent = data.title || "FnMessageBot";
         document.getElementById("app-subtitle").textContent = data.subtitle || "";
@@ -1964,6 +2032,7 @@
     }
 
     async function loadPushStats() {
+      if (document.getElementById("app-main").style.display === "none") return;
       try {
         const res = await fetch("api/push-stats", fetchOpts);
         const json = await res.json();
@@ -2052,6 +2121,9 @@
         bark_icon: (document.getElementById("input-bark-icon").value || "").trim(),
       };
 
+      const saveText = saveBtn.textContent;
+      saveBtn.disabled = true;
+      saveBtn.textContent = "正在保存并检查...";
       try {
         const res = await fetch("api/save-config", {
           method: "POST",
@@ -2063,17 +2135,20 @@
         if (res.ok && json.ok) {
           showToast(true, json.message || "配置已保存");
           if (Array.isArray(json.warnings) && json.warnings.length) {
-            json.warnings.forEach(w => showToast(false, "权限告警：" + w));
+            showToast(false, "部分功能仍有问题，请查看保存按钮下方的检查结果");
           }
-          renderPersistentWarnings(json.warnings || []);
+          renderPersistentWarnings(json.warning_details || json.warnings || []);
           testBtn.disabled = false;
-          loadConfig();
+          loadConfig(false);
         } else {
           showToast(false, json.message || "保存失败");
         }
       } catch (e) {
         console.error(e);
         showToast(false, "保存失败，请检查网络或稍后再试");
+      } finally {
+        saveBtn.disabled = false;
+        saveBtn.textContent = saveText;
       }
     });
 
@@ -2122,6 +2197,10 @@
           try { json = JSON.parse(text); } catch (e) { json = null; }
           if (res.ok && json && json.ok) {
             showToast(true, json.message || "巡检已推送");
+            renderPersistentWarnings(json.warning_details || json.warnings || []);
+            if (Array.isArray(json.warnings) && json.warnings.length) {
+              showToast(false, "部分巡检数据未取得，请查看保存按钮下方的检查结果");
+            }
           } else {
             showToast(false, (json && json.message) ? json.message : ("巡检失败：" + (text ? text.slice(0, 160) : "")));
           }

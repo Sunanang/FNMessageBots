@@ -1,6 +1,8 @@
 {
     "defaults":
     {
-        "run-as": "root"
-    }
+        "run-as": "package"
+    },
+    "username": "FnMessageBot",
+    "groupname": "FnMessageBot"
 }

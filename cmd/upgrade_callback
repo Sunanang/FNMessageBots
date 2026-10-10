@@ -71,7 +71,12 @@ if [ ! -f "${REQ_FILE}" ]; then
     fail_user_visible "升级失败：未找到 requirements.txt。${_FAIL_HINT}"
 fi
 
+source "$(dirname "${BASH_SOURCE[0]}")/data_permissions"
+prepare_app_data_permissions
+
 mkdir -p "${TRIM_PKGVAR}" "${TRIM_PKGVAR}/config" "${TRIM_PKGVAR}/data/logs" "${TRIM_PKGVAR}/data/cursor"
+source "$(dirname "${BASH_SOURCE[0]}")/ui_port"
+save_fnmb_ui_port
 chmod 600 "${TRIM_PKGVAR}/config/config.json" 2>/dev/null || true
 
 VENV_DIR="${TRIM_PKGVAR}/venv"
@@ -145,5 +150,7 @@ elif [ -f "${TRIM_PKGVAR}/.use_python_target" ] && [ -d "${PY_TARGET}" ]; then
 elif ! _install_with_venv; then
     _install_with_target
 fi
+
+prepare_app_data_permissions
 
 exit 0
