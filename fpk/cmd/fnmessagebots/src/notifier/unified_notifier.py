@@ -1,0 +1,861 @@
+"""
+统一通知器
+根据配置决定使用企业微信webhook、钉钉或飞书进行消息推送
+支持勿扰模式：时段内缓冲事件，结束后汇总为一条推送
+"""
+
+import json
+import logging
+import os
+import sqlite3
+import threading
+from collections import defaultdict
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Dict, Any, List, Optional, Set, Tuple
+
+from config import TITLE_PREFIX_DEFAULT
+from utils.logtime_display import get_logtime_display_offset_seconds
+from .multi_platform_notifier import DOCKER_CONTAINER_EVENT_TYPES, MultiPlatformNotifier
+from monitor.db_log_poller import DB_EVENT_ID_TO_PROJECT
+from monitor.sqlite_uri import connect_readonly_with_fallback
+
+
+def _truncate_channel_results_for_storage(channel_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """截断每条渠道的 response 便于入库，避免 detail 超长。"""
+    out = []
+    for cr in channel_results:
+        c = dict(cr)
+        r = c.get("response")
+        if r is not None and isinstance(r, dict):
+            s = json.dumps(r, ensure_ascii=False)
+            if len(s) > 500:
+                c["response"] = {"_preview": s[:500] + "…"}
+        out.append(c)
+    return out
+
+
+def _failure_summary_from_channel_results(channel_results: List[Dict[str, Any]]) -> str:
+    """从各渠道结果拼一段可读失败原因，写入 push_history.detail。"""
+    parts: List[str] = []
+    for cr in channel_results or []:
+        if cr.get("success"):
+            continue
+        ch = str(cr.get("channel") or "?")
+        err = (cr.get("error") or "").strip()
+        parts.append(f"{ch}: {err}" if err else f"{ch}: 发送失败")
+    return "; ".join(parts)[:800] if parts else ""
+
+
+def _channel_results_skipped(channel_results: List[Dict[str, Any]]) -> str:
+    for cr in channel_results or []:
+        skipped = str(cr.get("skipped") or "").strip()
+        if skipped:
+            return skipped
+    return ""
+
+
+def _event_summary(event_type: str, event_data: Dict[str, Any]) -> str:
+    """从 event_data 生成一条简短摘要，用于推送记录列表展示。"""
+    data = event_data.get("data") if isinstance(event_data.get("data"), dict) else {}
+    parts = []
+    if event_data.get("user") or event_data.get("IP"):
+        parts.append(f"{event_data.get('user', '')}@{event_data.get('IP', '')}".strip("@"))
+    if data.get("DISPLAY_NAME") or data.get("APP_NAME"):
+        parts.append(data.get("DISPLAY_NAME") or data.get("APP_NAME", ""))
+    if event_data.get("name"):
+        parts.append(event_data.get("name", ""))
+    if event_data.get("message"):
+        msg = (event_data.get("message") or "")[:80]
+        if msg:
+            parts.append(msg)
+    if not parts:
+        parts.append(event_type)
+    return " | ".join(str(p).strip() for p in parts if p)[:200]
+
+
+@dataclass
+class NotificationResult:
+    """通知发送结果"""
+    success: bool
+    method: str  # 'wechat', 'dingtalk', 'feishu', 'multiple', 'none'
+    details: Dict[str, Any] = None
+
+
+class UnifiedNotifier:
+    """统一通知器，支持多平台推送"""
+    # 轻量缓冲仅覆盖“不在 logger_data.db3 log 表里”的事件，避免与 DB 汇总重复计数。
+    DND_LIGHT_BUFFER_EVENT_TYPES: frozenset[str] = frozenset({
+        "BACKUP_TASK_SUCCESS",
+        "BACKUP_TASK_FAILED",
+        "BACKUP_TASK_PARTIAL_SUCCESS",
+        "TRIM_RESOURCE_ADDED",
+        "TRIM_SCRAPE_SUCCESS",
+        "PHOTO_SHARE_CREATED",
+        "PHOTO_SHARE_EXPIRED",
+        "PHOTO_DEVICE_REGISTERED",
+        "FACE_RECOGNITION_UPDATED",
+        "WAN_IP_CHANGED",
+        # SSH 现主要来自 journal，不在 logger_data.db3
+        "SSH_LOGIN_SUCCESS",
+        "SSH_AUTH_FAILED",
+        "SSH_INVALID_USER",
+        "SSH_DISCONNECTED",
+    })
+    # 外部库轮询事件（不在 logger_data.db3）；主日志事件由 _query_dnd_events_summary 统计，勿重复计入。
+    DND_EXTERNAL_POLLER_EVENT_TYPES: frozenset[str] = (
+        DND_LIGHT_BUFFER_EVENT_TYPES
+        | frozenset(DOCKER_CONTAINER_EVENT_TYPES)
+        | frozenset({
+            "MEDIA_LOGIN_SUCC",
+            "MEDIA_LOGOUT",
+            "SCHEDULER_TASK_SUCCESS",
+            "SCHEDULER_TASK_FAILED",
+            "SCHEDULER_TASK_CONDITION_FAILED",
+        })
+    )
+    DND_MAIN_LOG_SOURCES: frozenset[str] = frozenset({"db", "logger_db"})
+    DND_SOURCE_REQUIRED_EVENT_TYPES: frozenset[str] = frozenset({
+        "MEDIA_LOGIN_SUCC",
+        "MEDIA_LOGOUT",
+    })
+
+    def __init__(self, config):
+        """
+        初始化统一通知器
+        
+        Args:
+            config: 配置对象
+        """
+        self.config = config
+        self.logger = logging.getLogger(__name__)
+        # 记录最近一次已发送的勿扰汇总时段结束时间（ISO 字符串），避免重复发送
+        self._last_dnd_summary_end: str = ""
+        self._last_dnd_enabled = bool(getattr(config, "dnd_enabled", False))
+        self._last_dnd_start_time = str(getattr(config, "dnd_start_time", "22:00") or "22:00")
+        self._last_dnd_end_time = str(getattr(config, "dnd_end_time", "07:00") or "07:00")
+        self._dnd_light_buffer_counts: Dict[str, int] = {}
+        self._dnd_light_buffer_lock = threading.Lock()
+        self._load_last_dnd_summary_end()
+
+        # 根据配置初始化多平台通知器
+        self.multi_platform_notifier = MultiPlatformNotifier(
+            wechat_webhook_url=config.wechat_webhook_url,
+            dingtalk_webhook_url=config.dingtalk_webhook_url,
+            feishu_webhook_url=config.feishu_webhook_url,
+            bark_url=config.bark_url,
+            bark_icon=getattr(config, "bark_icon", "") or "",
+            pushplus_params=config.pushplus_params,
+            magic_push_params=getattr(config, "magic_push_params", "") or "",
+            smtp_params=getattr(config, "smtp_params", "") or "",
+            wecom_app_params=getattr(config, "wecom_app_params", "") or "",
+            webhook_params=getattr(config, "webhook_params", "") or "",
+            meow_params=getattr(config, "meow_params", "") or "",
+            title_prefix=getattr(config, "title_prefix", TITLE_PREFIX_DEFAULT),
+            minimal_push_enabled=bool(getattr(config, "minimal_push_enabled", False)),
+            poll_batch_summary_enabled=bool(getattr(config, "poll_batch_summary_enabled", False)),
+            user_lookup_db_path=getattr(config, "trim_media_db_path", "") or "",
+            activity_user_lookup_db_path=getattr(config, "trim_activity_db_path", "") or "",
+            logger_user_lookup_db_path=getattr(config, "logger_db_path", "") or "",
+            dedup_window=config.dedup_window,
+            pool_size=config.http_pool_size,
+            retries=config.http_retry_count,
+            timeout=config.http_timeout
+        )
+        self.logger.debug("多平台通知器已初始化")
+
+    def reload_config(self):
+        """按当前 self.config 重新创建多平台通知器（保存配置后热加载用）。"""
+        old = self.multi_platform_notifier
+        self.multi_platform_notifier = MultiPlatformNotifier(
+            wechat_webhook_url=self.config.wechat_webhook_url,
+            dingtalk_webhook_url=self.config.dingtalk_webhook_url,
+            feishu_webhook_url=self.config.feishu_webhook_url,
+            bark_url=self.config.bark_url,
+            bark_icon=getattr(self.config, "bark_icon", "") or "",
+            pushplus_params=self.config.pushplus_params,
+            magic_push_params=getattr(self.config, "magic_push_params", "") or "",
+            smtp_params=getattr(self.config, "smtp_params", "") or "",
+            wecom_app_params=getattr(self.config, "wecom_app_params", "") or "",
+            webhook_params=getattr(self.config, "webhook_params", "") or "",
+            meow_params=getattr(self.config, "meow_params", "") or "",
+            title_prefix=getattr(self.config, "title_prefix", TITLE_PREFIX_DEFAULT),
+            minimal_push_enabled=bool(getattr(self.config, "minimal_push_enabled", False)),
+            poll_batch_summary_enabled=bool(getattr(self.config, "poll_batch_summary_enabled", False)),
+            user_lookup_db_path=getattr(self.config, "trim_media_db_path", "") or "",
+            activity_user_lookup_db_path=getattr(self.config, "trim_activity_db_path", "") or "",
+            logger_user_lookup_db_path=getattr(self.config, "logger_db_path", "") or "",
+            dedup_window=self.config.dedup_window,
+            pool_size=self.config.http_pool_size,
+            retries=self.config.http_retry_count,
+            timeout=self.config.http_timeout,
+        )
+        if old:
+            try:
+                old.close()
+            except Exception as e:
+                self.logger.warning("关闭旧通知器失败: %s", e)
+        self.logger.info("多平台通知器已热加载配置")
+        self._load_last_dnd_summary_end()
+        self._handle_dnd_config_transition_after_reload()
+
+    def _handle_dnd_config_transition_after_reload(self) -> None:
+        """
+        处理勿扰配置变更的边界行为：
+        - 从关闭切到开启时，不应立刻补发“历史已结束时段”的汇总；
+        - 开启状态下修改时段时，同样不补发旧时段汇总。
+        """
+        curr_enabled = bool(getattr(self.config, "dnd_enabled", False))
+        curr_start = str(getattr(self.config, "dnd_start_time", "22:00") or "22:00")
+        curr_end = str(getattr(self.config, "dnd_end_time", "07:00") or "07:00")
+
+        enabled_just_now = (not self._last_dnd_enabled) and curr_enabled
+        disabled_just_now = self._last_dnd_enabled and (not curr_enabled)
+        window_changed_while_enabled = self._last_dnd_enabled and curr_enabled and (
+            curr_start != self._last_dnd_start_time or curr_end != self._last_dnd_end_time
+        )
+        if disabled_just_now:
+            self._clear_dnd_light_buffer("关闭勿扰")
+            self.logger.info("勿扰配置变更：已关闭勿扰，本轮及后续将不再进行勿扰汇总检查")
+        if enabled_just_now or window_changed_while_enabled:
+            start_dt, end_dt = self._calc_latest_dnd_period()
+            if end_dt is not None:
+                self._save_last_dnd_summary_end(end_dt.isoformat())
+                self.logger.info("勿扰配置变更：已对齐勿扰汇总游标至 %s，避免立即补发历史汇总", end_dt.isoformat())
+
+        self._last_dnd_enabled = curr_enabled
+        self._last_dnd_start_time = curr_start
+        self._last_dnd_end_time = curr_end
+
+    def _dnd_summary_cursor_file(self) -> Optional[Path]:
+        """勿扰汇总游标文件路径（持久化最近汇总结束点，避免重启后重复推送）。"""
+        cursor_dir = (getattr(self.config, "cursor_dir", "") or "").strip()
+        if not cursor_dir:
+            return None
+        p = Path(cursor_dir)
+        if not p.is_absolute():
+            p = Path.cwd() / p
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            self.logger.debug("创建 cursor_dir 失败，跳过勿扰游标持久化: %s", e)
+            return None
+        return p / "dnd_summary_cursor.txt"
+
+    def _load_last_dnd_summary_end(self) -> None:
+        fp = self._dnd_summary_cursor_file()
+        if not fp or not fp.exists():
+            return
+        try:
+            raw = fp.read_text(encoding="utf-8").strip()
+            if raw:
+                self._last_dnd_summary_end = raw
+        except Exception as e:
+            self.logger.debug("读取勿扰游标失败: %s", e)
+
+    def _save_last_dnd_summary_end(self, end_key: str) -> None:
+        self._last_dnd_summary_end = end_key
+        fp = self._dnd_summary_cursor_file()
+        if not fp:
+            return
+        try:
+            fp.write_text(end_key, encoding="utf-8")
+        except Exception as e:
+            self.logger.debug("写入勿扰游标失败: %s", e)
+
+    def _dnd_minutes_since_midnight(self, time_str: str) -> int:
+        """将 HH:MM 转为当日 0 点起的分钟数。"""
+        try:
+            parts = time_str.strip().split(":")
+            h, m = int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
+            return max(0, min(24 * 60 - 1, h * 60 + m))
+        except (ValueError, IndexError):
+            return 0
+
+    def _in_dnd_window(self) -> bool:
+        """当前时间是否在勿扰时段内（与 Cron 一致，使用系统本地时区）。"""
+        enabled = getattr(self.config, "dnd_enabled", False)
+        if not enabled:
+            return False
+        start_s = getattr(self.config, "dnd_start_time", "22:00") or "22:00"
+        end_s = getattr(self.config, "dnd_end_time", "07:00") or "07:00"
+        now = datetime.now()
+        current = now.hour * 60 + now.minute
+        start_m = self._dnd_minutes_since_midnight(start_s)
+        end_m = self._dnd_minutes_since_midnight(end_s)
+        if end_m <= start_m:
+            return current >= start_m or current < end_m
+        return start_m <= current < end_m
+
+    def _normalize_db_event_type(
+        self,
+        db_event_id: str,
+        uname: str,
+        service_id: str = "",
+        category: str = "",
+        parameter: str = "",
+    ) -> str:
+        """将数据库 eventId 归一化为项目内 event_type（与轮询器一致）。"""
+        et = DB_EVENT_ID_TO_PROJECT.get(db_event_id, db_event_id)
+        if db_event_id == "SshdLoginAuthFail" and (uname or "").strip().lower() == "invalid":
+            return "SSH_INVALID_USER"
+        if et in ("LoginSucc", "Logout") and bool(getattr(self.config, "media_lib_logger_enabled", False)):
+            patterns = [
+                str(p).strip().lower()
+                for p in (getattr(self.config, "media_lib_service_patterns", []) or [])
+                if str(p).strip()
+            ]
+            if patterns:
+                hay = f"{service_id or ''}\t{category or ''}\t{parameter or ''}".lower()
+                if any(p in hay for p in patterns):
+                    return "MEDIA_LOGIN_SUCC" if et == "LoginSucc" else "MEDIA_LOGOUT"
+        return et
+
+    def _calc_latest_dnd_period(self) -> Tuple[Optional[datetime], Optional[datetime]]:
+        """
+        计算“最近一个已结束的勿扰时段”时间窗（系统本地时区）。
+        返回 (start_dt, end_dt)。若当前在勿扰时段内或无法确定，返回 (None, None)。
+        """
+        if not getattr(self.config, "dnd_enabled", False):
+            return None, None
+        start_s = getattr(self.config, "dnd_start_time", "22:00") or "22:00"
+        end_s = getattr(self.config, "dnd_end_time", "07:00") or "07:00"
+        now = datetime.now()
+        start_m = self._dnd_minutes_since_midnight(start_s)
+        end_m = self._dnd_minutes_since_midnight(end_s)
+        current_m = now.hour * 60 + now.minute
+        cross_day = end_m <= start_m
+
+        # 当前仍在勿扰时段，不生成汇总
+        if self._in_dnd_window():
+            return None, None
+
+        if cross_day:
+            # 跨天：仅在 end~start 这个“白天窗口”允许汇总（典型 07:00~22:00）
+            if not (end_m <= current_m < start_m):
+                return None, None
+            end_dt = now.replace(hour=end_m // 60, minute=end_m % 60, second=0, microsecond=0)
+            start_dt = (end_dt - timedelta(days=1)).replace(hour=start_m // 60, minute=start_m % 60)
+            return start_dt, end_dt
+
+        # 非跨天：选择最近一个已结束的时段
+        if current_m < start_m:
+            end_dt = (now - timedelta(days=1)).replace(hour=end_m // 60, minute=end_m % 60, second=0, microsecond=0)
+            start_dt = end_dt.replace(hour=start_m // 60, minute=start_m % 60)
+        else:
+            end_dt = now.replace(hour=end_m // 60, minute=end_m % 60, second=0, microsecond=0)
+            start_dt = now.replace(hour=start_m // 60, minute=start_m % 60, second=0, microsecond=0)
+            if current_m < end_m:
+                return None, None
+        return start_dt, end_dt
+
+    def _query_dnd_events_summary(self, start_dt: datetime, end_dt: datetime) -> Dict[str, int]:
+        """按勿扰时段从 logger_data.db3 查询并统计事件数（仅统计 monitor_events 内事件）。"""
+        db_path = getattr(self.config, "logger_db_path", "") or ""
+        if not db_path or not os.path.exists(db_path):
+            return {}
+        offset = get_logtime_display_offset_seconds()
+        start_ts = int(start_dt.timestamp()) - offset
+        end_ts = int(end_dt.timestamp()) - offset
+        monitor_set = set(getattr(self.config, "monitor_events", []) or [])
+        if not monitor_set:
+            return {}
+
+        by_type: Dict[str, int] = defaultdict(int)
+        conn = connect_readonly_with_fallback(db_path, timeout=5.0)
+        try:
+            conn.row_factory = sqlite3.Row
+            cur = conn.execute(
+                "SELECT eventId, uname, serviceId, category, parameter FROM log "
+                "WHERE logtime >= ? AND logtime < ? ORDER BY id ASC",
+                (start_ts, end_ts),
+            )
+            for row in cur.fetchall():
+                et = self._normalize_db_event_type(
+                    str(row["eventId"] or ""),
+                    str(row["uname"] or ""),
+                    str(row["serviceId"] or ""),
+                    str(row["category"] or ""),
+                    str(row["parameter"] or ""),
+                )
+                if et in monitor_set:
+                    by_type[et] += 1
+        finally:
+            conn.close()
+        return dict(by_type)
+
+    def _build_dnd_summary_from_db(self, start_dt: datetime, end_dt: datetime, by_type: Dict[str, int]) -> str:
+        """基于数据库统计结果生成勿扰汇总文案。"""
+        titles = MultiPlatformNotifier.EVENT_TITLES
+        lines = [f"【勿扰时段汇总】{start_dt.strftime('%H:%M')} - {end_dt.strftime('%H:%M')}"]
+        for event_type in sorted(by_type.keys()):
+            count = by_type[event_type]
+            label = titles.get(event_type, event_type)
+            if "飞牛NAS-" in label:
+                label = label.split("飞牛NAS-", 1)[-1].strip()
+            label = self.multi_platform_notifier._strip_body_emojis(str(label)).strip()
+            lines.append(f"· {label} {count} 次")
+        self.logger.info("勿扰结束，发送汇总消息（共 %s 条事件）", sum(by_type.values()))
+        return "\n".join(lines)
+
+    def _is_external_dnd_event(self, event_type: str, event_data: Optional[Dict[str, Any]] = None) -> bool:
+        et = str(event_type or "").strip()
+        if not et or et not in self.DND_EXTERNAL_POLLER_EVENT_TYPES:
+            return False
+        if not self._dnd_event_in_monitor_set(et):
+            return False
+        data = event_data if isinstance(event_data, dict) else {}
+        source = str(data.get("_source") or "").strip()
+        if source in self.DND_MAIN_LOG_SOURCES:
+            return False
+        if source:
+            return True
+        return et not in self.DND_SOURCE_REQUIRED_EVENT_TYPES
+
+    def _buffer_event_for_dnd_if_needed(self, event_type: str, event_data: Optional[Dict[str, Any]] = None) -> None:
+        """勿扰时段内轻量缓存非主日志库事件计数。"""
+        et = str(event_type or "").strip()
+        if not self._is_external_dnd_event(et, event_data):
+            return
+        with self._dnd_light_buffer_lock:
+            self._dnd_light_buffer_counts[et] = int(self._dnd_light_buffer_counts.get(et, 0)) + 1
+
+    def _dnd_event_in_monitor_set(self, event_type: str) -> bool:
+        monitor_set = set(getattr(self.config, "monitor_events", []) or [])
+        return not monitor_set or event_type in monitor_set
+
+    def _buffer_dnd_poll_batch_summary(self, event_data: Dict[str, Any]) -> None:
+        """轮询批量汇总在勿扰内被拦截时，仅把外部来源事件计入轻量缓冲。"""
+        counts: Dict[str, int] = defaultdict(int)
+        grouped_raw = event_data.get("grouped_events")
+        if isinstance(grouped_raw, dict):
+            for et, rows in grouped_raw.items():
+                et_s = str(et or "").strip()
+                if not et_s or et_s == "POLL_BATCH_SUMMARY" or not isinstance(rows, list):
+                    continue
+                for row in rows:
+                    row_data = row.get("event_data") if isinstance(row, dict) else {}
+                    if self._is_external_dnd_event(et_s, row_data if isinstance(row_data, dict) else None):
+                        counts[et_s] += 1
+        if counts:
+            with self._dnd_light_buffer_lock:
+                for et_s, n in counts.items():
+                    self._dnd_light_buffer_counts[et_s] = int(self._dnd_light_buffer_counts.get(et_s, 0)) + n
+            self.logger.debug("勿扰：已从轮询批量汇总计入 %s 条外部库事件", sum(counts.values()))
+            return
+
+        by_type_raw = event_data.get("by_type")
+        if not isinstance(by_type_raw, dict):
+            return
+        merged = 0
+        with self._dnd_light_buffer_lock:
+            for et, cnt in by_type_raw.items():
+                et_s = str(et or "").strip()
+                if not et_s or et_s == "POLL_BATCH_SUMMARY":
+                    continue
+                if not self._is_external_dnd_event(et_s, None):
+                    continue
+                try:
+                    n = int(cnt)
+                except (TypeError, ValueError):
+                    continue
+                if n <= 0:
+                    continue
+                self._dnd_light_buffer_counts[et_s] = int(self._dnd_light_buffer_counts.get(et_s, 0)) + n
+                merged += n
+        if merged:
+            self.logger.debug("勿扰：已从轮询批量汇总计入 %s 条外部库事件", merged)
+
+    def _snapshot_and_clear_dnd_light_buffer(self) -> Dict[str, int]:
+        """获取并清空轻量缓冲。"""
+        with self._dnd_light_buffer_lock:
+            snap = dict(self._dnd_light_buffer_counts)
+            self._dnd_light_buffer_counts.clear()
+        return snap
+
+    def _clear_dnd_light_buffer(self, reason: str) -> None:
+        with self._dnd_light_buffer_lock:
+            had_items = bool(self._dnd_light_buffer_counts)
+            self._dnd_light_buffer_counts.clear()
+        if had_items:
+            self.logger.info("勿扰轻量缓冲已清空（原因：%s）", reason)
+
+    def flush_dnd_buffer_if_needed(self) -> None:
+        """勿扰结束后汇总推送（主日志库 + 轻量缓冲），同一时段仅发送一次。"""
+        start_dt, end_dt = self._calc_latest_dnd_period()
+        if start_dt is None or end_dt is None:
+            return
+        end_key = end_dt.isoformat()
+        if end_key == self._last_dnd_summary_end:
+            return
+        by_type = self._query_dnd_events_summary(start_dt, end_dt)
+        buffered_by_type = self._snapshot_and_clear_dnd_light_buffer()
+        for et, cnt in buffered_by_type.items():
+            by_type[et] = int(by_type.get(et, 0)) + int(cnt)
+        if not by_type:
+            self._save_last_dnd_summary_end(end_key)
+            self.logger.debug("勿扰结束：数据库查询到 0 条监控事件，跳过汇总推送")
+            return
+        summary = self._build_dnd_summary_from_db(start_dt, end_dt, by_type)
+        try:
+            out = self.multi_platform_notifier.send_system_notification(
+                "DND_SUMMARY",
+                summary,
+                {"hostname": "", "version": ""},
+            )
+        except Exception as e:
+            self.logger.warning("勿扰汇总推送失败: %s", e)
+            self._record_system_notification_failure(
+                "DND_SUMMARY",
+                summary,
+                {"hostname": "", "version": ""},
+                [],
+                failure_summary=f"发送异常: {e}",
+            )
+            self._save_last_dnd_summary_end(end_key)
+            return
+
+        success = out.get("success", False) if isinstance(out, dict) else bool(out)
+        sc = out.get("success_count", 0) if isinstance(out, dict) else 0
+        fc = out.get("fail_count", 0) if isinstance(out, dict) else 0
+        channel_results = out.get("channel_results") if isinstance(out, dict) else []
+        skipped = out.get("skipped") if isinstance(out, dict) else None
+        if not success and skipped != "duplicate":
+            self._record_system_notification_failure(
+                "DND_SUMMARY",
+                summary,
+                {"hostname": "", "version": ""},
+                channel_results if isinstance(channel_results, list) else [],
+            )
+        # 主汇总请求已完成就推进游标；即使全部渠道失败，也不重试勿扰期间旧事件。
+        self._save_last_dnd_summary_end(end_key)
+
+        # 勿扰汇总不参与推送汇总统计，仅事件推送（send_notification）统计
+        # 额外发送一条状态消息：该消息失败不影响汇总游标
+        result_msg = f"本次汇总推送：成功 {sc} 个渠道，失败 {fc} 个渠道"
+        try:
+            status_out = self.multi_platform_notifier.send_system_notification(
+                "DND_SUMMARY",
+                result_msg,
+                {"hostname": "", "version": ""},
+            )
+            status_success = status_out.get("success", False) if isinstance(status_out, dict) else bool(status_out)
+            status_skipped = status_out.get("skipped") if isinstance(status_out, dict) else None
+            status_channel_results = status_out.get("channel_results") if isinstance(status_out, dict) else []
+            if not status_success and status_skipped != "duplicate":
+                self._record_system_notification_failure(
+                    "DND_SUMMARY",
+                    result_msg,
+                    {"hostname": "", "version": ""},
+                    status_channel_results if isinstance(status_channel_results, list) else [],
+                )
+        except Exception as e:
+            self.logger.warning("勿扰汇总状态消息发送失败: %s", e)
+            self._record_system_notification_failure(
+                "DND_SUMMARY",
+                result_msg,
+                {"hostname": "", "version": ""},
+                [],
+                failure_summary=f"发送异常: {e}",
+            )
+
+    def _record_system_notification_failure(
+        self,
+        event_type: str,
+        message: str,
+        additional_info: Optional[Dict[str, Any]] = None,
+        channel_results: Optional[List[Dict[str, Any]]] = None,
+        *,
+        failure_summary: str = "",
+    ) -> None:
+        """系统通知失败时写入项目推送历史；仅记录，不触发重试。"""
+        try:
+            from utils.push_history import add_record as add_push_history
+            channel_results_list = channel_results if isinstance(channel_results, list) else []
+            summary = ((message or "").replace("\n", " ")).strip()[:500] or event_type
+            detail_sys: Dict[str, Any] = {
+                "kind": "system_notification",
+                "event_type": event_type,
+                "channel_results": _truncate_channel_results_for_storage(channel_results_list),
+            }
+            if additional_info:
+                detail_sys["additional_info"] = {
+                    k: additional_info.get(k)
+                    for k in ("hostname", "version")
+                    if additional_info.get(k) is not None
+                }
+            fs = (failure_summary or "").strip() or _failure_summary_from_channel_results(channel_results_list)
+            if fs:
+                detail_sys["failure_summary"] = fs
+            else:
+                detail_sys["failure_summary"] = "未配置任何推送渠道或全部渠道发送失败"
+            add_push_history(
+                success=False,
+                event_type=event_type,
+                summary=summary,
+                detail=detail_sys,
+            )
+        except Exception:
+            pass
+
+    def send_notification(self, 
+                         event_type: str,
+                         event_data: Dict[str, Any],
+                         raw_log: str,
+                         timestamp: str) -> NotificationResult:
+        """
+        发送通知
+        
+        Args:
+            event_type: 事件类型
+            event_data: 事件数据
+            raw_log: 原始日志
+            timestamp: 时间戳
+            
+        Returns:
+            通知发送结果
+        """
+        if self._in_dnd_window() and event_type != "NAS_PATROL_REPORT":
+            # 勿扰时段内：logger_data.db3 事件靠 DB 汇总；外部库走轻量缓冲；批量汇总需展开 by_type。
+            if str(event_type) == "POLL_BATCH_SUMMARY":
+                self._buffer_dnd_poll_batch_summary(event_data)
+            else:
+                self._buffer_event_for_dnd_if_needed(str(event_type), event_data)
+            return NotificationResult(
+                success=True,
+                method="dnd_skipped",
+                details={"event_type": event_type, "dnd_skipped": True},
+            )
+        # 通过多平台通知器发送
+        success, channel_results = self.multi_platform_notifier.send_notification(
+            event_type, event_data, raw_log, timestamp
+        )
+        skipped = _channel_results_skipped(channel_results)
+        if skipped == "duplicate":
+            return NotificationResult(
+                success=True,
+                method="duplicate_skipped",
+                details={"event_type": event_type, "skipped": skipped},
+            )
+        try:
+            from utils.push_stats import record as record_push
+            record_push(success)
+        except Exception:
+            pass
+        try:
+            from utils.push_history import add_record as add_push_history
+            # 摘要改为“实际推送文案预览”（去掉表情/emoji）
+            summary = self.multi_platform_notifier.build_history_summary(
+                event_type=event_type,
+                event_data=event_data,
+                raw_log=raw_log,
+                timestamp=timestamp,
+            ) or _event_summary(event_type, event_data)
+            detail = {
+                "event_type": event_type,
+                "timestamp": timestamp,
+                "event_data": event_data,
+                "channel_results": _truncate_channel_results_for_storage(channel_results),
+            }
+            if not success:
+                fs = _failure_summary_from_channel_results(channel_results)
+                if fs:
+                    detail["failure_summary"] = fs
+                elif not channel_results:
+                    detail["failure_summary"] = "未配置推送渠道"
+            if event_type == "POLL_BATCH_SUMMARY":
+                by_type = event_data.get("by_type") if isinstance(event_data.get("by_type"), dict) else {}
+                render_meta = event_data.get("batch_render_meta") if isinstance(event_data.get("batch_render_meta"), dict) else {}
+                grouped = event_data.get("grouped_events") if isinstance(event_data.get("grouped_events"), dict) else {}
+                grouped_preview = {}
+                for et, rows in grouped.items():
+                    if not isinstance(rows, list):
+                        continue
+                    preview_rows = []
+                    for r in rows[:3]:
+                        if not isinstance(r, dict):
+                            continue
+                        preview_rows.append({
+                            "timestamp": r.get("timestamp"),
+                            "event_data": r.get("event_data") if isinstance(r.get("event_data"), dict) else {},
+                        })
+                    grouped_preview[str(et)] = preview_rows
+                detail.update({
+                    "batch_total": int(event_data.get("count") or 0),
+                    "batch_type_count": len(by_type),
+                    "batch_render_meta": render_meta,
+                    "grouped_events_preview": grouped_preview,
+                })
+                # 汇总事件不在 push_history 中保存全量 grouped_events，避免 detail 过大
+                detail["event_data"] = {
+                    "count": int(event_data.get("count") or 0),
+                    "by_type": by_type,
+                    "items": event_data.get("items") if isinstance(event_data.get("items"), list) else [],
+                }
+            add_push_history(success=success, event_type=event_type, summary=summary, detail=detail)
+        except Exception:
+            pass
+        # 确定实际使用的方法（检查哪些平台真正发送了）
+        active_platforms = []
+        if self.config.wechat_webhook_url:
+            active_platforms.append('wechat')
+        if self.config.dingtalk_webhook_url:
+            active_platforms.append('dingtalk')
+        if self.config.feishu_webhook_url:
+            active_platforms.append('feishu')
+        if self.config.bark_url:
+            active_platforms.append('bark')
+        if self.config.pushplus_params:
+            active_platforms.append('pushplus')
+        if getattr(self.config, "magic_push_params", ""):
+            active_platforms.append('magic_push')
+        if getattr(self.config, "smtp_params", ""):
+            active_platforms.append('smtp')
+        if getattr(self.config, "wecom_app_params", ""):
+            active_platforms.append('wecom_app')
+        if getattr(self.config, "webhook_params", ""):
+            active_platforms.append('webhook')
+        if getattr(self.config, "meow_params", ""):
+            active_platforms.append('meow')
+        
+        if len(active_platforms) == 0:
+            method = 'none'
+        elif len(active_platforms) == 1:
+            method = active_platforms[0]
+        else:
+            method = 'multiple'
+        
+        return NotificationResult(
+            success=success,
+            method=method,
+            details={
+                'platforms': active_platforms,
+                'event_type': event_type
+            }
+        )
+    
+    def send_system_notification(self, 
+                                event_type: str, 
+                                message: str, 
+                                additional_info: Dict[str, Any] = None) -> NotificationResult:
+        """
+        发送系统事件通知
+        
+        Args:
+            event_type: 事件类型
+            message: 消息内容
+            additional_info: 额外信息
+            
+        Returns:
+            通知发送结果
+        """
+        if self._in_dnd_window():
+            return NotificationResult(
+                success=True,
+                method="dnd_skipped",
+                details={"event_type": event_type, "message": message[:50]},
+            )
+        # 通过多平台通知器发送系统通知（返回 dict: success, success_count, fail_count）
+        out = self.multi_platform_notifier.send_system_notification(
+            event_type, message, additional_info
+        )
+        success = out.get("success", False) if isinstance(out, dict) else bool(out)
+        channel_results = out.get("channel_results") if isinstance(out, dict) else []
+        skipped = out.get("skipped") if isinstance(out, dict) else None
+        # 系统通知失败时写入 push_history（与事件推送同一库），便于 Web「推送记录」查看原因；不去重跳过入库以免刷屏
+        if not success and skipped != "duplicate":
+            self._record_system_notification_failure(
+                event_type,
+                message,
+                additional_info,
+                channel_results if isinstance(channel_results, list) else [],
+            )
+        # 系统通知（APP_START/APP_STOP/勿扰汇总等）不参与推送汇总统计，仅事件推送（send_notification）统计
+
+        # 确定实际使用的方法（检查哪些平台真正发送了）
+        active_platforms = []
+        if self.config.wechat_webhook_url:
+            active_platforms.append('wechat')
+        if self.config.dingtalk_webhook_url:
+            active_platforms.append('dingtalk')
+        if self.config.feishu_webhook_url:
+            active_platforms.append('feishu')
+        if self.config.bark_url:
+            active_platforms.append('bark')
+        if self.config.pushplus_params:
+            active_platforms.append('pushplus')
+        if getattr(self.config, "magic_push_params", ""):
+            active_platforms.append('magic_push')
+        if getattr(self.config, "smtp_params", ""):
+            active_platforms.append('smtp')
+        if getattr(self.config, "wecom_app_params", ""):
+            active_platforms.append('wecom_app')
+        if getattr(self.config, "webhook_params", ""):
+            active_platforms.append('webhook')
+        if getattr(self.config, "meow_params", ""):
+            active_platforms.append('meow')
+        
+        if len(active_platforms) == 0:
+            method = 'none'
+        elif len(active_platforms) == 1:
+            method = active_platforms[0]
+        else:
+            method = 'multiple'
+        
+        return NotificationResult(
+            success=success,
+            method=method,
+            details={
+                'platforms': active_platforms,
+                'event_type': event_type,
+                'message': message
+            }
+        )
+    
+    def cleanup_cache(self):
+        """清理缓存"""
+        if self.multi_platform_notifier:
+            self.multi_platform_notifier.cleanup_cache()
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """获取统计信息"""
+        stats = {
+            'has_multi_platform_notifier': self.multi_platform_notifier is not None
+        }
+        
+        if self.multi_platform_notifier:
+            stats['multi_platform_notifier'] = self.multi_platform_notifier.get_stats()
+        
+        return stats
+
+    def get_delivery_health(self) -> Dict[str, Any]:
+        """获取通知发送健康状态"""
+        if self.multi_platform_notifier:
+            return self.multi_platform_notifier.get_delivery_health()
+        return {
+            'last_attempt_time': None,
+            'last_success_time': None,
+            'consecutive_failures': 0,
+            'first_failure_time': None,
+            'total_failures_since_success': 0,
+            'active_platforms': {
+                'wechat': False,
+                'dingtalk': False,
+                'feishu': False,
+                'bark': False,
+                'pushplus': False,
+                'magic_push': False,
+                'smtp': False,
+                'wecom_app': False,
+                'webhook': False,
+                'meow': False,
+            }
+        }
+    
+    def close(self):
+        """关闭通知器"""
+        if self.multi_platform_notifier:
+            self.multi_platform_notifier.close()
+        
+        self.logger.debug("统一通知器已关闭")

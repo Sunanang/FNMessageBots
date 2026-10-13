@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="robots" content="noindex, nofollow" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  {% if favicon_url %}
+  <link rel="icon" href="{{ favicon_url }}" />
+  {% endif %}
+  <title>常见问题 - FnMessageBot</title>
+  <style>
+    * { box-sizing: border-box; }
+    :root {
+      color-scheme: light;
+      --faq-bg: #eef3ff;
+      --faq-bg-accent: #e0e7ff;
+      --faq-card: #ffffff;
+      --faq-panel: #f9fafb;
+      --faq-panel-border: #e5e7eb;
+      --faq-text: #1f2933;
+      --faq-muted: #6b7280;
+      --faq-faint: #9ca3af;
+      --faq-accent: #2563eb;
+      --faq-border: rgba(148, 163, 184, 0.35);
+      --faq-shadow: 0 14px 36px rgba(15, 23, 42, 0.08);
+      --faq-shadow-card: 0 8px 28px rgba(15, 23, 42, 0.06);
+    }
+    html[data-theme="dark"] {
+      color-scheme: dark;
+      --faq-bg: #111827;
+      --faq-bg-accent: #1f2937;
+      --faq-card: rgba(17, 24, 39, 0.92);
+      --faq-panel: rgba(17, 24, 39, 0.92);
+      --faq-panel-border: rgba(75, 85, 99, 0.55);
+      --faq-text: #f3f4f6;
+      --faq-muted: #9ca3af;
+      --faq-faint: #6b7280;
+      --faq-accent: #60a5fa;
+      --faq-border: rgba(75, 85, 99, 0.55);
+      --faq-shadow: 0 18px 40px rgba(0, 0, 0, 0.35);
+      --faq-shadow-card: 0 12px 32px rgba(0, 0, 0, 0.25);
+    }
+    body {
+      margin: 0;
+      background: var(--faq-bg);
+      color: var(--faq-text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", "PingFang SC", sans-serif;
+      line-height: 1.65;
+    }
+    a { color: var(--faq-accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .page {
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      padding: 24px 16px 32px;
+      background: linear-gradient(180deg, var(--faq-bg-accent) 0%, var(--faq-bg) 180px);
+    }
+    .card {
+      width: 100%;
+      max-width: 960px;
+      background: var(--faq-card);
+      border-radius: 18px;
+      border: 1px solid var(--faq-border);
+      box-shadow: var(--faq-shadow);
+      overflow: hidden;
+    }
+    .faq-back-bar {
+      padding: 18px 24px 0;
+      display: flex;
+      justify-content: flex-start;
+    }
+    .faq-wrap {
+      padding: 18px 24px 28px;
+    }
+    .hero h1 {
+      margin: 0;
+      font-size: 28px;
+      letter-spacing: 0.04em;
+    }
+    .hero p {
+      margin: 8px 0 0;
+      color: var(--faq-muted);
+      font-size: 14px;
+    }
+    .faq-list {
+      margin-top: 18px;
+      display: grid;
+      gap: 12px;
+    }
+    #faq-external-db, #faq-docker-sock, #faq-ssh-journal, #faq-patrol {
+      scroll-margin-top: 72px;
+    }
+    .faq-item {
+      background: var(--faq-panel);
+      border: 1px solid var(--faq-panel-border);
+      border-radius: 12px;
+      padding: 14px 14px 12px;
+      box-shadow: var(--faq-shadow-card);
+    }
+    .faq-item h2 {
+      margin: 0 0 8px;
+      font-size: 16px;
+      line-height: 1.4;
+    }
+    .faq-item p {
+      margin: 0;
+      color: var(--faq-text);
+      font-size: 14px;
+      white-space: pre-line;
+    }
+    .faq-item p + p, .faq-item pre + p { margin-top: 8px; }
+    .faq-item details { margin-top: 10px; }
+    .faq-item summary { cursor: pointer; color: var(--faq-accent); font-size: 14px; }
+    .faq-item details[open] > summary { margin-bottom: 8px; }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 13px;
+      background: rgba(148, 163, 184, 0.18);
+      padding: 1px 4px;
+      border-radius: 4px;
+    }
+    pre.faq-pre {
+      margin: 8px 0 0;
+      padding: 10px 12px;
+      overflow-x: auto;
+      font-size: 12px;
+      line-height: 1.5;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      background: rgba(148, 163, 184, 0.18);
+      border-radius: 8px;
+      border: 1px solid var(--faq-panel-border);
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .btn {
+      min-width: 96px;
+      border-radius: 999px;
+      padding: 8px 20px;
+      border: none;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      text-decoration: none;
+      transition: background-color .15s, transform .05s;
+      font-family: inherit;
+    }
+    .btn-ghost {
+      background: #fff;
+      color: #111827;
+      border: 1px solid #d1d5db;
+    }
+    .btn-ghost:hover { background: #f3f4f6; }
+    html[data-theme="dark"] .btn-ghost {
+      background: #111827;
+      color: #e5e7eb;
+      border-color: #4b5563;
+    }
+    html[data-theme="dark"] .btn-ghost:hover { background: #1f2937; }
+    .page-footer {
+      margin-top: 20px;
+      padding-top: 14px;
+      border-top: 1px solid var(--faq-border);
+      text-align: center;
+      color: var(--faq-faint);
+      font-size: 12px;
+    }
+    @media (max-width: 640px) {
+      .faq-back-bar { padding: 16px 16px 0; }
+      .faq-wrap { padding: 16px 16px 24px; }
+      .hero h1 { font-size: 24px; }
+      .btn { min-width: 0; }
+    }
+  </style>
+  <script src="{{ url_for('session_guard_js') }}"></script>
+</head>
+<body>
+  <div class="page">
+    <div class="card">
+      <div class="faq-back-bar">
+        <a class="btn btn-ghost" href="./">返回配置页</a>
+      </div>
+      <div class="faq-wrap">
+        <header class="hero">
+          <h1>常见问题</h1>
+        </header>
+
+        <section class="faq-list">
+          <article class="faq-item">
+            <h2>1. 如何打开应用？安装失败怎么办？</h2>
+            <p><strong>FPK：</strong>安装时填写监听端口（默认 18230，范围 1024～65535），升级保留原设置。从飞牛桌面的「日志推送」打开，仅 NAS 管理员可访问；监听端口仅供本机使用。
+<strong>Docker：</strong>安装前在 Compose 同目录的 <code>.env</code> 中填写 <code>UI_PORT=19080</code>（示例）；不填默认 18080。访问 <code>http://NAS地址:所选端口</code>，修改端口后需重建容器。</p>
+            <p><strong>旧 root 版升级普通版：</strong>若提示应用数据属主不正确，先停止应用，按安装错误中给出的命令修复后再升级。默认路径可执行：</p>
+            <pre class="faq-pre">sudo chown -hR -P -- FnMessageBot:FnMessageBot "$(readlink -f /var/apps/FnMessageBot/var)"</pre>
+            <p>安装提示 Python / pip 下载失败时，检查 NAS 网络和下载源后重试；仍失败可使用 Docker 版。</p>
+          </article>
+
+          <article class="faq-item">
+            <h2>2. 密码、登录过期与重置</h2>
+            <p>FPK 使用安装时设置的应用密码；Docker 首次访问时设置密码（至少 8 位）。登录后连续 <strong>15 分钟无操作</strong>才需重新输入，未过期时打开或刷新可直接进入。后台刷新不会续期，过期后未保存的修改不会自动提交。</p>
+            <p><strong>首次设置需要初始化码：</strong>从应用运行日志或配置目录的 <code>.setup_code</code> 查看；Docker 可执行 <code>docker logs 容器名</code>（替换为实际名称）。FPK 从飞牛桌面以管理员身份设置时无需初始化码。Docker 也可用 <code>FNMB_WEB_PASSWORD</code> 预置初始密码。本机或反向代理访问也需要初始化码。</p>
+            <p><strong>反代下误报尝试过多：</strong>配置 <code>FNMB_TRUSTED_PROXIES</code> 为应用实际看到的代理 IP / CIDR（逗号分隔），并让代理传递正确的 <code>X-Forwarded-For</code>，再重启应用。仅填写自己控制的代理地址，避免配置 <code>0.0.0.0/0</code>。</p>
+            <p><strong>忘记密码：</strong>从 <code>config/config.json</code> 删除 <code>web_password_salt</code>、<code>web_password_hash</code>，重启应用后按上述方式重新设置。</p>
+          </article>
+
+          <article class="faq-item">
+            <h2>3. 如何配置推送渠道？</h2>
+            <p>按 <a href="https://github.com/Sunanang/FNMessageBots/blob/main/docs/notification-channels.md" target="_blank" rel="noopener noreferrer">渠道配置说明</a> 填写，保存后发送测试消息。</p>
+            <p><strong>企业微信自建应用提示 60020 / 可信 IP：</strong>在企业微信管理后台「应用管理 → 你的应用 → 企业可信IP」添加 NAS 的出口公网 IP。公网 IP 经常变化时，可用固定 IP 的代理：将代理 IP 加入白名单，并在渠道「API 地址」填写代理地址。只需群通知也可改用企业微信群机器人 Webhook。</p>
+          </article>
+
+          <article class="faq-item">
+            <h2>4. 测试成功，为什么没有事件通知？</h2>
+            <p>测试消息只验证渠道。请勾选所需事件并保存，查看保存按钮下方的功能检查结果，再触发对应事件。每次启动或重新启用监控都不会补推历史记录；备份、影视、照片事件需要手动勾选。</p>
+            <p>路径不存在：核对应用是否安装及 Docker 挂载；权限不足：按提示授权；缺少表或列：核对数据库版本，授权不能解决兼容问题。数据库损坏请通过对应系统应用检查、备份和恢复，不要直接删除系统库。</p>
+          </article>
+
+          <article id="faq-ssh-journal" class="faq-item">
+            <h2>5. SSH 登录日志提示权限不足</h2>
+            <p><strong>FPK：</strong>在 NAS SSH 用管理员账号执行第一行，随后在应用中心停止并重新启动「日志推送」，再执行第二行验证：</p>
+            <pre class="faq-pre">sudo usermod -aG systemd-journal FnMessageBot
+sudo -u FnMessageBot /usr/bin/journalctl --system -u ssh -u sshd -n 10 --no-pager</pre>
+            <p>SSH 未开启或没有登录事件时，应用会安静等待；在飞牛设置中开启 SSH 后会自动监听，无需重新保存或重启。加入日志组只授予日志读取权限，不会开启 SSH。</p>
+            <details>
+              <summary>Docker 的日志挂载</summary>
+              <p>镜像需包含 journalctl；添加以下挂载后重建容器。非 root 容器还需将宿主 <code>systemd-journal</code> 组的 GID 加入 <code>group_add</code>（在 NAS 执行 <code>getent group systemd-journal</code> 查看）。</p>
+              <pre class="faq-pre">volumes:
+  - /var/log/journal:/var/log/journal:ro
+  - /run/log/journal:/run/log/journal:ro
+  - /etc/machine-id:/etc/machine-id:ro</pre>
+            </details>
+          </article>
+
+          <article id="faq-external-db" class="faq-item">
+            <h2>6. 日志、备份、任务计划、影视/相册数据库不可读</h2>
+            <p><strong>FPK：</strong>仅在保存检查提示权限不足时，复制主页面针对实际路径生成的 ACL 命令，在 NAS SSH 用管理员账号执行，再保存检查。数据库或附属文件重建后可能需重新授权。</p>
+            <p><strong>Docker：</strong>只读挂载宿主数据目录，配置中填写容器内路径；对挂载源按容器实际 UID/GID 授权，不能直接套用 FPK 的 <code>FnMessageBot</code> 用户名。不要全局 chmod 或递归 chown。</p>
+            <p><strong>影视/相册提示缺少表或列：</strong><code>litevideo.sqlite</code> / <code>litegallery.sqlite</code> 与当前适配的 <code>trimmedia.db</code> / <code>photo.db</code> 结构不同，不能只改路径；需适配程序，加组或提权无法解决。</p>
+            <details>
+              <summary>FPK 手动数据库授权示例</summary>
+              <p>优先使用主页面生成的命令。也可复制下方函数并调用，将最后一行替换为实际数据库路径；缺少 setfacl 时先执行 <code>sudo apt-get install acl</code>。</p>
+              <pre class="faq-pre">grant_db_read() {
+    sudo bash -s -- "$1" FnMessageBot &lt;&lt;'FNMB_ACL'
+db=$(realpath -e -- "$1") || exit 1
+test -f "$db" || exit 1
+account=$2
+dir=$(dirname -- "$db")
+while [ "$dir" != / ]; do
+    /usr/bin/setfacl -m "u:$account:x" -- "$dir" || exit 1
+    dir=$(dirname -- "$dir")
+done
+/usr/bin/setfacl -m "u:$account:rx" -- "$(dirname -- "$db")" || exit 1
+/usr/bin/setfacl -m "u:$account:r" -- "$db" || exit 1
+for side in "$db-wal" "$db-shm"; do
+    if [ -f "$side" ]; then
+        /usr/bin/setfacl -m "u:$account:r" -- "$side" || exit 1
+    fi
+done
+FNMB_ACL
+}
+grant_db_read /var/apps/fn-scheduler/var/scheduler.db</pre>
+              <p>此操作仅开放父目录进入、数据库目录读取及数据库和已有 WAL/SHM 文件的读取权限。</p>
+            </details>
+          </article>
+
+          <article id="faq-docker-sock" class="faq-item">
+            <h2>7. Docker 容器事件提示权限不足</h2>
+            <p>先确认 Docker 已运行，socket 路径正确；Docker 版还需挂载 socket。连接失败不一定是权限问题，以保存检查结果为准。</p>
+            <p><strong>FPK：</strong>socket 属组为 docker 时执行第一行，再在应用中心停止并重新启动应用，执行第二行验证：</p>
+            <pre class="faq-pre">sudo usermod -aG docker FnMessageBot
+sudo -u FnMessageBot test -r /var/run/docker.sock &amp;&amp; sudo -u FnMessageBot test -w /var/run/docker.sock &amp;&amp; echo OK</pre>
+            <p>属组不同或加组无效时，按主页面的实际路径使用 ACL；socket 重建后可能需重新授权：</p>
+            <pre class="faq-pre">sudo /usr/bin/setfacl -m u:FnMessageBot:rw -- /var/run/docker.sock</pre>
+            <p><strong>权限范围：</strong>Docker 组或 socket 读写权限等同于宿主 root 级控制能力，不要使用 chmod 777。</p>
+            <details>
+              <summary>Docker 版的 socket 挂载</summary>
+              <p>在 NAS 执行 <code>stat -c '%g' /var/run/docker.sock</code> 查看 GID，将下方 999 替换为实际值后重建容器；root 容器无需 group_add。</p>
+              <pre class="faq-pre">volumes:
+  - /var/run/docker.sock:/var/run/docker.sock
+group_add:
+  - "999"</pre>
+            </details>
+          </article>
+
+          <article id="faq-patrol" class="faq-item">
+            <h2>8. 巡检信息不完整，如何处理？</h2>
+            <p><strong>温度 / 健康为 --：</strong>开启「巡检任务」并保存，或点击「立即巡检一次」查看检查结果。权限不足时，复制主页面命令，在 NAS SSH 用管理员账号执行，再保存并立即巡检验证。</p>
+            <p>部分 ARM、USB 硬盘没有可读的温度传感器，需要 SMART 授权；温度能读到不代表健康状态也可读。只加 disk 组或设置免密 sudo 不能保证生效。缺少工具或设备不支持也会显示 --，请按具体提示处理。</p>
+            <p><strong>容量不同：</strong>「硬盘容量」是整盘容量；「存储空间剩余」是对应存储卷的可用 / 总空间。系统分区、RAID 等会使两者不同，例如 238.47 GB 的系统盘，其数据卷可能只有约 138.3 GB。</p>
+            <details>
+              <summary>FPK SMART 授权命令</summary>
+              <p>优先复制主页面的实际设备命令。以下两种示例<strong>按硬盘类型选一种</strong>，只保留本机存在且需要授权的设备。两步授权均需成功；命令中有报错时先处理报错。</p>
+              <p><strong>仅 SATA / USB SAT（示例 /dev/sdb）：</strong></p>
+              <pre class="faq-pre">sudo /usr/sbin/setcap cap_sys_rawio+ep /usr/sbin/smartctl &amp;&amp;
+sudo /usr/bin/setfacl -m u:FnMessageBot:r -- /dev/sdb &amp;&amp;
+{ sudo -u FnMessageBot /usr/sbin/smartctl -H -A /dev/sdb; echo "退出码: $?"; }</pre>
+              <p><strong>包含 NVMe：</strong>使用含 cap_sys_admin 的命令，不要再用上面的 SATA 命令覆盖。以下示例为两块盘：</p>
+              <pre class="faq-pre">sudo /usr/sbin/setcap cap_sys_rawio,cap_sys_admin+ep /usr/sbin/smartctl &amp;&amp;
+sudo /usr/bin/setfacl -m u:FnMessageBot:r -- /dev/nvme0n1 /dev/sda &amp;&amp;
+for disk in /dev/nvme0n1 /dev/sda; do
+  echo "检查 $disk";
+  sudo -u FnMessageBot /usr/sbin/smartctl -H -A "$disk";
+  echo "退出码: $?";
+done
+</pre>
+              <p>缺少工具时先安装：<code>sudo apt-get install smartmontools libcap2-bin acl</code>。授权后通常无需重启应用；返回实际健康和温度数据后，再保存并立即巡检。</p>
+              <p><strong>权限范围：</strong>capability 作用于所有能执行此 smartctl 的用户，并非只读授权；CAP_SYS_ADMIN 权限较大。工具升级或设备重建后可能需重新授权，系统禁止 capability 时不会生效。不要给 Python 解释器加 capability。</p>
+            </details>
+            <details>
+              <summary>已授权仍读不到：验证命令与退出码</summary>
+              <p>将 /dev/sdb 替换为实际设备。ACL 中应有 <code>user:FnMessageBot:r--</code> 且未被 mask 限制，设备读取权限退出码应为 0；再比较应用账号与管理员的 SMART 输出：</p>
+              <pre class="faq-pre">sudo /usr/sbin/getcap /usr/sbin/smartctl;
+sudo /usr/bin/getfacl -p /dev/sdb;
+sudo -u FnMessageBot test -r /dev/sdb; echo "设备读取权限退出码: $?";
+sudo -u FnMessageBot /usr/sbin/smartctl -H -A /dev/sdb; echo "应用账号退出码: $?";
+sudo /usr/sbin/smartctl -H -A /dev/sdb; echo "管理员退出码: $?"</pre>
+              <p>不要用管道后的退出码判断成功。非零退出码也可能是健康告警：例如 PASSED 配合 In_the_past 返回 32，表示历史属性阈值告警，数据仍可使用。应用账号失败而管理员成功时继续核对权限；两者都读不到时检查 USB / RAID 控制器支持，root 也不能保证取得数据。</p>
+            </details>
+            <details>
+              <summary>Docker 的 IP、版本和 SMART 设置</summary>
+              <p>内网 IP 推荐使用 host 网络；桥接网络可设置 <code>NAS_LAN_IP</code>。公网 IP 获取失败时检查 NAS 联网。系统 / 飞牛版本需读取宿主文件：</p>
+              <pre class="faq-pre">network_mode: host
+volumes:
+  - /etc/os-release:/host/etc/os-release:ro
+  - /var/lib/dpkg/status:/host/dpkg/status:ro</pre>
+              <p>host 模式不要配置 ports；监听端口使用 UI_PORT，修改后重建容器。FPK 的 IP / 版本通常无需提权；版本缺失时核对开放 API 配置和系统文件读取权限。</p>
+              <p>SMART 映射实际设备并添加所需 capability，不必设置 privileged。SATA / SAT 示例：</p>
+              <pre class="faq-pre">devices:
+  - /dev/sdb:/dev/sdb:r
+cap_add:
+  - SYS_RAWIO</pre>
+              <p>NVMe 必要时另加 SYS_ADMIN（权限较大），修改后重建容器。</p>
+            </details>
+          </article>
+
+          <article class="faq-item">
+            <h2>9. 如何反馈问题或联系作者？</h2>
+            <p>请提供 FPK / Docker、系统及应用版本、保存检查提示、相关日志和截图；涉及硬盘时附上命令输出及退出码。联系方式见 <a href="support">支持作者</a>。</p>
+          </article>
+        </section>
+
+        <footer class="page-footer">
+          © 2024 Sunanang · FnMessageBot · MIT License terms apply.
+        </footer>
+      </div>
+    </div>
+  </div>
+  <script>
+    (function () {
+      var key = "fnmb_theme";
+      var mode = localStorage.getItem(key);
+      var resolved = (mode === "dark") ? "dark" : "light";
+      document.documentElement.setAttribute("data-theme", resolved);
+    })();
+  </script>
+</body>
+</html>

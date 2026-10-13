@@ -1,0 +1,14 @@
+{
+    ".url": {
+        "FnMessageBot.Application": {
+            "title": "日志推送",
+            "icon": "images/icon-{0}.webp",
+            "type": "iframe",
+            "protocol": "",
+            "gatewayPrefix": "/app/FnMessageBot",
+            "gatewaySocket": "app.sock",
+            "url": "/app/FnMessageBot/",
+            "allUsers": false
+        }
+    }
+}

@@ -1,0 +1,886 @@
+from __future__ import annotations
+
+import json
+import os
+import re
+import secrets
+import socket
+import sys
+import threading
+from functools import wraps
+from pathlib import Path
+from utils.value_parser import as_bool
+
+# 直接运行本文件时（python src/web/ui_app.py），把 src 加入 path 以便导入 notifier 等
+if __name__ == "__main__":
+    _repo = Path(__file__).resolve().parent.parent.parent
+    _src = _repo / "src"
+    if _src.exists() and str(_src) not in sys.path:
+        sys.path.insert(0, str(_src))
+
+from flask import Flask, jsonify, request, render_template, send_from_directory, abort, redirect, url_for, g
+
+from notifier.channel_params import validate_channel_json
+from notifier.multi_platform_notifier import MultiPlatformNotifier
+from web.access_guard import LoginRateLimiter
+from web.access_guard import SetupCodeStore
+from web.access_guard import StripGatewayHeadersMiddleware
+from web.access_guard import gateway_identity as _gateway_identity_from_environ
+from web.access_guard import client_address
+from web.server_lifecycle import UIServerSupervisor
+from web.auth_service import PASSWORD_MIN_LENGTH
+from web.auth_service import apply_new_password as _apply_new_password
+from web.auth_service import get_password_config as _get_password_config
+from web.auth_service import has_password_set as _has_password_set_fn
+from web.auth_service import verify_password as _verify_password
+from web.api_helpers import build_notifier_from_raw as _build_notifier_from_raw
+from web.api_helpers import parse_success_filter as _parse_success_filter
+from web.app_paths import BASE_DIR
+from web.app_paths import ASSETS_DIR
+from web.app_paths import CONFIG_FILE
+from web.app_paths import ICON_FILE
+from web.app_paths import SUPPORT_QR_DIR
+from web.app_paths import SUPPORT_QR_FILENAMES
+from web.config_store import channels_from_raw as _channels_from_raw
+from web.config_store import config_load_error as _config_load_error
+from web.config_store import load_raw_config as _load_raw_config_from_file
+from web.config_store import mask_channels as _mask_channels
+from web.config_store import restore_masked_channels as _restore_masked_channels
+
+# 运行中的主监控应用，供「立即巡检」等接口使用
+_runtime_monitor_app = None
+
+
+def set_runtime_monitor_app(app) -> None:
+    global _runtime_monitor_app
+    _runtime_monitor_app = app
+
+
+def get_runtime_monitor_app():
+    return _runtime_monitor_app
+from web.config_store import normalize_push_channels as _normalize_push_channels
+from web.config_store import save_raw_config as _save_raw_config_to_file
+from web.config_store import sync_channel_flat_keys as _sync_channel_flat_keys
+from web.config_store import title_prefix_from_dict as _title_prefix_from_dict
+from web.event_catalog import APP_LIFECYCLE_EVENTS
+from web.event_catalog import DEFAULT_SELECTED_EVENTS
+from web.event_catalog import EVENT_IDS_HIDDEN_IN_UI
+from web.event_catalog import OLD_DEFAULT_SELECTED_EVENTS_WITH_EXTRA
+from web.event_catalog import build_events_for_ui
+from config_db_paths import apply_discovered_db_paths
+from web.push_history_service import get_record as get_push_history_record
+from web.push_history_service import get_stats as get_push_history_stats
+from web.push_history_service import list_records as list_push_history_records
+from web.session_service import create_session as _create_session
+from web.session_service import touch_session as _touch_session
+from web.session_service import session_remaining_seconds as _session_remaining_seconds
+from web.session_service import delete_session as _delete_session
+from web.access_diagnostics import collect_access_warnings as _collect_external_db_access_warnings
+from web.access_diagnostics import warning_messages
+
+# 配置页密码：会话空闲超时（秒），超时后需重新输入密码
+SESSION_IDLE_SECONDS = 15 * 60
+AUTH_COOKIE_NAME = "fnmb_session"
+_TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
+_config_lock = threading.RLock()
+
+
+def _config_transaction(fn):
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        with _config_lock:
+            return fn(*args, **kwargs)
+    return wrapped
+
+
+def _auth_cookie_path() -> str:
+    return (request.script_root or "").rstrip("/") + "/"
+
+
+def _session_cookie_secure() -> bool:
+    """HTTPS 反代场景：设置 SESSION_COOKIE_SECURE=1/true 或为 Cookie 加 Secure。"""
+    v = (os.environ.get("SESSION_COOKIE_SECURE") or "").strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    return (os.environ.get("HTTPS") or "").strip() == "1"
+
+
+def _auth_cookie_kwargs() -> dict:
+    return {
+        "max_age": SESSION_IDLE_SECONDS,
+        "httponly": True,
+        "samesite": "Lax",
+        "path": _auth_cookie_path(),
+        "secure": _session_cookie_secure(),
+    }
+
+
+def _has_password_set() -> bool:
+    return _has_password_set_fn(_load_raw_config)
+
+
+def _get_session_id_from_cookie() -> str:
+    # 浏览器可能同时持有旧根路径和网关路径的同名 Cookie；按服务端作用域选有效会话。
+    for sid in request.cookies.getlist(AUTH_COOKIE_NAME):
+        if _session_remaining_seconds(sid, SESSION_IDLE_SECONDS, scope=_auth_cookie_path()) > 0:
+            return sid
+    return ""
+
+
+_setup_codes = SetupCodeStore(CONFIG_FILE.parent / ".setup_code")
+_login_limiter = LoginRateLimiter()
+
+
+def _gateway_identity():
+    return _gateway_identity_from_environ(request.environ)
+
+
+def _is_authenticated() -> bool:
+    """两版均要求应用密码会话；网关管理员身份不能代替应用登录。"""
+    gw = _gateway_identity()
+    if gw is not None and not gw["is_admin"]:
+        return False
+    return _session_remaining_seconds(_get_session_id_from_cookie(), SESSION_IDLE_SECONDS, scope=_auth_cookie_path()) > 0
+
+
+def _setup_requires_code() -> bool:
+    """仅可信网关管理员免初始化码；TCP 包括回环和反代均需要码。"""
+    gw = _gateway_identity()
+    if gw is not None and gw["is_admin"]:
+        return False
+    return True
+
+
+def _client_key() -> str:
+    gw = _gateway_identity()
+    return f"gateway:{gw['uid']}" if gw is not None else client_address(request.environ)
+
+
+@_config_transaction
+def _apply_initial_password_from_env() -> None:
+    """FNMB_WEB_PASSWORD：未设密码时用作初始密码（手装 Docker 可在 compose 中预置）。"""
+    pw = (os.getenv("FNMB_WEB_PASSWORD") or "").strip()
+    if not pw or _has_password_set():
+        return
+    if len(pw) < PASSWORD_MIN_LENGTH:
+        print(f"FNMB_WEB_PASSWORD 长度不足 {PASSWORD_MIN_LENGTH} 位，已忽略")
+        return
+    try:
+        _save_raw_config(_apply_new_password(_load_raw_config(), pw))
+        print("已根据 FNMB_WEB_PASSWORD 设置 Web 访问密码")
+    except Exception as e:
+        print(f"根据 FNMB_WEB_PASSWORD 设置密码失败：{e}")
+
+
+def _load_raw_config() -> dict:
+    raw = _load_raw_config_from_file(CONFIG_FILE)
+    merged, _ = apply_discovered_db_paths(raw)
+    return merged
+
+
+def _save_raw_config(data: dict) -> None:
+    _save_raw_config_to_file(CONFIG_FILE, data)
+
+
+def _current_config_load_error() -> str:
+    return _config_load_error(CONFIG_FILE)
+
+
+def _config_load_error_payload(err: str) -> dict:
+    return {
+        "ok": False,
+        "config_error": True,
+        "message": "配置文件读取失败，请修复 config.json 后重试。",
+        "detail": err,
+    }
+
+
+def _events_catalog_bundle():
+    """重建配置页事件分类（含 VM 事件发现）；每次 API 请求调用，避免 Flask 启动时缓存旧列表。"""
+    raw = _load_raw_config()
+    return build_events_for_ui(
+        logger_db_path=(raw.get("logger_db_path") or "").strip(),
+        backup_db_path=(raw.get("backup_db_path") or "").strip(),
+        trim_media_db_path=(raw.get("trim_media_db_path") or "").strip(),
+        trim_activity_db_path=(raw.get("trim_activity_db_path") or "").strip(),
+        photo_db_path=(raw.get("photo_db_path") or "").strip(),
+        scheduler_db_path=(raw.get("scheduler_db_path") or "").strip(),
+        titles=MultiPlatformNotifier.EVENT_TITLES,
+        notes=MultiPlatformNotifier.EVENT_NOTES,
+    )
+
+
+def create_app(on_config_saved=None) -> Flask:
+    """创建 Flask 应用。on_config_saved: 保存配置成功后的回调（用于热加载，无需重启）。"""
+    app = Flask(__name__, template_folder=str(_TEMPLATE_DIR))
+    _sk = os.environ.get("FLASK_SECRET_KEY") or os.environ.get("SECRET_KEY")
+    app.secret_key = _sk if (_sk and _sk.strip()) else secrets.token_hex(32)
+    icon_ver = str(int(ICON_FILE.stat().st_mtime)) if ICON_FILE.exists() else ""
+    # 页面均位于根路径下一级，统一用相对地址，兼容统一网关的 /app/<appname>/ 前缀
+    icon_url = f"assets/icons/app-icon.png?v={icon_ver}" if icon_ver else ""
+    favicon_url = f"favicon.ico?v={icon_ver}" if icon_ver else ""
+    _apply_initial_password_from_env()
+    if not _has_password_set():
+        _setup_codes.ensure()
+    assets_dir = ASSETS_DIR
+
+    @app.get("/assets/<path:filename>")
+    def serve_assets(filename: str):
+        """提供项目 assets 目录下的静态文件。"""
+        if not assets_dir.exists():
+            abort(404)
+        return send_from_directory(str(assets_dir), filename)
+
+    @app.get("/favicon.ico")
+    def favicon():
+        """浏览器 favicon；复用 app-icon.png，避免 404。"""
+        if ICON_FILE.exists():
+            return send_from_directory(str(ICON_FILE.parent), ICON_FILE.name)
+        abort(404)
+
+    @app.get("/robots.txt")
+    def robots_txt():
+        return "User-agent: *\nDisallow: /\n", 200, {"Content-Type": "text/plain; charset=utf-8"}
+
+    @app.after_request
+    def _no_index(resp):
+        resp.headers.setdefault("X-Robots-Tag", "noindex, nofollow, noarchive")
+        if request.path == "/" or request.path.startswith("/api/") or resp.mimetype == "text/html":
+            resp.headers["Cache-Control"] = "no-store"
+        if getattr(g, "refresh_auth_cookie", False) and _is_authenticated():
+            resp.set_cookie(AUTH_COOKIE_NAME, _get_session_id_from_cookie(), **_auth_cookie_kwargs())
+        return resp
+
+    CHANNEL_OPTIONS = [
+        {"id": "wechat", "name": "企业微信"},
+        {"id": "dingtalk", "name": "钉钉"},
+        {"id": "feishu", "name": "飞书"},
+        {"id": "bark", "name": "Bark"},
+        {"id": "pushplus", "name": "PushPlus"},
+        {"id": "magic_push", "name": "魔法推送"},
+        {"id": "smtp", "name": "SMTP邮件"},
+        {"id": "wecom_app", "name": "企业微信应用"},
+        {"id": "webhook", "name": "通用Webhook"},
+        {"id": "meow", "name": "MeoW"},
+    ]
+
+    # 默认拒绝：只有以下路径无需登录；"/" 仅返回页面骨架，数据全部走需鉴权的接口
+    PUBLIC_PATHS = {
+        "/",
+        "/healthz",
+        "/favicon.ico",
+        "/robots.txt",
+        "/api/auth/status",
+        "/api/auth/login",
+        "/api/auth/set-password",
+        "/api/auth/logout",
+        "/session-guard.js",
+    }
+    PUBLIC_PREFIXES = ("/assets/",)
+
+    def _home_url() -> str:
+        return (request.script_root or "") + "/"
+
+    @app.before_request
+    def _require_auth():
+        gw = _gateway_identity()
+        if gw is not None and not gw["is_admin"]:
+            msg = "仅 NAS 管理员可访问日志推送配置。"
+            if request.path.startswith("/api/"):
+                return jsonify({"ok": False, "message": msg}), 403
+            return msg, 403, {"Content-Type": "text/plain; charset=utf-8"}
+        # 写接口只接受 JSON，避免跨站表单以 text/plain 绕过预检
+        if request.method == "POST" and not request.is_json:
+            return jsonify({"ok": False, "message": "请求须为 application/json。"}), 415
+        path = request.path
+        if path in PUBLIC_PATHS or path.startswith(PUBLIC_PREFIXES):
+            return None
+        config_error = _current_config_load_error()
+        if config_error:
+            return jsonify(_config_load_error_payload(config_error)), 500
+        if _is_authenticated():
+            # 写操作代表用户交互；统计、配置读取和身份轮询均不续期。
+            if request.method == "POST" and not _touch_session(_get_session_id_from_cookie(), SESSION_IDLE_SECONDS, scope=_auth_cookie_path()):
+                return jsonify({"ok": False, "message": "会话已过期，请重新输入密码。"}), 401
+            if request.method == "POST":
+                g.refresh_auth_cookie = True
+            return None
+        if path.startswith("/api/"):
+            return jsonify({
+                "ok": False,
+                "need_setup": not _has_password_set(),
+                "message": "未登录或会话已过期，请重新输入密码。",
+            }), 401
+        if path.startswith("/support/img/"):
+            abort(403)
+        return redirect(_home_url())
+
+    @app.get("/healthz")
+    def healthz():
+        """仅确认 HTTP 服务可响应，不读取配置或访问 NAS 数据源。"""
+        return jsonify({"ok": True, "service": "fn-message-bots"})
+
+    @app.get("/api/auth/status")
+    def auth_status():
+        """无需登录即可访问。返回是否需要设置密码、是否需要登录、是否已认证。"""
+        config_error = _current_config_load_error()
+        if config_error:
+            return jsonify(_config_load_error_payload(config_error)), 500
+        has_pw = _has_password_set()
+        authenticated = _is_authenticated()
+        need_setup = not has_pw and not authenticated
+        setup_requires_code = need_setup and _setup_requires_code()
+        if setup_requires_code:
+            _setup_codes.ensure()
+        return jsonify({
+            "ok": True,
+            "need_setup": need_setup,
+            "setup_requires_code": setup_requires_code,
+            "need_login": has_pw and not authenticated,
+            "authenticated": authenticated,
+            "via_gateway": _gateway_identity() is not None,
+            "password_min_length": PASSWORD_MIN_LENGTH,
+            "idle_seconds": SESSION_IDLE_SECONDS,
+            "remaining_seconds": _session_remaining_seconds(_get_session_id_from_cookie(), SESSION_IDLE_SECONDS, scope=_auth_cookie_path()),
+        })
+
+    @app.post("/api/auth/activity")
+    def auth_activity():
+        """前端仅在真实用户交互后调用；鉴权钩子已刷新活跃时间。"""
+        return jsonify({"ok": True, "authenticated": True, "idle_seconds": SESSION_IDLE_SECONDS,
+                        "remaining_seconds": _session_remaining_seconds(_get_session_id_from_cookie(), SESSION_IDLE_SECONDS, scope=_auth_cookie_path())})
+
+    @app.post("/api/auth/logout")
+    def auth_logout():
+        _delete_session(_get_session_id_from_cookie(), scope=_auth_cookie_path())
+        resp = jsonify({"ok": True})
+        resp.delete_cookie(AUTH_COOKIE_NAME, path=_auth_cookie_path(), secure=_session_cookie_secure(), httponly=True, samesite="Lax")
+        return resp
+
+    @app.get("/session-guard.js")
+    def session_guard_js():
+        return send_from_directory(str(_TEMPLATE_DIR.parent / "static"), "session-guard.js")
+
+    @app.post("/api/auth/set-password")
+    @_config_transaction
+    def auth_set_password():
+        """首次设置密码：可信网关管理员可直接设置，TCP 来源须提供初始化码。"""
+        config_error = _current_config_load_error()
+        if config_error:
+            return jsonify(_config_load_error_payload(config_error)), 500
+        if _has_password_set():
+            return jsonify({"ok": False, "message": "已设置过密码，请使用登录。"}), 400
+        key = _client_key()
+        wait = _login_limiter.retry_after(key)
+        if wait:
+            return jsonify({"ok": False, "message": f"尝试次数过多，请 {wait} 秒后再试。"}), 429
+        payload = request.get_json(silent=True) or {}
+        if _setup_requires_code():
+            if not _setup_codes.verify(str(payload.get("setup_code") or "")):
+                _login_limiter.record_failure(key)
+                return jsonify({
+                    "ok": False,
+                    "message": "初始化码错误。请在应用运行日志或配置目录的 .setup_code 文件中查看。",
+                }), 403
+        p1 = (payload.get("password") or "").strip()
+        p2 = (payload.get("password_confirm") or "").strip()
+        if not p1:
+            return jsonify({"ok": False, "message": "请输入密码。"}), 400
+        if len(p1) < PASSWORD_MIN_LENGTH:
+            return jsonify({"ok": False, "message": f"密码长度至少 {PASSWORD_MIN_LENGTH} 位。"}), 400
+        if p1 != p2:
+            return jsonify({"ok": False, "message": "两次输入的密码不一致。"}), 400
+        try:
+            _save_raw_config(_apply_new_password(_load_raw_config(), p1))
+        except Exception as e:
+            return jsonify({"ok": False, "message": f"保存失败：{e}"}), 500
+        _setup_codes.clear()
+        _login_limiter.reset(key)
+        _delete_session(_get_session_id_from_cookie(), scope=_auth_cookie_path())
+        session_id = _create_session(SESSION_IDLE_SECONDS, scope=_auth_cookie_path())
+        resp = jsonify({"ok": True, "message": "密码设置成功。"})
+        resp.set_cookie(AUTH_COOKIE_NAME, session_id, **_auth_cookie_kwargs())
+        return resp
+
+    @app.post("/api/auth/login")
+    def auth_login():
+        """使用密码登录（按来源 IP 限制连续失败次数）。"""
+        config_error = _current_config_load_error()
+        if config_error:
+            return jsonify(_config_load_error_payload(config_error)), 500
+        if not _has_password_set():
+            return jsonify({"ok": False, "message": "尚未设置密码。"}), 400
+        key = _client_key()
+        wait = _login_limiter.retry_after(key)
+        if wait:
+            return jsonify({"ok": False, "message": f"密码错误次数过多，请 {wait} 秒后再试。"}), 429
+        payload = request.get_json(silent=True) or {}
+        password = (payload.get("password") or "").strip()
+        if not password:
+            return jsonify({"ok": False, "message": "请输入密码。"}), 400
+        raw = _load_raw_config()
+        salt, stored_hash = _get_password_config(raw)
+        if not salt or not stored_hash:
+            return jsonify({"ok": False, "message": "密码配置无效，请重新设置密码。"}), 400
+        if not _verify_password(password, salt, stored_hash):
+            _login_limiter.record_failure(key)
+            return jsonify({"ok": False, "message": "密码错误。"}), 401
+        _login_limiter.reset(key)
+        _delete_session(_get_session_id_from_cookie(), scope=_auth_cookie_path())
+        session_id = _create_session(SESSION_IDLE_SECONDS, scope=_auth_cookie_path())
+        resp = jsonify({"ok": True, "message": "登录成功。"})
+        resp.set_cookie(AUTH_COOKIE_NAME, session_id, **_auth_cookie_kwargs())
+        return resp
+
+    @app.get("/api/config")
+    def get_config():
+        raw = _load_raw_config()
+
+        # 兼容旧版默认事件：仅在返回数据中迁移，用户保存时再写入，GET 不回写配置
+        raw_events = raw.get("monitor_events")
+        if isinstance(raw_events, list):
+            raw_set = set(raw_events)
+            new_default_set = set(DEFAULT_SELECTED_EVENTS)
+            # 仅当配置恰好为「旧版默认（含启动失败/UPS 开关）」时迁移为新默认；不迁移「全选」（= 新默认+生命周期+额外），否则会覆盖用户的全选
+            old_default_with_extra = new_default_set | OLD_DEFAULT_SELECTED_EVENTS_WITH_EXTRA
+            old_full_default = new_default_set | APP_LIFECYCLE_EVENTS
+            if raw_set == old_default_with_extra:
+                raw["monitor_events"] = DEFAULT_SELECTED_EVENTS
+                monitor_events = DEFAULT_SELECTED_EVENTS
+            elif raw_set == old_full_default:
+                filtered = [e for e in raw_events if e not in APP_LIFECYCLE_EVENTS]
+                raw["monitor_events"] = filtered
+                monitor_events = filtered
+            else:
+                monitor_events = raw_events
+        else:
+            monitor_events = DEFAULT_SELECTED_EVENTS
+
+        # 与保存接口一致：剔除已下线的事件 ID（如历史配置中的 LISTEN_PORT_INBOUND），避免前端勾选状态与可选列表不一致
+        events_by_category, third_party_events_by_category, valid_event_ids, _ = _events_catalog_bundle()
+        if isinstance(monitor_events, list):
+            monitor_events = [e for e in monitor_events if e in valid_event_ids]
+        if not monitor_events:
+            monitor_events = list(DEFAULT_SELECTED_EVENTS)
+
+        channels = _mask_channels(_channels_from_raw(raw))
+
+        try:
+            from utils.cron_util import resolve_nas_patrol_cron
+
+            _cron = resolve_nas_patrol_cron(
+                raw.get("nas_patrol_cron", ""),
+                raw.get("nas_patrol_interval_minutes", 720),
+            )
+        except Exception:
+            _cron = "0 12 * * *"
+
+        data = {
+            "title": "FnMessageBot",
+            "subtitle": "飞牛日志消息推送机器人",
+            "version": "2.6.0",
+            "events_by_category": events_by_category,
+            "third_party_events_by_category": third_party_events_by_category,
+            "selected_events": monitor_events,
+            "channels": channels,
+            "title_prefix": _title_prefix_from_dict(raw),
+            "bark_icon": (raw.get("bark_icon") or "").strip(),
+            "log_retention_days": int(raw.get("log_retention_days", raw.get("max_log_age", 7))),
+            "logger_poll_interval": int(raw.get("logger_poll_interval", 3)),
+            "dnd_enabled": as_bool(raw.get("dnd_enabled", False), False),
+            "dnd_start_time": (raw.get("dnd_start_time") or "22:00").strip(),
+            "dnd_end_time": (raw.get("dnd_end_time") or "07:00").strip(),
+            "poll_batch_summary_enabled": as_bool(raw.get("poll_batch_summary_enabled", False), False),
+            "minimal_push_enabled": as_bool(raw.get("minimal_push_enabled", False), False),
+            "ssh_ignore_loopback": as_bool(raw.get("ssh_ignore_loopback", False), False),
+            "nas_patrol_enabled": as_bool(raw.get("nas_patrol_enabled", False), False),
+            "nas_patrol_cron": _cron,
+            "channel_options": CHANNEL_OPTIONS,
+        }
+        # 保存后刷新表单无需重复探测设备，保留保存响应中的检查结果。
+        db_access_warnings = (_collect_external_db_access_warnings(raw, monitor_events)
+                              if request.args.get("check_access") != "0" else [])
+        return jsonify({"ok": True, "data": data, "warnings": warning_messages(db_access_warnings), "warning_details": db_access_warnings})
+
+    @app.post("/api/save-config")
+    @_config_transaction
+    def save_config():
+        payload = request.get_json(silent=True) or {}
+
+        _, _, valid_event_ids, _ = _events_catalog_bundle()
+        events = payload.get("events") or []
+        # 只保留后端认可的事件 ID，避免写入非法值导致热加载或重启异常
+        events = [e for e in events if e in valid_event_ids]
+        channels = payload.get("channels") or []
+        channels = _normalize_push_channels(channels)
+        channels, restore_err = _restore_masked_channels(channels, _channels_from_raw(_load_raw_config()))
+        if restore_err:
+            return jsonify({"ok": False, "message": restore_err}), 400
+        log_retention_days = payload.get("log_retention_days", 7)
+        logger_poll_interval = payload.get("logger_poll_interval", 3)
+        dnd_enabled = as_bool(payload.get("dnd_enabled", False), False)
+        dnd_start_time = (payload.get("dnd_start_time") or "22:00").strip()
+        dnd_end_time = (payload.get("dnd_end_time") or "07:00").strip()
+        poll_batch_summary_enabled = as_bool(payload.get("poll_batch_summary_enabled", False), False)
+        minimal_push_enabled = as_bool(payload.get("minimal_push_enabled", False), False)
+        ssh_ignore_loopback = as_bool(payload.get("ssh_ignore_loopback", False), False)
+        nas_patrol_enabled = as_bool(payload.get("nas_patrol_enabled", False), False)
+        nas_patrol_cron = (payload.get("nas_patrol_cron") or "").strip()
+        title_prefix = _title_prefix_from_dict(payload)
+        if title_prefix and len(title_prefix) > 20:
+            return jsonify({"ok": False, "message": "标题前缀过长（最多 20 个字符）。"}), 400
+        bark_icon = (payload.get("bark_icon") or "").strip()
+
+        if dnd_enabled:
+            if not dnd_start_time or not dnd_end_time:
+                return jsonify({"ok": False, "message": "开启勿扰模式时请填写开始时间和结束时间。"}), 400
+            if not re.match(r"^([01]?\d|2[0-3]):[0-5]\d$", dnd_start_time):
+                return jsonify({"ok": False, "message": "勿扰开始时间格式不正确，请使用 HH:MM（如 22:00）。"}), 400
+            if not re.match(r"^([01]?\d|2[0-3]):[0-5]\d$", dnd_end_time):
+                return jsonify({"ok": False, "message": "勿扰结束时间格式不正确，请使用 HH:MM（如 07:00）。"}), 400
+
+        if nas_patrol_enabled or nas_patrol_cron:
+            try:
+                from utils.cron_util import validate_cron_expr
+
+                nas_patrol_cron = validate_cron_expr(nas_patrol_cron or "0 12 * * *")
+            except ValueError as e:
+                return jsonify({"ok": False, "message": str(e)}), 400
+        else:
+            nas_patrol_cron = (nas_patrol_cron or "0 12 * * *").strip() or "0 12 * * *"
+
+        # 不允许选择内部保留事件
+        if EVENT_IDS_HIDDEN_IN_UI & set(events):
+            return jsonify({"ok": False, "message": "包含不可选的事件类型，请刷新页面重试。"}), 400
+
+        # 基本校验
+        if not events:
+            return jsonify({"ok": False, "message": "请至少选择一个事件类型。"}), 400
+
+        if not channels:
+            return jsonify({"ok": False, "message": "请至少配置一个推送渠道。"}), 400
+        if not any(bool(ch.get("enabled")) for ch in channels):
+            return jsonify({"ok": False, "message": "请至少配置一个推送渠道。"}), 400
+
+        known_types = {opt["id"] for opt in CHANNEL_OPTIONS}
+        for ch in channels:
+            ch_type = ch.get("type")
+            url = (ch.get("url") or "").strip()
+            if ch_type not in known_types:
+                return jsonify({"ok": False, "message": "存在未知的推送渠道类型。"}), 400
+            if not url:
+                return jsonify({"ok": False, "message": "推送渠道地址不能为空。"}), 400
+            if ch_type in ("wecom_app", "webhook", "meow"):
+                parts = []
+                for part in (p.strip() for p in url.split("|") if p.strip()):
+                    err = validate_channel_json(ch_type, part)
+                    if err:
+                        return jsonify({"ok": False, "message": err}), 400
+                    # 多条配置以 | 拼接，JSON 字符串内的 | 转义保存
+                    parts.append(json.dumps(json.loads(part), ensure_ascii=False).replace("|", "\\u007c"))
+                ch["url"] = "|".join(parts)
+            elif ch_type == "pushplus":
+                try:
+                    obj = json.loads(url)
+                    if not isinstance(obj, dict) or "token" not in obj:
+                        return jsonify({"ok": False, "message": "PushPlus 参数必须是包含 token 的 JSON 对象。"}), 400
+                except json.JSONDecodeError as e:
+                    return jsonify({"ok": False, "message": f"PushPlus 参数不是合法 JSON：{e}"}), 400
+            elif ch_type == "magic_push":
+                try:
+                    obj = json.loads(url)
+                    if not isinstance(obj, dict):
+                        return jsonify({"ok": False, "message": "魔法推送配置须为 JSON 对象。"}), 400
+                    base = (obj.get("base_url") or "").strip()
+                    token = (obj.get("token") or "").strip()
+                    if not base or not token:
+                        return jsonify({"ok": False, "message": "魔法推送须填写基础 URL 与 Token。"}), 400
+                    if not base.startswith("http"):
+                        return jsonify({"ok": False, "message": "魔法推送基础 URL 须为 http(s) 地址。"}), 400
+                except json.JSONDecodeError as e:
+                    return jsonify({"ok": False, "message": f"魔法推送配置不是合法 JSON：{e}"}), 400
+            elif ch_type == "smtp":
+                try:
+                    obj = json.loads(url)
+                    if not isinstance(obj, dict):
+                        return jsonify({"ok": False, "message": "SMTP 配置须为 JSON 对象。"}), 400
+                    server = (obj.get("server") or "").strip()
+                    username = (obj.get("username") or "").strip()
+                    password = obj.get("password") or ""
+                    to_raw = (obj.get("to") or "").strip()
+                    if not server or not username or not password or not to_raw:
+                        return jsonify({"ok": False, "message": "SMTP 须填写服务器、用户名、密码和收件人地址。"}), 400
+                    try:
+                        int(obj.get("port", 465))
+                    except (TypeError, ValueError):
+                        return jsonify({"ok": False, "message": "SMTP 端口必须是整数。"}), 400
+                except json.JSONDecodeError as e:
+                    return jsonify({"ok": False, "message": f"SMTP 配置不是合法 JSON：{e}"}), 400
+            elif not url.startswith("http"):
+                return (
+                    jsonify({"ok": False, "message": f"推送地址格式不正确：{url}"}),
+                    400,
+                )
+
+        if log_retention_days is None:
+            log_retention_days = 7
+        if logger_poll_interval is None:
+            logger_poll_interval = 3
+        try:
+            log_retention_days = int(log_retention_days)
+            logger_poll_interval = int(logger_poll_interval)
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "message": "日志缓存天数和轮询时间必须是整数。"}), 400
+
+        if log_retention_days <= 0:
+            return jsonify({"ok": False, "message": "日志缓存天数必须大于 0。"}), 400
+        if logger_poll_interval <= 0:
+            return jsonify({"ok": False, "message": "数据库轮询时间必须大于 0 秒。"}), 400
+
+        # 完整列表写入 push_channels；扁平字段仅同步已开启渠道（供通知器推送）
+        flat_keys = _sync_channel_flat_keys(channels)
+
+        raw = _load_raw_config()
+        raw.update(
+            {
+                **flat_keys,
+                "push_channels": channels,
+                "monitor_events": events,
+                "log_retention_days": log_retention_days,
+                "logger_poll_interval": logger_poll_interval,
+                "dnd_enabled": dnd_enabled,
+                "dnd_start_time": dnd_start_time,
+                "dnd_end_time": dnd_end_time,
+                "poll_batch_summary_enabled": poll_batch_summary_enabled,
+                "minimal_push_enabled": minimal_push_enabled,
+                "ssh_ignore_loopback": ssh_ignore_loopback,
+                "nas_patrol_enabled": nas_patrol_enabled,
+                "nas_patrol_cron": nas_patrol_cron,
+                "title_prefix": title_prefix,
+                "bark_icon": bark_icon,
+            }
+        )
+
+        try:
+            _save_raw_config(raw)
+        except Exception as e:
+            return jsonify({"ok": False, "message": f"配置写入失败（{e}），请检查 config 目录是否可写。"}), 500
+
+        db_access_warnings = _collect_external_db_access_warnings(raw, events)
+        if callable(on_config_saved):
+            try:
+                on_config_saved()
+            except Exception as e:
+                return jsonify({
+                    "ok": True,
+                    "message": f"配置已保存，但热加载失败（{e}），请停止并重新启动应用后生效。",
+                    "warnings": warning_messages(db_access_warnings), "warning_details": db_access_warnings,
+                }), 200
+
+        return jsonify({
+            "ok": True,
+            "message": "配置已保存，以下数据源仍需处理。" if db_access_warnings else "配置已保存，监控已热加载生效。",
+            "warnings": warning_messages(db_access_warnings), "warning_details": db_access_warnings,
+        })
+
+    @app.post("/api/test")
+    def test_push():
+        try:
+            payload = request.get_json(silent=True) or {}
+            content = (payload.get("content") or "").strip()
+            if not content:
+                return jsonify({"ok": False, "message": "请输入要测试的内容。"}), 400
+
+            raw = _load_raw_config()
+            notifier = _build_notifier_from_raw(raw)
+
+            out = notifier.send_system_notification(
+                "TEST_PUSH",
+                content,
+                {
+                    "hostname": socket.gethostname(),
+                    "version": "2.6.0",
+                },
+            )
+            ok = out.get("success", False) if isinstance(out, dict) else bool(out)
+            channel_results = out.get("channel_results") if isinstance(out, dict) else None
+            if ok:
+                return jsonify({
+                    "ok": True,
+                    "message": "测试消息已发送，请检查各渠道是否收到。",
+                    "channel_results": channel_results or [],
+                })
+            # 拼出各渠道失败原因，便于排查魔法推送等自建服务
+            fail_bits = []
+            if isinstance(channel_results, list):
+                for cr in channel_results:
+                    if not isinstance(cr, dict):
+                        continue
+                    name = str(cr.get("channel") or "渠道")
+                    err = cr.get("error")
+                    if err:
+                        fail_bits.append(f"{name}: {err}")
+                    elif not cr.get("success"):
+                        fail_bits.append(f"{name}: 发送失败")
+            detail = "；".join(fail_bits) if fail_bits else "请检查配置"
+            return jsonify({
+                "ok": False,
+                "message": f"所有渠道发送失败。{detail}",
+                "channel_results": channel_results or [],
+            }), 500
+        except Exception as e:
+            return jsonify({"ok": False, "message": f"测试发送异常：{e}"}), 500
+
+    @app.post("/api/nas-patrol/run")
+    def run_nas_patrol():
+        """立即执行一次 NAS 巡检推送（不等待 Cron）。"""
+        try:
+            runtime = get_runtime_monitor_app()
+            if runtime is None:
+                return jsonify({
+                    "ok": False,
+                    "message": "监控进程未就绪（请确认以完整服务启动，而非仅 UI）。",
+                }), 503
+            from monitor.nas_patrol import run_nas_patrol_now
+
+            ok, message = run_nas_patrol_now(runtime)
+            if ok:
+                raw = _load_raw_config()
+                access_warnings = _collect_external_db_access_warnings(
+                    raw, raw.get("monitor_events") or [], include_patrol=True)
+                return jsonify({"ok": True, "message": message,
+                                "warnings": warning_messages(access_warnings), "warning_details": access_warnings})
+            return jsonify({"ok": False, "message": message}), 500
+        except Exception as e:
+            return jsonify({"ok": False, "message": f"巡检执行异常：{e}"}), 500
+
+    @app.get("/api/push-stats")
+    def get_push_stats():
+        """推送数据汇总：总条数/成功/失败，当日条数/成功/失败（基于 SQLite push_history）。"""
+        try:
+            stats = get_push_history_stats(_load_raw_config)
+            return jsonify({
+                "ok": True,
+                "data": stats,
+            })
+        except Exception:
+            return jsonify({
+                "ok": True,
+                "data": {
+                    "total": {"total": 0, "success": 0, "fail": 0},
+                    "today": {"total": 0, "success": 0, "fail": 0},
+                },
+            })
+
+    @app.get("/api/push-history")
+    def get_push_history():
+        """推送记录列表：分页，可选按成功/失败筛选。"""
+        try:
+            limit = min(100, max(1, request.args.get("limit", 50, type=int)))
+            offset = max(0, request.args.get("offset", 0, type=int))
+            success_filter = _parse_success_filter(request.args.get("success"))
+            rows = list_push_history_records(
+                _load_raw_config,
+                limit=limit,
+                offset=offset,
+                success_filter=success_filter,
+            )
+            return jsonify({"ok": True, "data": rows})
+        except Exception as e:
+            return jsonify({"ok": False, "message": str(e)}), 500
+
+    @app.get("/api/push-history/<int:record_id>")
+    def get_push_history_detail(record_id):
+        """单条推送记录详情。"""
+        try:
+            row = get_push_history_record(_load_raw_config, record_id)
+            if row is None:
+                return jsonify({"ok": False, "message": "记录不存在"}), 404
+            return jsonify({"ok": True, "data": row})
+        except Exception as e:
+            return jsonify({"ok": False, "message": str(e)}), 500
+
+    @app.get("/history")
+    def history_page():
+        """推送记录二级页：列表 + 筛选 + 加载更多 + 查看详情。"""
+        return render_template("history.html", favicon_url=favicon_url)
+
+    @app.get("/support/img/<path:name>")
+    def support_qr(name: str):
+        """支持作者页收款码（仅允许白名单文件名）。"""
+        safe = Path(name).name
+        if safe not in SUPPORT_QR_FILENAMES:
+            abort(404)
+        if not SUPPORT_QR_DIR.is_dir():
+            abort(404)
+        target = SUPPORT_QR_DIR / safe
+        if not target.is_file():
+            abort(404)
+        return send_from_directory(str(SUPPORT_QR_DIR), safe)
+
+    @app.get("/support")
+    def support_page():
+        """支持作者：展示 README 中与捐赠说明一致的收款二维码。"""
+        wechat_src = (
+            url_for("support_qr", name="wechat_pay.jpg")
+            if SUPPORT_QR_DIR.is_dir() and (SUPPORT_QR_DIR / "wechat_pay.jpg").is_file()
+            else ""
+        )
+        ali_src = (
+            url_for("support_qr", name="ali_pay.jpg")
+            if SUPPORT_QR_DIR.is_dir() and (SUPPORT_QR_DIR / "ali_pay.jpg").is_file()
+            else ""
+        )
+        return render_template(
+            "support.html",
+            favicon_url=favicon_url,
+            wechat_src=wechat_src,
+            ali_src=ali_src,
+        )
+
+    @app.get("/faq")
+    def faq_page():
+        """常见问题页。"""
+        return render_template("faq.html", favicon_url=favicon_url)
+
+    @app.get("/")
+    def index():
+        """重新打开或刷新时复用未过期的会话，不恢复已过期会话。"""
+        if _touch_session(_get_session_id_from_cookie(), SESSION_IDLE_SECONDS, scope=_auth_cookie_path()):
+            g.refresh_auth_cookie = True
+        return render_template(
+            "index.html",
+            icon_url=icon_url,
+            favicon_url=favicon_url,
+        )
+
+
+    return app
+
+
+def start_ui_server_in_background(on_config_saved=None) -> UIServerSupervisor:
+    """启动并持续维护配置 UI 服务。on_config_saved 用于保存配置后的热加载。
+
+    - TCP：UI_HOST（默认 0.0.0.0）/ UI_PORT（默认 18080）；剥离客户端自带的 X-Trim-* 头。
+    - 统一网关：设置 FNMB_GATEWAY_SOCKET 时额外监听该 Unix Socket，前缀取 FNMB_GATEWAY_PREFIX。
+    """
+    host = (os.getenv("UI_HOST") or "0.0.0.0").strip() or "0.0.0.0"
+    return UIServerSupervisor(
+        lambda: create_app(on_config_saved=on_config_saved),
+        host, os.getenv("UI_PORT", "18080"),
+        (os.getenv("FNMB_GATEWAY_SOCKET") or "").strip(),
+        (os.getenv("FNMB_GATEWAY_PREFIX") or "").strip(),
+    ).start()
+
+
+if __name__ == "__main__":
+    # 本地调试：只启动 UI，不启动监控（无需配置 Webhook 即可打开页面）
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    os.chdir(repo_root)
+    app = create_app()
+    app.wsgi_app = StripGatewayHeadersMiddleware(app.wsgi_app)
+    port = int(os.getenv("UI_PORT", "18080"))
+    print(f"配置 UI: http://127.0.0.1:{port}")
+    app.run(host="127.0.0.1", port=port, debug=True)

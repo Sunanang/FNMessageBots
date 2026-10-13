@@ -1,0 +1,156 @@
+#!/bin/bash
+
+### This script is called after the user upgrades the application.
+### 升级后刷新 Python 依赖（如新增 croniter），不覆盖已有 config.json。
+
+set -euo pipefail
+
+fail_user_visible() {
+    local msg="$1"
+    if [ -n "${TRIM_TEMP_LOGFILE:-}" ]; then
+        printf "%s\n" "${msg}" > "${TRIM_TEMP_LOGFILE}"
+    fi
+    exit 1
+}
+
+_FAIL_HINT="请前往飞牛社区按教程安装 Docker 版本FnMessageBot：https://club.fnnas.com/forum.php?mod=viewthread&tid=57252"
+
+if ! command -v python3 >/dev/null 2>&1; then
+    fail_user_visible "升级失败：未找到 python3。${_FAIL_HINT}"
+fi
+
+REQ_PY_OK="$(python3 -c 'import sys; print(int(sys.version_info >= (3,9)))' || true)"
+if [ "${REQ_PY_OK}" != "1" ]; then
+    fail_user_visible "升级失败：需要 Python >= 3.9。${_FAIL_HINT}"
+fi
+
+_app_install_root() {
+    local src="${BASH_SOURCE[0]:-$0}"
+    cd -P "$(dirname "${src}")/.." && pwd
+}
+
+resolve_app_code_dir() {
+    local root cmd_dir trim_dest d
+    root="$(_app_install_root)"
+    cmd_dir="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    trim_dest="${TRIM_APPDEST:-}"
+
+    for d in \
+        "${cmd_dir}/fnmessagebots" \
+        "${root}/app/server" \
+        "${root}/target" \
+        "${root}/target/fnmessagebots"
+    do
+        if [ -f "${d}/requirements.txt" ] && [ -f "${d}/src/main.py" ]; then
+            printf "%s" "${d}"
+            return 0
+        fi
+    done
+
+    if [ -n "${trim_dest}" ]; then
+        for d in \
+            "${trim_dest}/target" \
+            "${trim_dest}/target/fnmessagebots" \
+            "${trim_dest}/app/server"
+        do
+            if [ -f "${d}/requirements.txt" ] && [ -f "${d}/src/main.py" ]; then
+                printf "%s" "${d}"
+                return 0
+            fi
+        done
+    fi
+    return 1
+}
+
+if ! APP_CODE_DIR="$(resolve_app_code_dir)"; then
+    fail_user_visible "升级失败：未找到应用代码目录。${_FAIL_HINT}"
+fi
+
+REQ_FILE="${APP_CODE_DIR}/requirements.txt"
+if [ ! -f "${REQ_FILE}" ]; then
+    fail_user_visible "升级失败：未找到 requirements.txt。${_FAIL_HINT}"
+fi
+
+source "$(dirname "${BASH_SOURCE[0]}")/data_permissions"
+prepare_app_data_permissions
+
+mkdir -p "${TRIM_PKGVAR}" "${TRIM_PKGVAR}/config" "${TRIM_PKGVAR}/data/logs" "${TRIM_PKGVAR}/data/cursor"
+source "$(dirname "${BASH_SOURCE[0]}")/ui_port"
+save_fnmb_ui_port
+chmod 600 "${TRIM_PKGVAR}/config/config.json" 2>/dev/null || true
+
+VENV_DIR="${TRIM_PKGVAR}/venv"
+PY_TARGET="${TRIM_PKGVAR}/python_modules"
+
+_append_venv_log() {
+    local f="$1"
+    if [ -n "${TRIM_TEMP_LOGFILE:-}" ] && [ -f "${f}" ]; then
+        {
+            printf "\n--- venv 命令输出（节选）---\n"
+            head -80 "${f}"
+        } >> "${TRIM_TEMP_LOGFILE}"
+    fi
+    rm -f "${f}"
+}
+
+_try_create_venv() {
+    local err
+    err="$(mktemp)"
+    rm -rf "${VENV_DIR}" 2>/dev/null || true
+    if python3 -m venv --copies "${VENV_DIR}" 2>"${err}"; then
+        rm -f "${err}"
+        return 0
+    fi
+    rm -rf "${VENV_DIR}" 2>/dev/null || true
+    if python3 -m venv "${VENV_DIR}" 2>"${err}"; then
+        rm -f "${err}"
+        return 0
+    fi
+    _append_venv_log "${err}"
+    return 1
+}
+
+_install_with_venv() {
+    rm -f "${TRIM_PKGVAR}/.use_python_target" 2>/dev/null || true
+    if ! _try_create_venv; then
+        return 1
+    fi
+    if ! "${VENV_DIR}/bin/python" -m pip --version >/dev/null 2>&1; then
+        "${VENV_DIR}/bin/python" -m ensurepip --upgrade >/dev/null 2>&1 || true
+    fi
+    if ! "${VENV_DIR}/bin/python" -m pip --version >/dev/null 2>&1; then
+        fail_user_visible "升级失败：虚拟环境已创建但 pip 不可用。${_FAIL_HINT}"
+    fi
+    "${VENV_DIR}/bin/python" -m pip install -U pip >/dev/null 2>&1 || true
+    if ! "${VENV_DIR}/bin/python" -m pip install -r "${REQ_FILE}"; then
+        fail_user_visible "升级失败：Python 依赖安装失败（venv）。${_FAIL_HINT}"
+    fi
+    return 0
+}
+
+_install_with_target() {
+    rm -rf "${PY_TARGET}" 2>/dev/null || true
+    mkdir -p "${PY_TARGET}"
+    : > "${TRIM_PKGVAR}/.use_python_target"
+    rm -rf "${VENV_DIR}" 2>/dev/null || true
+    if ! python3 -m pip install -r "${REQ_FILE}" -t "${PY_TARGET}"; then
+        fail_user_visible "升级失败：无法使用虚拟环境，且 pip 依赖安装也失败。${_FAIL_HINT}"
+    fi
+}
+
+if [ -x "${VENV_DIR}/bin/python" ] && [ ! -f "${TRIM_PKGVAR}/.use_python_target" ]; then
+    "${VENV_DIR}/bin/python" -m pip install -U pip >/dev/null 2>&1 || true
+    if ! "${VENV_DIR}/bin/python" -m pip install -r "${REQ_FILE}"; then
+        fail_user_visible "升级失败：更新 Python 依赖失败（已有 venv）。${_FAIL_HINT}"
+    fi
+elif [ -f "${TRIM_PKGVAR}/.use_python_target" ] && [ -d "${PY_TARGET}" ]; then
+    if ! python3 -m pip install -r "${REQ_FILE}" -t "${PY_TARGET}"; then
+        fail_user_visible "升级失败：更新 Python 依赖失败（target 模式）。${_FAIL_HINT}"
+    fi
+elif ! _install_with_venv; then
+    _install_with_target
+fi
+
+prepare_app_data_permissions
+
+exit 0
