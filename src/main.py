@@ -74,6 +74,7 @@ class Application:
         self.notification_health_thread = None
         self._nas_patrol_thread = None
         self._wan_ip_monitor_thread = None
+        self._ui_server = None
         self._exit_code = 0
         self._unified_batch_buf: List[Dict[str, Any]] = []
         self._unified_batch_lock = threading.Lock()
@@ -721,9 +722,12 @@ class Application:
             self.running = True
 
             try:
-                start_ui_server_in_background(on_config_saved=self.reload_config)
+                self._ui_server = start_ui_server_in_background(on_config_saved=self.reload_config)
             except Exception as e:
-                print(f"配置 UI 启动失败: {e}")
+                if self.logger:
+                    self.logger.exception("配置 UI 监督线程启动失败: %s", e)
+                else:
+                    print(f"配置 UI 监督线程启动失败: {e}")
             try:
                 from web.ui_app import set_runtime_monitor_app
 
@@ -917,6 +921,9 @@ class Application:
     def shutdown(self):
         """关闭应用"""
         print("\n正在关闭应用...")
+        if self._ui_server is not None:
+            self._ui_server.stop()
+            self._ui_server = None
         self._stop_unified_batch_flush_thread()
         self._flush_unified_batch_pending_only()
 

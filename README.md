@@ -184,7 +184,7 @@ PYTHONPATH=. LOGGER_DB_PATH=./logger_data.db3 WECHAT_WEBHOOK_URL=xxx python3 src
 - **收不到通知**：检查 Webhook / PushPlus、网络与 `docker compose logs`。
 - **时间不对**：调整 `LOGTIME_DISPLAY_OFFSET_SECONDS`（默认已为 +8 小时）。
 - **重复通知**：调大 `dedup_window`（秒）。
-- **Web 配置页打不开**：确认端口映射与防火墙；容器内可设 `UI_PORT` 并与 `ports` 一致。
+- **Web 配置页打不开**：直接使用 `http://NAS内网IP:所选端口` 验证（默认 `18080`，本服务不直接提供 HTTPS），再检查桌面快捷入口、反向代理和防火墙。host 模式通过 `UI_PORT` 设置端口；桥接模式需核对端口映射。监听失败或 Web 服务线程退出后，程序每 5 秒尝试恢复入口，并将监听地址、失败和恢复信息写入 `monitor_*.log`。Docker 健康检查同时验证 Python 进程及 `/healthz` HTTP 响应；不验证 NAS 外部的代理或端口映射。
 - **忘记 Web 密码**：在可信环境下编辑 `config.json`，删除 `web_password_salt` 与 `web_password_hash` 后重启，再用日志或 `config/.setup_code` 中的初始化码重新设置密码。
 
 ## 捐赠

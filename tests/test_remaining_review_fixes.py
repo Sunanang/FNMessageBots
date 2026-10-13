@@ -176,25 +176,29 @@ class RemainingReviewFixTests(unittest.TestCase):
             second.result(timeout=5)
         self.assertEqual(maximum, 1)
 
-    def test_tcp_bind_failure_does_not_prevent_gateway_startup(self):
-        with patch.dict(os.environ, {"FNMB_GATEWAY_SOCKET": str(self.base / "app.sock")}), \
-             patch.object(ui_app, "create_app", return_value=self.app), \
-             patch("werkzeug.serving.make_server", side_effect=[SystemExit(1), Mock()]) as server, \
-             patch.object(ui_app, "_serve_forever", return_value="gateway-thread") as serve:
-            self.assertEqual(ui_app.start_ui_server_in_background(), "gateway-thread")
-        self.assertEqual(server.call_count, 2)
-        self.assertEqual(serve.call_args.args[1], "FnMessageBots-Gateway")
+    def test_ui_start_passes_both_entries_and_reload_callback_to_supervisor(self):
+        callback = Mock()
+        socket_path = str(self.base / "app.sock")
+        with patch.dict(os.environ, {
+            "UI_HOST": "127.0.0.1", "UI_PORT": "19080",
+            "FNMB_GATEWAY_SOCKET": socket_path, "FNMB_GATEWAY_PREFIX": "/app/FnMessageBot",
+        }), patch.object(ui_app, "create_app", return_value=self.app) as create, \
+             patch.object(ui_app, "UIServerSupervisor") as supervisor:
+            result = ui_app.start_ui_server_in_background(on_config_saved=callback)
+            self.assertIs(result, supervisor.return_value.start.return_value)
+            factory, host, port, path, prefix = supervisor.call_args.args
+            self.assertIs(factory(), self.app)
+            self.assertEqual((host, port, path, prefix), ("127.0.0.1", "19080", socket_path, "/app/FnMessageBot"))
+            create.assert_called_once_with(on_config_saved=callback)
 
-    def test_gateway_bind_failure_keeps_tcp_and_all_failures_become_runtime_error(self):
-        with patch.dict(os.environ, {"FNMB_GATEWAY_SOCKET": str(self.base / "app.sock")}), \
-             patch.object(ui_app, "create_app", return_value=self.app), \
-             patch("werkzeug.serving.make_server", side_effect=[Mock(), SystemExit(1)]), \
-             patch.object(ui_app, "_serve_forever", return_value="tcp-thread"):
-            self.assertEqual(ui_app.start_ui_server_in_background(), "tcp-thread")
-        with patch.object(ui_app, "create_app", return_value=self.app), \
-             patch("werkzeug.serving.make_server", side_effect=SystemExit(1)):
-            with self.assertRaises(RuntimeError):
-                ui_app.start_ui_server_in_background()
+    def test_health_endpoint_needs_no_session_or_readable_config(self):
+        self.config.write_text("invalid JSON")
+        client = self.app.test_client()
+        with patch.object(ui_app, "_load_raw_config", side_effect=AssertionError("health must not read config")):
+            response = client.get("/healthz")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {"ok": True, "service": "fn-message-bots"})
+        self.assertEqual(client.get("/api/config").status_code, 500)
 
     def test_failed_wan_push_keeps_baseline_and_retries_until_success(self):
         wan_ip_monitor._save_state(wan_ip_monitor._state_path(self.base), {"baseline_done": True, "last_wan_ip": "8.8.8.8"})
