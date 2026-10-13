@@ -1,0 +1,56 @@
+#!/bin/bash
+# 安装端口独立于推送配置保存，避免配置页保存或升级覆盖安装设置。
+FNMB_DEFAULT_UI_PORT=18230
+
+normalize_fnmb_ui_port() {
+    local value="$1"
+    case "$value" in
+        ""|*[!0-9]*) return 1 ;;
+    esac
+    [ "${#value}" -le 5 ] || return 1
+    value=$((10#$value))
+    [ "$value" -ge 1024 ] && [ "$value" -le 65535 ] || return 1
+    printf '%s' "$value"
+}
+
+read_fnmb_ui_port() {
+    local file="${TRIM_PKGVAR}/config/ui_port" value
+    if [ -e "$file" ]; then
+        value="$(cat "$file")" || {
+            fail_user_visible "无法读取端口配置：${file}。请检查应用账号的文件读取权限。"
+            return 1
+        }
+    else
+        value="$FNMB_DEFAULT_UI_PORT"
+    fi
+    normalize_fnmb_ui_port "$value" || {
+        fail_user_visible "端口配置无效：请输入 1024～65535 之间的整数（${file}）。"
+        return 1
+    }
+}
+
+save_fnmb_ui_port() {
+    local file="${TRIM_PKGVAR}/config/ui_port" value tmp
+    if [ "$#" -gt 0 ]; then
+        value="$(normalize_fnmb_ui_port "$1")" || {
+            fail_user_visible "端口设置无效：请输入 1024～65535 之间的整数。"
+            return 1
+        }
+    else
+        # 升级或未提供向导变量时保留已存端口；旧版本使用默认端口。
+        value="$(read_fnmb_ui_port)" || return 1
+    fi
+    mkdir -p "${TRIM_PKGVAR}/config" || {
+        fail_user_visible "无法创建端口配置目录。请检查应用数据目录的写入权限。"
+        return 1
+    }
+    tmp="$(mktemp "${file}.XXXXXX")" || {
+        fail_user_visible "无法保存端口配置：${file}。请检查应用账号的写入权限。"
+        return 1
+    }
+    if ! chmod 600 "$tmp" || ! printf '%s\n' "$value" > "$tmp" || ! mv -f "$tmp" "$file"; then
+        rm -f "$tmp"
+        fail_user_visible "无法保存端口配置：${file}。请检查应用账号的写入权限。"
+        return 1
+    fi
+}

@@ -160,8 +160,11 @@ PYTHONPATH=. LOGGER_DB_PATH=./logger_data.db3 WECHAT_WEBHOOK_URL=xxx python3 src
 ├── data/cursor           # 轮询游标等
 ├── tools/log_manager.py
 ├── tests/                # 采集、权限诊断与配置接口回归（模拟网络、临时数据库）
+│   └── fpk/              # FPK 安装/升级/权限脚本生命周期测试
+├── fpk/                  # 飞牛应用中心 FPK 打包工程（manifest、cmd、wizard、app/ui）；src 构建时从顶层复制
 ├── docs/                 # 文档（notification-channels 与各推送渠道子页）
-├── scripts/              # 辅助脚本（如推送历史种子数据等）
+├── scripts/              # 辅助脚本（build-fpk.sh 打包 FPK、推送历史种子数据等）
+├── dist/                 # FPK 构建产物（不入库）
 ├── .github/workflows/    # Docker 多架构 manifest 合并
 │   ├── docker-manifest.yml
 │   └── merge-manifest.yml
@@ -174,6 +177,15 @@ PYTHONPATH=. LOGGER_DB_PATH=./logger_data.db3 WECHAT_WEBHOOK_URL=xxx python3 src
 ├── LICENSE               # MIT 许可证全文
 └── pyproject.toml
 ```
+
+### FPK 打包
+
+```bash
+./scripts/build-fpk.sh            # 需 fnpack（PATH 或 ~/.local/bin），或 FNPACK=/path/to/fnpack
+# 产物: dist/FnMessageBot-<manifest version>.fpk
+```
+
+运行测试：`python -m pytest tests`
 
 ## 故障排除
 

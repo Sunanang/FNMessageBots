@@ -36,3 +36,7 @@ tools
 *.tar
 *.tar.gz
 *.tgz
+
+# FPK 打包目录与产物（Docker 镜像不需要）
+fpk/
+dist/

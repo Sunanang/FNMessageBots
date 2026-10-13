@@ -11,8 +11,8 @@ import time
 import unittest
 from pathlib import Path
 
-root = Path(__file__).resolve().parents[1]
-fpk = root if (root / "cmd/main").is_file() else root.parent / "FNMessageBotForFPK"
+root = Path(__file__).resolve().parents[2]
+fpk = root / "fpk"
 
 
 @unittest.skipUnless((fpk / "cmd/main").is_file(), "需要 FPK 项目脚本")
