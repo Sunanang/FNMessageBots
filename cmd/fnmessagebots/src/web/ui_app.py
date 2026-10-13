@@ -22,12 +22,12 @@ from flask import Flask, jsonify, request, render_template, send_from_directory,
 
 from notifier.channel_params import validate_channel_json
 from notifier.multi_platform_notifier import MultiPlatformNotifier
-from web.access_guard import GatewayPrefixMiddleware
 from web.access_guard import LoginRateLimiter
 from web.access_guard import SetupCodeStore
 from web.access_guard import StripGatewayHeadersMiddleware
 from web.access_guard import gateway_identity as _gateway_identity_from_environ
 from web.access_guard import client_address
+from web.server_lifecycle import UIServerSupervisor
 from web.auth_service import PASSWORD_MIN_LENGTH
 from web.auth_service import apply_new_password as _apply_new_password
 from web.auth_service import get_password_config as _get_password_config
@@ -269,6 +269,7 @@ def create_app(on_config_saved=None) -> Flask:
     # 默认拒绝：只有以下路径无需登录；"/" 仅返回页面骨架，数据全部走需鉴权的接口
     PUBLIC_PATHS = {
         "/",
+        "/healthz",
         "/favicon.ico",
         "/robots.txt",
         "/api/auth/status",
@@ -315,6 +316,11 @@ def create_app(on_config_saved=None) -> Flask:
         if path.startswith("/support/img/"):
             abort(403)
         return redirect(_home_url())
+
+    @app.get("/healthz")
+    def healthz():
+        """仅确认 HTTP 服务可响应，不读取配置或访问 NAS 数据源。"""
+        return jsonify({"ok": True, "service": "fn-message-bots"})
 
     @app.get("/api/auth/status")
     def auth_status():
@@ -854,47 +860,19 @@ def create_app(on_config_saved=None) -> Flask:
     return app
 
 
-def _serve_forever(server, name: str) -> threading.Thread:
-    thread = threading.Thread(target=server.serve_forever, name=name, daemon=True)
-    thread.start()
-    return thread
-
-
-def start_ui_server_in_background(on_config_saved=None):
-    """在后台线程启动配置 UI 服务。on_config_saved: 保存配置成功后的回调（热加载用）。
+def start_ui_server_in_background(on_config_saved=None) -> UIServerSupervisor:
+    """启动并持续维护配置 UI 服务。on_config_saved 用于保存配置后的热加载。
 
     - TCP：UI_HOST（默认 0.0.0.0）/ UI_PORT（默认 18080）；剥离客户端自带的 X-Trim-* 头。
     - 统一网关：设置 FNMB_GATEWAY_SOCKET 时额外监听该 Unix Socket，前缀取 FNMB_GATEWAY_PREFIX。
     """
-    from werkzeug.serving import make_server
-
-    app = create_app(on_config_saved=on_config_saved)
     host = (os.getenv("UI_HOST") or "0.0.0.0").strip() or "0.0.0.0"
-    threads = []
-    try:
-        port = int(os.getenv("UI_PORT", "18080"))
-        tcp_server = make_server(host, port, StripGatewayHeadersMiddleware(app.wsgi_app), threaded=True)
-        print(f"配置 UI 监听 http://{host}:{port}")
-        threads.append(_serve_forever(tcp_server, "FnMessageBots-UI"))
-    except (Exception, SystemExit) as e:
-        print(f"TCP 配置入口启动失败（{e}），继续尝试统一网关")
-
-    sock_path = (os.getenv("FNMB_GATEWAY_SOCKET") or "").strip()
-    if sock_path:
-        prefix = (os.getenv("FNMB_GATEWAY_PREFIX") or "").strip()
-        try:
-            if os.path.exists(sock_path):
-                os.unlink(sock_path)
-            gw_server = make_server(
-                f"unix://{sock_path}", 0, GatewayPrefixMiddleware(app.wsgi_app, prefix), threaded=True
-            )
-            print(f"统一网关 Socket 已监听：{sock_path}（前缀 {prefix or '/'}）")
-            threads.append(_serve_forever(gw_server, "FnMessageBots-Gateway"))
-        except (Exception, SystemExit) as e:
-            print(f"统一网关 Socket 监听失败（{e}）")
-    if not threads:
-        raise RuntimeError("配置 UI 的所有入口均启动失败，请检查端口和 Socket 权限")
-    return threads[0]
+    return UIServerSupervisor(
+        lambda: create_app(on_config_saved=on_config_saved),
+        host, os.getenv("UI_PORT", "18080"),
+        (os.getenv("FNMB_GATEWAY_SOCKET") or "").strip(),
+        (os.getenv("FNMB_GATEWAY_PREFIX") or "").strip(),
+    ).start()
 
 
 if __name__ == "__main__":
