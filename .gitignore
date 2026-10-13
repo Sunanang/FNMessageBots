@@ -49,3 +49,7 @@ Thumbs.db
 config/*.json
 !config/config.json
 config/.setup_code
+
+# FPK 构建时从 src/ 临时复制，勿提交
+fpk/cmd/fnmessagebots/src/
+fpk/*.fpk

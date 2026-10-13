@@ -1,1 +1,0 @@
-# __init__.py for notifier package
