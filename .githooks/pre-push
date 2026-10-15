@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+    if [ "$remote_ref" = refs/heads/main ]; then
+        echo '禁止直接推送 main。请推送 dev，再通过 GitHub dev → main PR 合并发布。' >&2
+        exit 1
+    fi
+done

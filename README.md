@@ -191,7 +191,32 @@ python3 scripts/verify-fpk.py dist/FnMessageBot-2.6.0.fpk  # 示例：核对包�
 
 ### 自动发布（GitHub Actions）
 
-推送到 `main` 后，[Publish Docker and FPK](https://github.com/Sunanang/FNMessageBots/actions/workflows/publish.yml) 自动测试、构建并发布；也可在 Actions 中选择 `main` 手动运行。本地仅执行 `git commit` 不会触发，需 `git push origin main`。
+`dev` 负责开发，`main` 只接受同仓库 `dev → main` PR 的合并并负责发布。开发完成、准备发版时使用 **Create a merge commit** 合并 PR，不 squash/rebase，不删除 `dev`；合并后 [Publish Docker and FPK](https://github.com/Sunanang/FNMessageBots/actions/workflows/publish.yml) 自动测试、构建并发布。发布前会通过 GitHub API 核对当前提交确实来自已合并的 `dev → main` PR，直接推送的普通提交不能发布。
+
+推送 `dev` 和提交到 `main` 的 PR 只运行开发检查，不发布镜像或 FPK。手动发布工作流也仅允许选择 `main`，并执行同样的来源校验。
+
+新克隆后执行以下命令，后续保持在 `dev` 工作：
+
+```bash
+git switch dev
+git config --local core.hooksPath .githooks
+git push origin dev
+# 准备发版时：在 GitHub 创建 dev → main PR，检查通过后以 merge commit 合并。
+# 发布合并后同步开发分支：
+git fetch origin
+git switch dev
+git merge --ff-only origin/main
+git push origin dev
+```
+
+本地 hook 拒绝在 `main` 创建开发提交及直接推送 `main`。GitHub 远端还需启用针对 `refs/heads/main` 的规则集，要求 PR、`Main must come from dev` 和 `Development tests` 检查通过，禁止删除和强制推送，不设置绕过名单。可使用仓库中的 `.github/main-ruleset.json` 配置；已有 `main` 规则集 ID 为 `18157912`，拥有仓库 Administration 写权限并登录 `gh` 后可应用：
+
+```bash
+gh api --method PUT repos/Sunanang/FNMessageBots/rulesets/18157912 \
+  --input .github/main-ruleset.json
+```
+
+规则配置文件不会自行启用远端保护；需在 GitHub 设置中启用，或执行上述管理命令。
 
 测试通过后，在原生 amd64 / arm64 runner 分别构建镜像并启动容器验证 HTTP 健康检查；FPK 使用与 Pome Panel 相同的固定版本官方 fnpack 1.2.3，并校验工具的 SHA-256。两个架构及 FPK 均成功后才更新公开的最新构建：
 

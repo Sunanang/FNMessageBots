@@ -28,6 +28,7 @@ env:
 
 jobs:
   merge:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - name: Set up Docker Buildx
