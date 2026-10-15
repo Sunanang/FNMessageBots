@@ -5,10 +5,12 @@ import sys
 
 
 def matching_dev_merge(pull_requests, repository, revision):
+    examined = 0
     for item in pull_requests:
         # gh api --paginate --slurp 返回分页数组；也接受单页结果。
         entries = item if isinstance(item, list) else [item]
         for pr in entries:
+            examined += 1
             head = pr.get("head") or {}
             base = pr.get("base") or {}
             if (pr.get("merged_at")
@@ -18,7 +20,7 @@ def matching_dev_merge(pull_requests, repository, revision):
                     and base.get("ref") == "main"
                     and (base.get("repo") or {}).get("full_name") == repository):
                 return pr
-    raise ValueError("main 发布提交必须来自同仓库已合并的 dev → main PR，禁止直接提交发布。")
+    raise ValueError(f"main 发布提交必须来自同仓库已合并的 dev → main PR，禁止直接提交发布（已检查 {examined} 个关联 PR）。")
 
 
 if __name__ == "__main__":

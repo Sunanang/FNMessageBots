@@ -2,8 +2,10 @@
 import copy
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -107,6 +109,42 @@ class GitHookTests(unittest.TestCase):
                     input=updates, capture_output=True, text=True, timeout=5,
                 )
                 self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+
+
+class MergeIndexRetryTests(unittest.TestCase):
+    def test_merge_index_delay_recovers_but_direct_push_remains_blocked(self):
+        for delayed_merge in (True, False):
+            with self.subTest(delayed_merge=delayed_merge), tempfile.TemporaryDirectory() as temp:
+                folder = Path(temp)
+                scripts = folder / "scripts"
+                scripts.mkdir()
+                for name in ("require-dev-merge.py", "verify-release-source.sh"):
+                    shutil.copy2(ROOT / "scripts" / name, scripts / name)
+                count = folder / "request-count"
+                gh = folder / "gh"
+                gh.write_text(f"#!{sys.executable}\n" + '''
+import json, os
+from pathlib import Path
+p = Path(os.environ['REQUEST_COUNT'])
+n = int(p.read_text()) + 1 if p.exists() else 1
+p.write_text(str(n))
+pr = {'number': 26, 'merged_at': '2026-10-15T09:00:00Z', 'merge_commit_sha': os.environ['GITHUB_SHA'],
+      'head': {'ref': 'dev', 'repo': {'full_name': os.environ['GITHUB_REPOSITORY']}},
+      'base': {'ref': 'main', 'repo': {'full_name': os.environ['GITHUB_REPOSITORY']}}}
+print(json.dumps([[pr]] if n >= 2 and os.environ['DELAYED_MERGE'] == '1' else [[]]))
+''')
+                gh.chmod(0o755)
+                sleep = folder / "sleep"
+                sleep.write_text("#!/bin/sh\nexit 0\n")
+                sleep.chmod(0o755)
+                result = subprocess.run(
+                    ["bash", str(scripts / "verify-release-source.sh")], capture_output=True, text=True, timeout=5,
+                    env={**os.environ, "PATH": str(folder) + os.pathsep + os.environ["PATH"],
+                         "GITHUB_REPOSITORY": "Sunanang/FNMessageBots", "GITHUB_SHA": "a" * 40,
+                         "REQUEST_COUNT": str(count), "DELAYED_MERGE": "1" if delayed_merge else "0"},
+                )
+                self.assertEqual(result.returncode, 0 if delayed_merge else 1, result.stdout + result.stderr)
+                self.assertEqual(int(count.read_text()), 2 if delayed_merge else 6)
 
 
 if __name__ == "__main__":
