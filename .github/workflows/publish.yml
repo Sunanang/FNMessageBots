@@ -1,0 +1,164 @@
+name: Publish Docker and FPK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 同时串行化旧的手动 manifest 工作流，避免发布期间覆盖 latest。
+concurrency:
+  group: fnmessagebots-publish
+  cancel-in-progress: false
+
+env:
+  REGISTRY_IMAGE: sunanang/fn-message-bots
+
+jobs:
+  test:
+    name: Test application and packaging
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: python -m pip install -r requirements.txt pytest
+      - run: python -m pytest tests
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+
+  docker:
+    name: Build Docker ${{ matrix.arch }}
+    needs: test
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Docker Hub credentials
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -z "$DOCKERHUB_USERNAME" ] || [ -z "$DOCKERHUB_TOKEN" ]; then
+            echo '::error::Configure DOCKERHUB_USERNAME and DOCKERHUB_TOKEN in repository Actions secrets.'
+            exit 1
+          fi
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Build and push commit-specific image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          push: true
+          provenance: false
+          tags: ${{ env.REGISTRY_IMAGE }}:sha-${{ github.sha }}-${{ matrix.arch }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+      - name: Smoke test native container and HTTP health check
+        run: |
+          set -euo pipefail
+          docker run --detach --name fnmb-smoke "$REGISTRY_IMAGE:sha-$GITHUB_SHA-${{ matrix.arch }}"
+          for attempt in $(seq 1 30); do
+            if docker exec fnmb-smoke /app/healthcheck.sh; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs fnmb-smoke
+          exit 1
+      - name: Clean up smoke-test container
+        if: always()
+        run: docker rm --force fnmb-smoke >/dev/null 2>&1 || true
+
+  fpk:
+    name: Build and verify FPK
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install pinned official fnpack
+        run: |
+          set -euo pipefail
+          FNPACK="$RUNNER_TEMP/fnpack"
+          curl --fail --location --retry 3 --connect-timeout 15 --max-time 120 \
+            https://static2.fnnas.com/fnpack/fnpack-1.2.3-linux-amd64 --output "$FNPACK"
+          printf '%s  %s\n' '54b97fa7b70968c4d05c79840f5daeff508957d0bb2062fdb0376d00d9615c93' "$FNPACK" | sha256sum --check -
+          chmod +x "$FNPACK"
+          printf 'FNPACK=%s\n' "$FNPACK" >> "$GITHUB_ENV"
+      - name: Build FPK and SHA-256
+        run: bash scripts/build-fpk.sh
+      - name: Verify FPK payload matches this checkout
+        run: python scripts/verify-fpk.py dist/*.fpk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fnmessagebot-fpk
+          path: |
+            dist/*.fpk
+            dist/*.fpk.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Publish verified Docker tags and FPK
+    needs: [docker, fpk]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Only publish the current main commit
+        id: current
+        run: |
+          head=$(gh api "repos/$GH_REPO/commits/main" --jq '.sha')
+          if [ "$head" = "$GITHUB_SHA" ]; then
+            echo 'publish=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'A newer main commit exists; keep artifacts and skip replacing latest.'
+            echo 'publish=false' >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/download-artifact@v4
+        if: steps.current.outputs.publish == 'true'
+        with:
+          name: fnmessagebot-fpk
+          path: dist
+      - uses: docker/setup-buildx-action@v4
+        if: steps.current.outputs.publish == 'true'
+      - uses: docker/login-action@v4
+        if: steps.current.outputs.publish == 'true'
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Publish and verify latest Docker tags
+        if: steps.current.outputs.publish == 'true'
+        run: bash scripts/publish-docker-tags.sh "$REGISTRY_IMAGE" "$GITHUB_SHA"
+      - name: Publish FPK latest build
+        if: steps.current.outputs.publish == 'true'
+        run: bash scripts/publish-fpk.sh

@@ -3,6 +3,10 @@
 
 name: Merge Docker Manifests
 
+concurrency:
+  group: fnmessagebots-publish
+  cancel-in-progress: false
+
 on:
   workflow_dispatch:
     inputs:

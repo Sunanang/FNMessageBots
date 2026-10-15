@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-# 构建飞牛 FPK 包：临时把顶层 src/ 复制到 fpk/cmd/fnmessagebots/src，在 fpk/ 内执行 fnpack build，产物移至 dist/。
+# 在独立临时目录组装 FPK；源码、依赖与资源均使用主仓库当前版本。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FPK_DIR="${ROOT}/fpk"
-SRC_DST="${FPK_DIR}/cmd/fnmessagebots/src"
 DIST="${ROOT}/dist"
 
 FNPACK="${FNPACK:-$(command -v fnpack || true)}"
@@ -15,24 +14,38 @@ if [ -z "${FNPACK}" ]; then
 fi
 
 VERSION="$(sed -n 's/^version[[:space:]]*=[[:space:]]*//p' "${FPK_DIR}/manifest" | head -n1 | tr -d '[:space:]')"
-[ -n "${VERSION}" ] || { echo "错误: 无法从 fpk/manifest 读取 version" >&2; exit 1; }
+[[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || { echo "错误: fpk/manifest 版本无效" >&2; exit 1; }
 
-cleanup() { rm -rf "${SRC_DST}"; rm -f "${FPK_DIR}"/*.fpk; }
+BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fnmb-fpk.XXXXXX")"
+PAYLOAD="${BUILD_DIR}/payload"
+cleanup() { rm -rf -- "${BUILD_DIR}"; }
 trap cleanup EXIT
-cleanup
 
-mkdir -p "${SRC_DST}"
+rsync -a --exclude '__pycache__/' --exclude '*.py[cod]' --exclude '.DS_Store' \
+    --exclude '.gitignore' --exclude '*.fpk' --exclude 'data/' \
+    --exclude 'cmd/fnmessagebots/src/' "${FPK_DIR}/" "${PAYLOAD}/"
+CODE_DIR="${PAYLOAD}/cmd/fnmessagebots"
+mkdir -p "${CODE_DIR}/src"
 rsync -a --delete --exclude '__pycache__/' --exclude '*.py[cod]' --exclude '.DS_Store' --exclude 'data/' \
-    "${ROOT}/src/" "${SRC_DST}/"
-find "${FPK_DIR}" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
-find "${FPK_DIR}" -name '.DS_Store' -delete 2>/dev/null || true
+    "${ROOT}/src/" "${CODE_DIR}/src/"
+cp "${ROOT}/requirements.txt" "${CODE_DIR}/requirements.txt"
+rsync -a --delete --exclude '.DS_Store' "${ROOT}/assets/" "${CODE_DIR}/assets/"
 
-# 只在 fpk/ 内构建，fnpack 看不到仓库其他文件
-(cd "${FPK_DIR}" && "${FNPACK}" build)
+# fnpack 将产物写到当前目录；不在源仓库中生成、删除或覆盖临时源码。
+(cd "${BUILD_DIR}" && "${FNPACK}" build --directory "${PAYLOAD}")
 
-PKG="$(ls -t "${FPK_DIR}"/*.fpk 2>/dev/null | head -n1 || true)"
-[ -n "${PKG}" ] || { echo "错误: fnpack 未生成 .fpk 文件" >&2; exit 1; }
+PKG="${BUILD_DIR}/FnMessageBot.fpk"
+[ -s "${PKG}" ] || { echo "错误: fnpack 未生成非空的 FnMessageBot.fpk" >&2; exit 1; }
 mkdir -p "${DIST}"
 OUT="${DIST}/FnMessageBot-${VERSION}.fpk"
 mv -f "${PKG}" "${OUT}"
+python3 - "${OUT}" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+
+package = Path(sys.argv[1])
+digest = hashlib.sha256(package.read_bytes()).hexdigest()
+Path(str(package) + '.sha256').write_text(f'{digest}  {package.name}\n', encoding='utf-8')
+PY
 echo "已生成: ${OUT} ($(du -h "${OUT}" | cut -f1))"

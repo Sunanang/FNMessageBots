@@ -161,11 +161,12 @@ PYTHONPATH=. LOGGER_DB_PATH=./logger_data.db3 WECHAT_WEBHOOK_URL=xxx python3 src
 ├── tools/log_manager.py
 ├── tests/                # 采集、权限诊断与配置接口回归（模拟网络、临时数据库）
 │   └── fpk/              # FPK 安装/升级/权限脚本生命周期测试
-├── fpk/                  # 飞牛应用中心 FPK 打包工程（manifest、cmd、wizard、app/ui）；src 构建时从顶层复制
+├── fpk/                  # 飞牛应用中心 FPK 打包工程（manifest、cmd、wizard、app/ui）
 ├── docs/                 # 文档（notification-channels 与各推送渠道子页）
 ├── scripts/              # 辅助脚本（build-fpk.sh 打包 FPK、推送历史种子数据等）
 ├── dist/                 # FPK 构建产物（不入库）
-├── .github/workflows/    # Docker 多架构 manifest 合并
+├── .github/workflows/    # 自动测试、Docker 双架构与 FPK 发布；保留手动 manifest 合并
+│   ├── publish.yml
 │   ├── docker-manifest.yml
 │   └── merge-manifest.yml
 ├── Dockerfile
@@ -182,8 +183,29 @@ PYTHONPATH=. LOGGER_DB_PATH=./logger_data.db3 WECHAT_WEBHOOK_URL=xxx python3 src
 
 ```bash
 ./scripts/build-fpk.sh            # 需 fnpack（PATH 或 ~/.local/bin），或 FNPACK=/path/to/fnpack
-# 产物: dist/FnMessageBot-<manifest version>.fpk
+# 产物: dist/FnMessageBot-<manifest version>.fpk 及 .fpk.sha256
+python3 scripts/verify-fpk.py dist/FnMessageBot-2.6.0.fpk  # 示例：核对包内文件与当前源码
 ```
+
+构建在独立临时目录进行，使用顶层 `src/`、`requirements.txt` 和 `assets/`，保留 `fpk/` 中的安装向导、权限与网关配置，不修改或删除工作区中的临时源码。
+
+### 自动发布（GitHub Actions）
+
+推送到 `main` 后，[Publish Docker and FPK](https://github.com/Sunanang/FNMessageBots/actions/workflows/publish.yml) 自动测试、构建并发布；也可在 Actions 中选择 `main` 手动运行。本地仅执行 `git commit` 不会触发，需 `git push origin main`。
+
+测试通过后，在原生 amd64 / arm64 runner 分别构建镜像并启动容器验证 HTTP 健康检查；FPK 使用与 Pome Panel 相同的固定版本官方 fnpack 1.2.3，并校验工具的 SHA-256。两个架构及 FPK 均成功后才更新公开的最新构建：
+
+| 产物 | 发布位置 |
+| --- | --- |
+| amd64 Docker 镜像 | `sunanang/fn-message-bots:latest-amd64` |
+| arm64 Docker 镜像 | `sunanang/fn-message-bots:latest-arm64` |
+| 自动选择架构的 Docker 镜像 | `sunanang/fn-message-bots:latest`（同时包含 amd64、arm64） |
+| FPK 安装包 | [FnMessageBot-latest.fpk](https://github.com/Sunanang/FNMessageBots/releases/download/latest/FnMessageBot-latest.fpk) |
+| FPK 校验文件 | [FnMessageBot-latest.fpk.sha256](https://github.com/Sunanang/FNMessageBots/releases/download/latest/FnMessageBot-latest.fpk.sha256) |
+
+FPK 保存在固定 `latest` 标签的[最新构建预发布](https://github.com/Sunanang/FNMessageBots/releases/tag/latest)，同时提供带版本号的安装包和校验文件。它随通过检查的 `main` 提交更新，不要求每次改版本号；包内版本仍以 `fpk/manifest` 为准，正式升级时需同步维护 `pyproject.toml` 与 manifest 版本。每次构建的 FPK 也会保存为 Actions Artifact。
+
+仓库的 **Settings → Secrets and variables → Actions** 需配置 `DOCKERHUB_USERNAME` 和 `DOCKERHUB_TOKEN`，与原有手动合并工作流使用的名称一致。Token 使用可推送 `sunanang/fn-message-bots` 的 Docker Hub Personal Access Token；FPK 发布使用工作流自带的 `GITHUB_TOKEN`，无需 NAS 凭据。发布前会核对镜像的提交与平台，再用 digest 合并，防止不同提交混入 `latest`；旧提交重跑时若 `main` 已前进，会保留构建产物并跳过覆盖最新构建。
 
 运行测试：`python -m pytest tests`
 

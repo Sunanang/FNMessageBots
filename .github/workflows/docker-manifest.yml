@@ -4,6 +4,10 @@
 
 name: Docker Manifest (multi-arch)
 
+concurrency:
+  group: fnmessagebots-publish
+  cancel-in-progress: false
+
 on:
   workflow_dispatch:
     inputs:
