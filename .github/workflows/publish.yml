@@ -30,9 +30,7 @@ jobs:
       - name: Require merged dev to main pull request
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" \
-            | python3 scripts/require-dev-merge.py "$GITHUB_REPOSITORY" "$GITHUB_SHA"
+        run: bash scripts/verify-release-source.sh
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
