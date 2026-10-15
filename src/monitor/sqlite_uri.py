@@ -64,7 +64,8 @@ def connect_readonly_with_fallback(
         conn: Optional[sqlite3.Connection] = None
         try:
             conn = sqlite3.connect(make_uri(db_path), uri=True, timeout=timeout)
-            conn.execute("SELECT 1").fetchone()
+            # 常量查询不读取数据库页；部分 SQLite 会把损坏文件也判为可连接。
+            conn.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
             if table_probe_sql:
                 conn.execute(table_probe_sql).fetchone()
             return conn
