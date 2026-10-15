@@ -22,6 +22,7 @@ on:
 
 jobs:
   manifest:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       # DOCKERHUB_TOKEN 须为 Personal Access Token（非登录密码）：https://hub.docker.com/settings/security

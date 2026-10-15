@@ -1,0 +1,26 @@
+name: Main branch policy
+
+# 始终使用 main 上的可信配置；不检出、安装或运行 PR 中的代码。
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, reopened, synchronize, edited, ready_for_review]
+
+permissions: {}
+
+jobs:
+  source:
+    name: Main must come from dev
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require same-repository dev branch
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          if [ "$HEAD_REF" != dev ] || [ "$HEAD_REPO" != "$GITHUB_REPOSITORY" ]; then
+            echo '::error::main only accepts a pull request from dev in this repository.'
+            exit 1
+          fi
+          echo 'Verified dev -> main pull request.'

@@ -22,8 +22,17 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@v4
+      - name: Require merged dev to main pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" \
+            | python3 scripts/require-dev-merge.py "$GITHUB_REPOSITORY" "$GITHUB_SHA"
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'

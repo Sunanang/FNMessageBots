@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+
+branch=$(git symbolic-ref --quiet --short HEAD || true)
+if [ "$branch" = main ]; then
+    echo 'main 仅用于发布，不能创建开发提交。请切换到 dev；发版使用 dev → main PR。' >&2
+    exit 1
+fi
