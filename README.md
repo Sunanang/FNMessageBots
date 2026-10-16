@@ -7,7 +7,7 @@
 - **数据库轮询**：定时轮询 eventlogger 的 SQLite 数据库，仅处理启动后的新记录
 - **多平台通知**：企业微信、钉钉、飞书、Bark、PushPlus
 - **Web 配置页**：内置配置 UI（默认端口 `18080`），支持 Webhook、事件类型、勿扰、标题前缀、PushPlus 等；保存后热加载，一般无需重启
-- **Web 访问控制**：所有配置接口均需登录；首次设置密码需填写启动日志中的初始化码（或用 `FNMB_WEB_PASSWORD` 预置），`config.json` 内仅保存盐值与哈希；配置页中的 Webhook key、Token、SMTP 密码会打码显示
+- **Web 访问控制**：默认启用访问密码，可在系统设置关闭；首次设置密码需填写启动日志中的初始化码（或用 `FNMB_WEB_PASSWORD` 预置），`config.json` 内仅保存盐值与哈希；配置页中的 Webhook key、Token、SMTP 密码会打码显示
 - **智能去重**：时间窗口去重（默认 300 秒）
 - **磁盘事件合并**：同类型磁盘唤醒/休眠在时间窗口内合并推送
 - **HTTP 连接池**：统一 HTTP 管理与重试
@@ -77,7 +77,9 @@ python tools/log_manager.py cleanup 30
 | `max_log_age` | 应用运行日志 `monitor_*.log` 保留天数 |
 | `dnd_enabled` / `dnd_start_time` / `dnd_end_time` | 勿扰开关与时段（HH:MM，可跨日，与巡检 Cron 一样使用系统本地时区） |
 | `ssh_ignore_loopback` | 忽略来源为 127.0.0.1 / ::1 的 SSH 登录成功与断开（默认关闭；失败告警不受影响；SSH 经 frp 等内网穿透接入时勿开启）。环境变量 `SSH_IGNORE_LOOPBACK` |
-首次在 Web 中设置密码后，会在同文件写入 `web_password_salt`、`web_password_hash`（请勿手工泄露）。旧版的 `web_password_enabled` 和 `FNMB_DISABLE_AUTH` 已废弃，不再能关闭鉴权。FPK 和 Docker 首次访问或连续 15 分钟无操作后需输入应用密码，未过期时重新打开或刷新配置页可直接进入；飞牛管理员身份不能代替应用密码。连续 15 分钟无操作后自动返回登录页，后台统计刷新不会续期，未保存的配置不会自动提交。
+首次在 Web 中设置密码后，会在同文件写入 `web_password_salt`、`web_password_hash`（请勿手工泄露）。在配置页「系统设置」中取消勾选「启用访问密码」并保存，即可免输密码（对应 `web_password_enabled: false`）；开关默认开启，兼容旧配置中的显式关闭值。关闭后刷新页面、重新打开、应用重启或空闲超过 15 分钟均无需登录；原密码哈希保留，再次勾选并保存后恢复密码登录，旧会话作废。仅建议在可信网络关闭密码验证。`FNMB_DISABLE_AUTH` 仍不生效。
+
+启用密码时，FPK 和 Docker 首次访问或连续 15 分钟无操作后需输入应用密码，未过期时重新打开或刷新配置页可直接进入；飞牛管理员身份不能代替应用密码。连续 15 分钟无操作后自动返回登录页，后台统计刷新不会续期，未保存的配置不会自动提交。
 
 **首次设置密码**：为防止局域网内他人抢先设密，首次设置需填写初始化码。初始化码在启动时打印到日志（`docker logs 容器名`），同时写入配置目录的 `.setup_code`（权限 600），设置密码后自动失效。也可用环境变量 `FNMB_WEB_PASSWORD` 预置初始密码（至少 8 位）。
 
@@ -184,7 +186,7 @@ PYTHONPATH=. LOGGER_DB_PATH=./logger_data.db3 WECHAT_WEBHOOK_URL=xxx python3 src
 ```bash
 ./scripts/build-fpk.sh            # 需 fnpack（PATH 或 ~/.local/bin），或 FNPACK=/path/to/fnpack
 # 产物: dist/FnMessageBot-<manifest version>.fpk 及 .fpk.sha256
-python3 scripts/verify-fpk.py dist/FnMessageBot-2.6.0.fpk  # 示例：核对包内文件与当前源码
+python3 scripts/verify-fpk.py dist/FnMessageBot-2.7.0.fpk  # 示例：核对包内文件与当前源码
 ```
 
 构建在独立临时目录进行，使用顶层 `src/`、`requirements.txt` 和 `assets/`，保留 `fpk/` 中的安装向导、权限与网关配置，不修改或删除工作区中的临时源码。

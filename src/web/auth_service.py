@@ -54,5 +54,4 @@ def apply_new_password(raw: dict, password: str) -> dict:
     salt = secrets.token_hex(16)
     raw["web_password_salt"] = salt
     raw["web_password_hash"] = hash_password(password, bytes.fromhex(salt))
-    raw.pop("web_password_enabled", None)
     return raw

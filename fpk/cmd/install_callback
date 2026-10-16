@@ -135,7 +135,7 @@ with open(cfg, encoding="utf-8") as f:
 salt = secrets.token_hex(16)
 data["web_password_salt"] = salt
 data["web_password_hash"] = hashlib.pbkdf2_hmac("sha256", pw.encode("utf-8"), bytes.fromhex(salt), 100000).hex()
-data.pop("web_password_enabled", None)
+data["web_password_enabled"] = True
 fd, tmp = tempfile.mkstemp(dir=os.path.dirname(cfg))
 with os.fdopen(fd, "w", encoding="utf-8") as f:
     json.dump(data, f, ensure_ascii=False, indent=2)

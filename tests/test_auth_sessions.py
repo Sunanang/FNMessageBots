@@ -154,6 +154,95 @@ class AuthSessionTests(unittest.TestCase):
             self.assertFalse(self.request("/api/auth/status").get_json()["authenticated"])
             self.assertEqual(self.request("/api/push-stats").status_code, 401)
 
+    def save_password_mode(self, enabled):
+        payload = {"events": ["LoginSucc"], "channels": [
+            {"type": "wechat", "url": "https://example.invalid/webhook", "enabled": True}]}
+        if enabled is not ...:
+            payload["web_password_enabled"] = enabled
+        with patch.object(ui_app, "_collect_external_db_access_warnings", return_value=[]):
+            return self.request("/api/save-config", "post", json=payload)
+
+    def test_password_mode_can_only_be_disabled_after_login(self):
+        original = self.config.read_text()
+        self.assertEqual(self.save_password_mode(False).status_code, 401)
+        self.assertEqual(self.config.read_text(), original)
+        self.assertTrue(self.request("/api/auth/status").get_json()["password_enabled"])
+
+    def test_password_mode_survives_idle_restart_and_restores_original_password(self):
+        for gateway in [False, True]:
+            with self.subTest(gateway=gateway):
+                if gateway:
+                    self.gateway()
+                self.login()
+                original = json.loads(self.config.read_text())
+                self.assertEqual(self.save_password_mode(False).status_code, 200)
+                self.now += 3600
+                # 全新应用和客户端模拟重启、浏览器重开，没有应用会话 Cookie。
+                self.app = ui_app.create_app()
+                if gateway:
+                    self.app.wsgi_app = GatewayPrefixMiddleware(self.app.wsgi_app, self.prefix)
+                self.client = self.app.test_client()
+                state = self.request("/api/auth/status").get_json()
+                self.assertTrue(state["authenticated"])
+                self.assertFalse(state["password_enabled"])
+                self.assertFalse(state["need_login"])
+                self.assertIsNone(state["remaining_seconds"])
+                self.assertEqual(self.request("/support").status_code, 200)
+                self.assertEqual(self.request("/api/push-stats").status_code, 200)
+                self.assertEqual(self.request("/api/auth/activity", "post", json={}).status_code, 200)
+                config = self.request("/api/config?check_access=0").get_json()["data"]
+                self.assertFalse(config["web_password_enabled"])
+                self.assertNotIn("web_password_hash", config)
+                self.assertEqual(self.save_password_mode(True).status_code, 200)
+                self.assertEqual(self.request("/api/push-stats").status_code, 401)
+                saved = json.loads(self.config.read_text())
+                self.assertEqual(saved["web_password_hash"], original["web_password_hash"])
+                self.assertEqual(saved["web_password_salt"], original["web_password_salt"])
+                self.login()
+                self.now += 900
+                self.assertEqual(self.request("/api/push-stats").status_code, 401)
+
+    def test_mode_changes_revoke_other_browsers_old_sessions(self):
+        self.login()
+        old_cookie = self.client.get_cookie(ui_app.AUTH_COOKIE_NAME).value
+        gateway_id = session_service.create_session(scope="/app/FnMessageBot/")
+        self.assertEqual(self.save_password_mode(False).status_code, 200)
+        self.assertEqual(self.save_password_mode(True).status_code, 200)
+        self.client.set_cookie(ui_app.AUTH_COOKIE_NAME, old_cookie)
+        self.assertEqual(self.request("/api/push-stats").status_code, 401)
+        self.gateway()
+        self.client.set_cookie(ui_app.AUTH_COOKIE_NAME, gateway_id, path=self.prefix + "/")
+        self.assertEqual(self.request("/api/push-stats").status_code, 401)
+
+    def test_mode_omitted_by_older_clients_is_preserved_and_invalid_values_rejected(self):
+        self.login()
+        self.assertEqual(self.save_password_mode(False).status_code, 200)
+        self.assertEqual(self.save_password_mode(...).status_code, 200)
+        self.assertFalse(json.loads(self.config.read_text())["web_password_enabled"])
+        for value in ["false", "true", None, 0, [], {}]:
+            with self.subTest(value=value):
+                self.assertEqual(self.save_password_mode(value).status_code, 400)
+                self.assertFalse(json.loads(self.config.read_text())["web_password_enabled"])
+
+    def test_old_opt_out_is_restored_and_gateway_non_admin_stays_denied(self):
+        raw = json.loads(self.config.read_text())
+        raw["web_password_enabled"] = False
+        self.config.write_text(json.dumps(raw))
+        self.assertTrue(self.request("/api/auth/status").get_json()["authenticated"])
+        self.gateway()
+        self.headers["X-Trim-Isadmin"] = "false"
+        for path in ["/", "/api/auth/status", "/api/config", "/support"]:
+            self.assertEqual(self.request(path).status_code, 403)
+
+    def test_failed_mode_save_does_not_disable_password_or_revoke_session(self):
+        self.login()
+        with patch.object(ui_app, "_save_raw_config", side_effect=OSError("read only")):
+            self.assertEqual(self.save_password_mode(False).status_code, 500)
+        state = self.request("/api/auth/status").get_json()
+        self.assertTrue(state["password_enabled"])
+        self.assertTrue(state["authenticated"])
+        self.assertEqual(self.app.test_client().get("/api/push-stats").status_code, 401)
+
     def test_non_admin_gateway_identity_is_denied_even_with_application_session(self):
         self.gateway()
         self.login()

@@ -856,7 +856,7 @@
           <div class="header-title" id="app-title">FnMessageBot</div>
         </div>
         <div class="header-sub" id="app-subtitle">飞牛日志消息推送机器人</div>
-        <div class="header-ver" id="app-version">2.6.0</div>
+        <div class="header-ver" id="app-version">2.7.0</div>
       </div>
 
       <div class="section stats-section">
@@ -932,9 +932,16 @@
 
       <div class="section">
         <div class="section-title">
-          <span>系统设置 <small>影响日志缓存与轮询行为</small></span>
+          <span>系统设置 <small>访问密码、日志缓存与轮询</small></span>
         </div>
         <div class="system-grid">
+          <div>
+            <label class="field-label" style="display: flex; align-items: center; gap: 8px;">
+              <input type="checkbox" id="input-web-password-enabled" checked />
+              <span>启用访问密码</span>
+            </label>
+            <div class="field-helper">开启后连续 15 分钟无操作需重新输入密码。关闭并保存后免输密码，仅建议在可信网络使用；再次开启时沿用原密码。</div>
+          </div>
           <div>
             <div class="field-label">日志缓存天数 (day)</div>
             <input id="input-log-days" type="number" min="1" />
@@ -1100,6 +1107,7 @@
     let setupRequiresCode = false;
     let passwordMinLength = 8;
     let authRequestNumber = 0;
+    let loadedPasswordEnabled = true;
 
     window.addEventListener("fnmb-session-expired", () => {
       authRequestNumber += 1;
@@ -1964,6 +1972,8 @@
         }
         if (refreshWarnings) renderPersistentWarnings(json.warning_details || json.warnings || []);
         const data = json.data;
+        loadedPasswordEnabled = data.web_password_enabled !== false;
+        document.getElementById("input-web-password-enabled").checked = loadedPasswordEnabled;
         document.getElementById("app-title").textContent = data.title || "FnMessageBot";
         document.getElementById("app-subtitle").textContent = data.subtitle || "";
         document.getElementById("app-version").textContent = data.version || "";
@@ -2107,6 +2117,7 @@
       const payload = {
         events,
         channels,
+        web_password_enabled: document.getElementById("input-web-password-enabled").checked,
         log_retention_days: document.getElementById("input-log-days").value,
         logger_poll_interval: document.getElementById("input-poll-interval").value,
         title_prefix: (document.getElementById("input-title-prefix").value || "").trim(),
@@ -2139,7 +2150,13 @@
           }
           renderPersistentWarnings(json.warning_details || json.warnings || []);
           testBtn.disabled = false;
-          loadConfig(false);
+          if (payload.web_password_enabled !== loadedPasswordEnabled) {
+            window.fnmbSession.start({authenticated: !payload.web_password_enabled,
+              password_enabled: payload.web_password_enabled});
+            await initAuth();
+          } else {
+            loadConfig(false);
+          }
         } else {
           showToast(false, json.message || "保存失败");
         }

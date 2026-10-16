@@ -75,6 +75,7 @@ from web.session_service import create_session as _create_session
 from web.session_service import touch_session as _touch_session
 from web.session_service import session_remaining_seconds as _session_remaining_seconds
 from web.session_service import delete_session as _delete_session
+from web.session_service import delete_all_sessions as _delete_all_sessions
 from web.access_diagnostics import collect_access_warnings as _collect_external_db_access_warnings
 from web.access_diagnostics import warning_messages
 
@@ -121,6 +122,13 @@ def _has_password_set() -> bool:
     return _has_password_set_fn(_load_raw_config)
 
 
+def _password_enabled() -> bool:
+    """默认验证密码；仅显式配置关闭时免登录，配置损坏时保持验证。"""
+    if _current_config_load_error():
+        return True
+    return as_bool(_load_raw_config().get("web_password_enabled"), True)
+
+
 def _get_session_id_from_cookie() -> str:
     # 浏览器可能同时持有旧根路径和网关路径的同名 Cookie；按服务端作用域选有效会话。
     for sid in request.cookies.getlist(AUTH_COOKIE_NAME):
@@ -138,10 +146,12 @@ def _gateway_identity():
 
 
 def _is_authenticated() -> bool:
-    """两版均要求应用密码会话；网关管理员身份不能代替应用登录。"""
+    """密码开关对两版均生效；网关非管理员始终拒绝访问。"""
     gw = _gateway_identity()
     if gw is not None and not gw["is_admin"]:
         return False
+    if not _password_enabled():
+        return True
     return _session_remaining_seconds(_get_session_id_from_cookie(), SESSION_IDLE_SECONDS, scope=_auth_cookie_path()) > 0
 
 
@@ -249,7 +259,7 @@ def create_app(on_config_saved=None) -> Flask:
         resp.headers.setdefault("X-Robots-Tag", "noindex, nofollow, noarchive")
         if request.path == "/" or request.path.startswith("/api/") or resp.mimetype == "text/html":
             resp.headers["Cache-Control"] = "no-store"
-        if getattr(g, "refresh_auth_cookie", False) and _is_authenticated():
+        if getattr(g, "refresh_auth_cookie", False) and _password_enabled() and _is_authenticated():
             resp.set_cookie(AUTH_COOKIE_NAME, _get_session_id_from_cookie(), **_auth_cookie_kwargs())
         return resp
 
@@ -302,7 +312,7 @@ def create_app(on_config_saved=None) -> Flask:
             return jsonify(_config_load_error_payload(config_error)), 500
         if _is_authenticated():
             # 写操作代表用户交互；统计、配置读取和身份轮询均不续期。
-            if request.method == "POST" and not _touch_session(_get_session_id_from_cookie(), SESSION_IDLE_SECONDS, scope=_auth_cookie_path()):
+            if request.method == "POST" and _password_enabled() and not _touch_session(_get_session_id_from_cookie(), SESSION_IDLE_SECONDS, scope=_auth_cookie_path()):
                 return jsonify({"ok": False, "message": "会话已过期，请重新输入密码。"}), 401
             if request.method == "POST":
                 g.refresh_auth_cookie = True
@@ -342,14 +352,17 @@ def create_app(on_config_saved=None) -> Flask:
             "authenticated": authenticated,
             "via_gateway": _gateway_identity() is not None,
             "password_min_length": PASSWORD_MIN_LENGTH,
+            "password_enabled": _password_enabled(),
             "idle_seconds": SESSION_IDLE_SECONDS,
-            "remaining_seconds": _session_remaining_seconds(_get_session_id_from_cookie(), SESSION_IDLE_SECONDS, scope=_auth_cookie_path()),
+            "remaining_seconds": (_session_remaining_seconds(_get_session_id_from_cookie(), SESSION_IDLE_SECONDS, scope=_auth_cookie_path())
+                                  if _password_enabled() else None),
         })
 
     @app.post("/api/auth/activity")
     def auth_activity():
         """前端仅在真实用户交互后调用；鉴权钩子已刷新活跃时间。"""
         return jsonify({"ok": True, "authenticated": True, "idle_seconds": SESSION_IDLE_SECONDS,
+                        "password_enabled": _password_enabled(),
                         "remaining_seconds": _session_remaining_seconds(_get_session_id_from_cookie(), SESSION_IDLE_SECONDS, scope=_auth_cookie_path())})
 
     @app.post("/api/auth/logout")
@@ -480,7 +493,8 @@ def create_app(on_config_saved=None) -> Flask:
         data = {
             "title": "FnMessageBot",
             "subtitle": "飞牛日志消息推送机器人",
-            "version": "2.6.0",
+            "version": "2.7.0",
+            "web_password_enabled": _password_enabled(),
             "events_by_category": events_by_category,
             "third_party_events_by_category": third_party_events_by_category,
             "selected_events": monitor_events,
@@ -643,6 +657,10 @@ def create_app(on_config_saved=None) -> Flask:
         flat_keys = _sync_channel_flat_keys(channels)
 
         raw = _load_raw_config()
+        previous_password_enabled = _password_enabled()
+        password_enabled = payload.get("web_password_enabled", previous_password_enabled)
+        if not isinstance(password_enabled, bool):
+            return jsonify({"ok": False, "message": "访问密码开关必须为布尔值。"}), 400
         raw.update(
             {
                 **flat_keys,
@@ -660,6 +678,7 @@ def create_app(on_config_saved=None) -> Flask:
                 "nas_patrol_cron": nas_patrol_cron,
                 "title_prefix": title_prefix,
                 "bark_icon": bark_icon,
+                "web_password_enabled": password_enabled,
             }
         )
 
@@ -667,6 +686,10 @@ def create_app(on_config_saved=None) -> Flask:
             _save_raw_config(raw)
         except Exception as e:
             return jsonify({"ok": False, "message": f"配置写入失败（{e}），请检查 config 目录是否可写。"}), 500
+
+        if password_enabled != previous_password_enabled:
+            _delete_all_sessions()
+            g.refresh_auth_cookie = False
 
         db_access_warnings = _collect_external_db_access_warnings(raw, events)
         if callable(on_config_saved):
@@ -701,7 +724,7 @@ def create_app(on_config_saved=None) -> Flask:
                 content,
                 {
                     "hostname": socket.gethostname(),
-                    "version": "2.6.0",
+                    "version": "2.7.0",
                 },
             )
             ok = out.get("success", False) if isinstance(out, dict) else bool(out)

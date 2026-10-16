@@ -5,6 +5,7 @@
   const home = new URL("./", window.location.href);
   const apiBase = new URL("api/", home);
   let active = false;
+  let passwordEnabled = true;
   let timer = null;
   let lastActivitySent = 0;
   let activityPending = false;
@@ -38,7 +39,9 @@
     clearTimeout(timer);
     timer = null;
     active = !!data.authenticated;
+    passwordEnabled = data.password_enabled !== false;
     if (!active) return;
+    if (!passwordEnabled) return;
     // 旧版服务缺少剩余时间时也保留默认超时；当前后端始终返回剩余秒数。
     const remaining = Number(data.remaining_seconds ?? data.idle_seconds ?? 900);
     if (remaining <= 0) { expired(); return; }
@@ -60,7 +63,7 @@
   }
 
   async function activity(event) {
-    if (!active || !event.isTrusted || document.visibilityState !== "visible" || activityPending) return;
+    if (!active || !passwordEnabled || !event.isTrusted || document.visibilityState !== "visible" || activityPending) return;
     const now = Date.now();
     if (now - lastActivitySent < 30000) return;
     lastActivitySent = now;

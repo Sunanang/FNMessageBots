@@ -22,6 +22,18 @@ const fresh = {ok:true,authenticated:true,remaining_seconds:900};
 (async()=>{
   {
     const f=fixture();f.window.fnmbSession.start(fresh);
+    f.window.fnmbSession.start({...fresh,password_enabled:false,remaining_seconds:null});
+    assert.equal(f.timers.size,0);
+    await f.listeners.pointerdown({isTrusted:true});
+    assert.equal(f.requests.length,0); // 免密码时不发送会话续期。
+    const check=f.window.fnmbSession.check();
+    f.respond(0,{...fresh,password_enabled:false,remaining_seconds:null});await check;
+    assert.equal(f.timers.size,0);
+    f.window.fnmbSession.start(fresh);
+    assert.equal([...f.timers.values()][0].delay,900000);
+  }
+  {
+    const f=fixture();f.window.fnmbSession.start(fresh);
     const pending=f.window.fnmbSession.check();
     f.window.fnmbSession.start(fresh); // 用户已续期，旧状态还未回来。
     f.respond(0,{...fresh,remaining_seconds:1});await pending;
