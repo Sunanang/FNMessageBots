@@ -85,6 +85,7 @@ class Application:
         """打印启动横幅"""
         banner = f"""
         启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+        运行时区: {datetime.now().astimezone().strftime('%Z (%z)')}，TZ={os.environ.get('TZ') or '系统默认'}
         监控模式: 数据库轮询 (logger_data.db3 log 表)
         通知方式: 企业微信/企业微信应用/钉钉/飞书机器人/Bark/PushPlus/魔法推送/SMTP邮件/通用Webhook/MeoW
 

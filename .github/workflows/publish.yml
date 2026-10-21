@@ -82,6 +82,8 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha,scope=${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+      - name: Verify native image timezone and DND boundaries
+        run: bash scripts/check-container-timezone.sh "$REGISTRY_IMAGE:sha-$GITHUB_SHA-${{ matrix.arch }}"
       - name: Smoke test native container and HTTP health check
         run: |
           set -euo pipefail

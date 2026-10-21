@@ -75,7 +75,7 @@ python tools/log_manager.py cleanup 30
 | `dedup_window` | 去重时间窗口（秒） |
 | `log_retention_days` | 原始推送日志保留天数 |
 | `max_log_age` | 应用运行日志 `monitor_*.log` 保留天数 |
-| `dnd_enabled` / `dnd_start_time` / `dnd_end_time` | 勿扰开关与时段（HH:MM，可跨日，与巡检 Cron 一样使用系统本地时区） |
+| `dnd_enabled` / `dnd_start_time` / `dnd_end_time` | 勿扰开关与时段（HH:MM，可跨日，与巡检 Cron 使用同一运行时区；Docker 默认北京时间，FPK 使用 NAS 系统时区） |
 | `ssh_ignore_loopback` | 忽略来源为 127.0.0.1 / ::1 的 SSH 登录成功与断开（默认关闭；失败告警不受影响；SSH 经 frp 等内网穿透接入时勿开启）。环境变量 `SSH_IGNORE_LOOPBACK` |
 首次在 Web 中设置密码后，会在同文件写入 `web_password_salt`、`web_password_hash`（请勿手工泄露）。在配置页「系统设置」中取消勾选「启用访问密码」并保存，即可免输密码（对应 `web_password_enabled: false`）；开关默认开启，兼容旧配置中的显式关闭值。关闭后刷新页面、重新打开、应用重启或空闲超过 15 分钟均无需登录；原密码哈希保留，再次勾选并保存后恢复密码登录，旧会话作废。仅建议在可信网络关闭密码验证。`FNMB_DISABLE_AUTH` 仍不生效。
 
@@ -95,6 +95,7 @@ python tools/log_manager.py cleanup 30
 - `LOG_RETENTION_DAYS`、`MAX_LOG_AGE`
 - `UI_PORT`：Web 端口（默认 `18080`）；`UI_HOST`：监听地址（默认 `0.0.0.0`，仅本机访问可设 `127.0.0.1`）
 - `FNMB_WEB_PASSWORD`：未设密码时作为初始 Web 密码（至少 8 位）
+- `TZ`：Docker 镜像默认 `Asia/Shanghai`（北京时间），勿扰判断、汇总消息时间与巡检 Cron 均使用此时区；可按 NAS 所在时区覆盖，如 `Europe/Berlin`。FPK 默认沿用 NAS 系统时区。
 - `LOGTIME_DISPLAY_OFFSET_SECONDS`：修正日志时间显示（默认 `28800`，即 +8 小时；若显示不准可调整）
 - `NOTIFY_RESTART_ENABLED`、`NOTIFY_RESTART_CONSECUTIVE`、`NOTIFY_RESTART_WINDOW`、`NOTIFY_RESTART_COOLDOWN`：通知链路失败重启策略（默认关闭；推送限流/额度用尽时重启无法恢复，反而会重复推送）
 - `APP_HOME`：自定义应用根目录（影响 `config.json` 解析路径，一般 Docker 内为 `/app`）
@@ -132,6 +133,8 @@ services:
 ```
 
 安装前可在 Compose 同目录的 `.env` 文件中填写 `UI_PORT=19080`（示例端口，可自行选择）；不填则使用 `18080`。浏览器访问 `http://<本机IP>:所选端口` 打开 Web 配置页。`./data/logs`、`./data/cursor`、`./config` 为相对 compose 文件所在目录的路径，可按需调整左侧宿主机路径。
+
+Docker 不会自动继承 NAS 时区。直接从镜像创建容器时，镜像也默认使用北京时间；若容器配置中已显式设置 `TZ=UTC` 或其他时区，仍以该配置为准。出现「07:00 的勿扰汇总在北京时间 15:00 才送达」时，请将容器环境变量设为 `TZ=Asia/Shanghai` 并重建容器（仅重启不会应用修改后的容器环境）。启动日志会显示实际时区和 UTC 偏移。`LOGTIME_DISPLAY_OFFSET_SECONDS` 用于日志库字段的时间偏差，不用于调整勿扰或 Cron 时区。
 
 巡检默认使用 host 网络，避免把容器的 `172.x` 地址当作 NAS 内网 IP；host 模式不配置 `ports`，修改监听端口请设置 `UI_PORT`。若保留自定义桥接网络及端口映射，请设置 `NAS_LAN_IP=<NAS 的内网 IPv4>`。原有容器需按更新后的 Compose 重建，才能使用新增挂载及网络配置。
 
