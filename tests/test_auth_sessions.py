@@ -15,7 +15,7 @@ sys.path.insert(0, str(source))
 
 from web import session_service, ui_app
 from web.access_guard import GatewayPrefixMiddleware, LoginRateLimiter, SetupCodeStore, StripGatewayHeadersMiddleware
-from web.auth_service import apply_new_password
+from web.auth_service import apply_new_password, hash_password, normalize_password, password_matches
 
 
 class AuthSessionTests(unittest.TestCase):
@@ -47,7 +47,12 @@ class AuthSessionTests(unittest.TestCase):
     def login(self):
         response = self.request("/api/auth/login", "post", json={"password": "test-application-password"})
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.get_json()["ok"])
+        payload = response.get_json()
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["authenticated"])
+        self.assertFalse(payload["need_login"])
+        self.assertEqual(payload["remaining_seconds"], 900)
+        self.assertTrue(payload.get("session_token"))
         return response
 
     def gateway(self):
@@ -142,6 +147,73 @@ class AuthSessionTests(unittest.TestCase):
         self.assertFalse(self.request("/api/auth/status").get_json()["authenticated"])
         self.login()
         self.assertTrue(self.request("/api/auth/status").get_json()["authenticated"])
+
+    def test_mobile_keyboard_variants_match_saved_password(self):
+        def fullwidth(text):
+            return "".join(chr(ord(ch) + 0xFEE0) if "!" <= ch <= "~" else ch for ch in text)
+
+        for label, password in {
+            "capital-first": "Test-application-password",
+            "fullwidth": fullwidth("test-application-password"),
+            "zero-width": "test-application-password\u200b",
+            "ideographic-space": "\u3000test-application-password\u3000",
+            "exact": "test-application-password",
+        }.items():
+            with self.subTest(label=label):
+                response = self.request("/api/auth/login", "post", json={"password": password})
+                self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(self.request("/api/auth/login", "post", json={"password": "test-application-passworD"}).status_code, 401)
+        self.assertEqual(self.request("/api/auth/login", "post", json={"password": "Test-application-passworD"}).status_code, 401)
+
+    def test_legacy_exact_password_still_matches_after_normalization(self):
+        salt = "ab" * 16
+        legacy = hash_password("nas'pass", bytes.fromhex(salt))
+        self.assertTrue(password_matches("nas'pass", salt, legacy))
+        self.assertTrue(password_matches("nas\u2019pass", salt, legacy))
+        self.assertFalse(password_matches("nas'passx", salt, legacy))
+        stored = hash_password("Test-application-password", bytes.fromhex(salt))
+        self.assertTrue(password_matches("Test-application-password", salt, stored))
+        self.assertFalse(password_matches("test-application-password", salt, stored))
+        self.assertEqual(normalize_password(" ｔｅｓｔ\u200b "), "test")
+
+    def test_setup_treats_fullwidth_confirmation_as_the_same_password(self):
+        self.config.write_text("{}")
+        self.assertTrue(self.request("/api/auth/status").get_json()["need_setup"])
+        fullwidth = "".join(chr(ord(ch) + 0xFEE0) if "!" <= ch <= "~" else ch for ch in "new-test-password")
+        response = self.request("/api/auth/set-password", "post", json={
+            "password": fullwidth,
+            "password_confirm": "new-test-password",
+            "setup_code": ui_app._setup_codes.read(),
+        })
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(self.request("/api/auth/logout", "post", json={}).status_code, 200)
+        self.assertEqual(self.request("/api/auth/login", "post", json={"password": "new-test-password"}).status_code, 200)
+
+    def test_login_form_keeps_mobile_keyboard_from_rewriting_password(self):
+        html = (root / "src/web/templates/index.html").read_text(encoding="utf-8")
+        login = html.split('id="login-password"', 1)[1].split(">", 1)[0]
+        self.assertIn('autocapitalize="none"', login)
+        self.assertIn('autocorrect="off"', login)
+        self.assertIn('spellcheck="false"', login)
+        self.assertIn("font-size: 16px", html)
+        self.assertIn("readSecret", html)
+        self.assertIn("enterAuthenticatedSession", html)
+        login_handler = html.split('id="form-login"', 1)[1].split("function setStatus", 1)[0]
+        self.assertIn("enterAuthenticatedSession(json)", login_handler)
+        self.assertNotIn("initAuth();", login_handler)
+
+    def test_session_header_authenticates_without_cookie(self):
+        for gateway in [False, True]:
+            with self.subTest(gateway=gateway):
+                if gateway:
+                    self.gateway()
+                token = self.login().get_json()["session_token"]
+                self.client.delete_cookie(ui_app.AUTH_COOKIE_NAME, path=(self.prefix + "/" if self.prefix else "/"))
+                self.assertFalse(self.request("/api/auth/status").get_json()["authenticated"])
+                headers = {**self.headers, ui_app.AUTH_SESSION_HEADER: token}
+                status = self.client.get(self.prefix + "/api/auth/status", headers=headers).get_json()
+                self.assertTrue(status["authenticated"])
+                self.assertEqual(self.client.get(self.prefix + "/api/push-stats", headers=headers).status_code, 200)
 
     def test_invalid_password_does_not_create_session(self):
         response = self.request("/api/auth/login", "post", json={"password": "wrong-password"})

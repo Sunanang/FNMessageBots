@@ -799,12 +799,20 @@
       margin-top: 16px;
       text-align: center;
     }
-    input[type="password"] {
+    .auth-form input {
       width: 100%;
-      padding: 7px 9px;
+      padding: 12px;
       border-radius: 8px;
       border: 1px solid #d1d5db;
-      font-size: 13px;
+      font-size: 16px;
+      line-height: 1.4;
+    }
+    @media (max-width: 768px) {
+      .auth-page {
+        justify-content: flex-start;
+        padding: 16px 12px;
+      }
+      .auth-card { padding: 24px 16px; }
     }
   </style>
   <script src="{{ url_for('session_guard_js') }}"></script>
@@ -818,14 +826,14 @@
         <form class="auth-form" id="form-set-password">
           <div id="set-pw-code-wrap" style="display:none;">
             <div class="field-label">初始化码</div>
-            <input type="text" id="set-pw-code" placeholder="请输入初始化码" autocomplete="off" />
+            <input type="text" id="set-pw-code" placeholder="请输入初始化码" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" disabled />
             <div class="field-helper">为防止他人抢先设置密码，需要填写初始化码：Docker 版执行 <code>docker logs 容器名</code> 查看，或查看配置目录下的 <code>.setup_code</code> 文件。</div>
           </div>
           <div class="field-label">密码</div>
-          <input type="password" id="set-pw-password" placeholder="请输入密码" autocomplete="new-password" />
+          <input type="password" id="set-pw-password" name="new-password" placeholder="请输入密码" autocomplete="new-password" autocapitalize="none" autocorrect="off" spellcheck="false" disabled />
           <div class="field-label">确认密码</div>
-          <input type="password" id="set-pw-confirm" placeholder="请再次输入密码" autocomplete="new-password" />
-          <button type="submit" class="btn btn-primary btn-block">确认设置</button>
+          <input type="password" id="set-pw-confirm" name="confirm-password" placeholder="请再次输入密码" autocomplete="new-password" autocapitalize="none" autocorrect="off" spellcheck="false" disabled />
+          <button type="submit" class="btn btn-primary btn-block" disabled>确认设置</button>
         </form>
         <div id="auth-set-msg" class="auth-msg"></div>
       </div>
@@ -834,8 +842,8 @@
         <div class="auth-sub">登录后连续 15 分钟无操作才需重新输入密码；未过期时打开或刷新可直接进入</div>
         <form class="auth-form" id="form-login">
           <div class="field-label">密码</div>
-          <input type="password" id="login-password" placeholder="请输入密码" autocomplete="current-password" />
-          <button type="submit" class="btn btn-primary btn-block">登录</button>
+          <input type="password" id="login-password" name="password" placeholder="请输入密码" autocomplete="current-password" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="go" disabled />
+          <button type="submit" class="btn btn-primary btn-block" disabled>登录</button>
         </form>
         <div id="auth-login-msg" class="auth-msg"></div>
       </div>
@@ -1108,9 +1116,74 @@
     let passwordMinLength = 8;
     let authRequestNumber = 0;
     let loadedPasswordEnabled = true;
+    let authSubmitting = false;
+    const secretDrafts = new WeakMap();
+
+    function rememberSecret(input) {
+      secretDrafts.set(input, input.value);
+    }
+
+    function trackSecret(input) {
+      ["input", "keyup", "change", "compositionend"].forEach(name => {
+        input.addEventListener(name, () => rememberSecret(input));
+      });
+    }
+
+    function captureSecretDrafts(form) {
+      form.addEventListener("pointerdown", () => {
+        form.querySelectorAll("input").forEach(input => {
+          if (!input.disabled) rememberSecret(input);
+        });
+      }, true);
+    }
+
+    async function readSecret(input) {
+      const captured = secretDrafts.get(input) || "";
+      if (document.activeElement === input) input.blur();
+      await new Promise(resolve => setTimeout(resolve, 0));
+      const choose = window.fnmbSecret ? window.fnmbSecret.chooseSubmittedPassword : (_typed, current) => current;
+      return choose(captured, input.value).trim();
+    }
+
+    function setAuthFormEnabled(formId, enabled) {
+      document.getElementById(formId).querySelectorAll("input, button").forEach(field => {
+        field.disabled = !enabled;
+      });
+    }
+
+    function showAuthForm(mode) {
+      const showSetup = mode === "setup";
+      const showLogin = mode === "login";
+      setAuthFormEnabled("form-set-password", showSetup);
+      setAuthFormEnabled("form-login", showLogin);
+      document.getElementById("auth-set-password").style.display = showSetup ? "block" : "none";
+      document.getElementById("auth-login").style.display = showLogin ? "block" : "none";
+    }
+
+    function enterAuthenticatedSession(data) {
+      // 作废进行中的 status 轮询，避免旧响应把刚登录的页面又打回密码框。
+      authRequestNumber += 1;
+      const authGate = document.getElementById("auth-gate");
+      const appMain = document.getElementById("app-main");
+      if (data.session_token && window.fnmbSession.remember) {
+        window.fnmbSession.remember(data.session_token);
+      }
+      window.fnmbSession.start({
+        authenticated: true,
+        password_enabled: data.password_enabled !== false,
+        idle_seconds: data.idle_seconds || 900,
+        remaining_seconds: data.remaining_seconds ?? data.idle_seconds ?? 900,
+        session_token: data.session_token,
+      });
+      authGate.style.display = "none";
+      appMain.style.display = "flex";
+      loadConfig();
+    }
 
     window.addEventListener("fnmb-session-expired", () => {
       authRequestNumber += 1;
+      if (window.fnmbSession && window.fnmbSession.forget) window.fnmbSession.forget();
+      secretDrafts.set(document.getElementById("login-password"), "");
       renderPersistentWarnings([]);
       setStatus(false, "");
     });
@@ -1131,8 +1204,7 @@
         window.fnmbSession.start({authenticated: false});
         authGate.style.display = "flex";
         appMain.style.display = "none";
-        document.getElementById("auth-set-password").style.display = "none";
-        document.getElementById("auth-login").style.display = "block";
+        showAuthForm("login");
         const message = document.getElementById("auth-login-msg");
         message.textContent = error.message || "无法连接应用，请稍后重试。";
         message.className = "auth-msg error";
@@ -1152,81 +1224,101 @@
       }
       authGate.style.display = "flex";
       appMain.style.display = "none";
-      document.getElementById("auth-set-password").style.display = data.need_setup ? "block" : "none";
-      document.getElementById("auth-login").style.display = data.need_login ? "block" : "none";
+      showAuthForm(data.need_setup ? "setup" : (data.need_login ? "login" : "none"));
       document.getElementById("auth-set-msg").textContent = "";
       document.getElementById("auth-login-msg").textContent = "";
     }
 
     document.getElementById("auth-retry-btn").addEventListener("click", initAuth);
 
+    document.querySelectorAll("#form-set-password input, #form-login input").forEach(trackSecret);
+    captureSecretDrafts(document.getElementById("form-set-password"));
+    captureSecretDrafts(document.getElementById("form-login"));
+
     document.getElementById("form-set-password").addEventListener("submit", async function(e) {
       e.preventDefault();
+      if (authSubmitting) return;
+      authSubmitting = true;
       const msgEl = document.getElementById("auth-set-msg");
-      const p1 = document.getElementById("set-pw-password").value.trim();
-      const p2 = document.getElementById("set-pw-confirm").value.trim();
-      const setupCode = document.getElementById("set-pw-code").value.trim();
-      msgEl.textContent = "";
-      msgEl.className = "auth-msg";
-      if (setupRequiresCode && !setupCode) {
-        msgEl.textContent = "请输入初始化码";
-        msgEl.className = "auth-msg error";
-        return;
-      }
-      if (p1.length < passwordMinLength) {
-        msgEl.textContent = "密码长度至少 " + passwordMinLength + " 位";
-        msgEl.className = "auth-msg error";
-        return;
-      }
-      if (p1 !== p2) {
-        msgEl.textContent = "两次输入的密码不一致";
-        msgEl.className = "auth-msg error";
-        return;
-      }
-      const res = await fetch("api/auth/set-password", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ password: p1, password_confirm: p2, setup_code: setupCode }),
-      });
-      const json = await res.json();
-      if (json.ok) {
-        msgEl.textContent = "设置成功，正在进入配置页…";
-        msgEl.className = "auth-msg ok";
-        document.getElementById("form-set-password").reset();
-        initAuth();
-      } else {
-        msgEl.textContent = json.message || "设置失败";
-        msgEl.className = "auth-msg error";
+      try {
+        const p1 = await readSecret(document.getElementById("set-pw-password"));
+        const p2 = await readSecret(document.getElementById("set-pw-confirm"));
+        const setupCode = await readSecret(document.getElementById("set-pw-code"));
+        msgEl.textContent = "";
+        msgEl.className = "auth-msg";
+        if (setupRequiresCode && !setupCode) {
+          msgEl.textContent = "请输入初始化码";
+          msgEl.className = "auth-msg error";
+          return;
+        }
+        const normalize = window.fnmbSecret ? window.fnmbSecret.normalizePassword : value => value.trim();
+        const normalizedPassword = normalize(p1);
+        if (normalizedPassword.length < passwordMinLength) {
+          msgEl.textContent = "密码长度至少 " + passwordMinLength + " 位";
+          msgEl.className = "auth-msg error";
+          return;
+        }
+        if (normalizedPassword !== normalize(p2)) {
+          msgEl.textContent = "两次输入的密码不一致";
+          msgEl.className = "auth-msg error";
+          return;
+        }
+        const res = await fetch("api/auth/set-password", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ password: p1, password_confirm: p2, setup_code: setupCode }),
+        });
+        const json = await res.json();
+        if (json.ok) {
+          msgEl.textContent = "设置成功，正在进入配置页…";
+          msgEl.className = "auth-msg ok";
+          document.getElementById("form-set-password").reset();
+          enterAuthenticatedSession(json);
+        } else {
+          msgEl.textContent = json.message || "设置失败";
+          msgEl.className = "auth-msg error";
+        }
+      } finally {
+        authSubmitting = false;
       }
     });
 
     document.getElementById("form-login").addEventListener("submit", async function(e) {
       e.preventDefault();
+      if (authSubmitting) return;
+      authSubmitting = true;
       const msgEl = document.getElementById("auth-login-msg");
-      const password = document.getElementById("login-password").value.trim();
-      msgEl.textContent = "";
-      msgEl.className = "auth-msg";
-      if (!password) {
-        msgEl.textContent = "请输入密码";
-        msgEl.className = "auth-msg error";
-        return;
-      }
-      const res = await fetch("api/auth/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ password }),
-      });
-      const json = await res.json();
-      if (json.ok) {
-        msgEl.textContent = "登录成功，正在进入配置页…";
-        msgEl.className = "auth-msg ok";
-        document.getElementById("form-login").reset();
-        initAuth();
-      } else {
-        msgEl.textContent = json.message || "登录失败";
-        msgEl.className = "auth-msg error";
+      const loginPassword = document.getElementById("login-password");
+      try {
+        const password = await readSecret(loginPassword);
+        msgEl.textContent = "";
+        msgEl.className = "auth-msg";
+        if (!password) {
+          msgEl.textContent = "请输入密码";
+          msgEl.className = "auth-msg error";
+          return;
+        }
+        const res = await fetch("api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ password }),
+        });
+        const json = await res.json();
+        if (json.ok) {
+          msgEl.textContent = "登录成功，正在进入配置页…";
+          msgEl.className = "auth-msg ok";
+          secretDrafts.set(loginPassword, "");
+          document.getElementById("form-login").reset();
+          // 直接进入配置页，不再等待二次 status；手机端二次请求失败时会一直停在密码页。
+          enterAuthenticatedSession(json);
+        } else {
+          msgEl.textContent = json.message || "登录失败";
+          msgEl.className = "auth-msg error";
+        }
+      } finally {
+        authSubmitting = false;
       }
     });
 

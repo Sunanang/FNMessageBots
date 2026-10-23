@@ -32,7 +32,8 @@ from web.auth_service import PASSWORD_MIN_LENGTH
 from web.auth_service import apply_new_password as _apply_new_password
 from web.auth_service import get_password_config as _get_password_config
 from web.auth_service import has_password_set as _has_password_set_fn
-from web.auth_service import verify_password as _verify_password
+from web.auth_service import normalize_password as _normalize_password
+from web.auth_service import password_matches as _password_matches
 from web.api_helpers import build_notifier_from_raw as _build_notifier_from_raw
 from web.api_helpers import parse_success_filter as _parse_success_filter
 from web.app_paths import BASE_DIR
@@ -82,6 +83,7 @@ from web.access_diagnostics import warning_messages
 # 配置页密码：会话空闲超时（秒），超时后需重新输入密码
 SESSION_IDLE_SECONDS = 15 * 60
 AUTH_COOKIE_NAME = "fnmb_session"
+AUTH_SESSION_HEADER = "X-Fnmb-Session"
 _TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
 _config_lock = threading.RLock()
 
@@ -118,6 +120,22 @@ def _auth_cookie_kwargs() -> dict:
     }
 
 
+def _auth_session_payload(message: str, session_id: str) -> dict:
+    """登录/设密成功后把会话字段一并返回，避免手机端再等一次 status 才跳转。"""
+    return {
+        "ok": True,
+        "message": message,
+        "authenticated": True,
+        "need_login": False,
+        "need_setup": False,
+        "password_enabled": _password_enabled(),
+        "idle_seconds": SESSION_IDLE_SECONDS,
+        "remaining_seconds": float(SESSION_IDLE_SECONDS),
+        # 网关/WebView 可能吃掉 Set-Cookie；前端用 sessionStorage + 请求头续上会话。
+        "session_token": session_id,
+    }
+
+
 def _has_password_set() -> bool:
     return _has_password_set_fn(_load_raw_config)
 
@@ -130,9 +148,15 @@ def _password_enabled() -> bool:
 
 
 def _get_session_id_from_cookie() -> str:
+    """兼容旧名：Cookie 或 X-Fnmb-Session 中的有效会话。"""
+    candidates = []
+    header = (request.headers.get(AUTH_SESSION_HEADER) or "").strip()
+    if header:
+        candidates.append(header)
     # 浏览器可能同时持有旧根路径和网关路径的同名 Cookie；按服务端作用域选有效会话。
-    for sid in request.cookies.getlist(AUTH_COOKIE_NAME):
-        if _session_remaining_seconds(sid, SESSION_IDLE_SECONDS, scope=_auth_cookie_path()) > 0:
+    candidates.extend(request.cookies.getlist(AUTH_COOKIE_NAME))
+    for sid in candidates:
+        if sid and _session_remaining_seconds(sid, SESSION_IDLE_SECONDS, scope=_auth_cookie_path()) > 0:
             return sid
     return ""
 
@@ -171,7 +195,7 @@ def _client_key() -> str:
 @_config_transaction
 def _apply_initial_password_from_env() -> None:
     """FNMB_WEB_PASSWORD：未设密码时用作初始密码（手装 Docker 可在 compose 中预置）。"""
-    pw = (os.getenv("FNMB_WEB_PASSWORD") or "").strip()
+    pw = _normalize_password(os.getenv("FNMB_WEB_PASSWORD") or "")
     if not pw or _has_password_set():
         return
     if len(pw) < PASSWORD_MIN_LENGTH:
@@ -397,8 +421,8 @@ def create_app(on_config_saved=None) -> Flask:
                     "ok": False,
                     "message": "初始化码错误。请在应用运行日志或配置目录的 .setup_code 文件中查看。",
                 }), 403
-        p1 = (payload.get("password") or "").strip()
-        p2 = (payload.get("password_confirm") or "").strip()
+        p1 = _normalize_password(payload.get("password") or "")
+        p2 = _normalize_password(payload.get("password_confirm") or "")
         if not p1:
             return jsonify({"ok": False, "message": "请输入密码。"}), 400
         if len(p1) < PASSWORD_MIN_LENGTH:
@@ -413,7 +437,7 @@ def create_app(on_config_saved=None) -> Flask:
         _login_limiter.reset(key)
         _delete_session(_get_session_id_from_cookie(), scope=_auth_cookie_path())
         session_id = _create_session(SESSION_IDLE_SECONDS, scope=_auth_cookie_path())
-        resp = jsonify({"ok": True, "message": "密码设置成功。"})
+        resp = jsonify(_auth_session_payload("密码设置成功。", session_id))
         resp.set_cookie(AUTH_COOKIE_NAME, session_id, **_auth_cookie_kwargs())
         return resp
 
@@ -430,20 +454,20 @@ def create_app(on_config_saved=None) -> Flask:
         if wait:
             return jsonify({"ok": False, "message": f"密码错误次数过多，请 {wait} 秒后再试。"}), 429
         payload = request.get_json(silent=True) or {}
-        password = (payload.get("password") or "").strip()
-        if not password:
+        password = payload.get("password")
+        if not isinstance(password, str) or not _normalize_password(password):
             return jsonify({"ok": False, "message": "请输入密码。"}), 400
         raw = _load_raw_config()
         salt, stored_hash = _get_password_config(raw)
         if not salt or not stored_hash:
             return jsonify({"ok": False, "message": "密码配置无效，请重新设置密码。"}), 400
-        if not _verify_password(password, salt, stored_hash):
+        if not _password_matches(password, salt, stored_hash):
             _login_limiter.record_failure(key)
             return jsonify({"ok": False, "message": "密码错误。"}), 401
         _login_limiter.reset(key)
         _delete_session(_get_session_id_from_cookie(), scope=_auth_cookie_path())
         session_id = _create_session(SESSION_IDLE_SECONDS, scope=_auth_cookie_path())
-        resp = jsonify({"ok": True, "message": "登录成功。"})
+        resp = jsonify(_auth_session_payload("登录成功。", session_id))
         resp.set_cookie(AUTH_COOKIE_NAME, session_id, **_auth_cookie_kwargs())
         return resp
 
