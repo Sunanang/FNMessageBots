@@ -138,6 +138,7 @@ class ConnectionPool:
         body: Optional[str] = None,
         headers: Optional[Mapping[str, str]] = None,
         params: Optional[Mapping[str, str]] = None,
+        check_errcode: bool = True,
     ) -> Dict[str, Any]:
         """
         发送 HTTP 请求（json_body 与 body 二选一；body 为已编码的原始字符串）。
@@ -150,14 +151,14 @@ class ConnectionPool:
         safe_url = self._safe_url(url)
         with self.stats_lock:
             self.stats.total_requests += 1
-        out = {"success": False, "response": None, "error": None}
+        out: Dict[str, Any] = {"success": False, "response": None, "error": None}
         try:
             kwargs: Dict[str, Any] = {"timeout": self.timeout}
             if json_body is not None:
                 kwargs["json"] = json_body
             elif body is not None:
                 kwargs["data"] = body.encode("utf-8")
-            merged_headers = dict(headers or {})
+            merged_headers: Dict[str, Optional[str]] = dict(headers or {})
             if json_body is None and body is None:
                 # 无请求体时不带会话默认的 JSON Content-Type（None 表示移除）
                 merged_headers.setdefault("Content-Type", None)
@@ -167,6 +168,8 @@ class ConnectionPool:
                 kwargs["params"] = dict(params)
             response = self.session.request(method, url, **kwargs)
             response.raise_for_status()
+            if not 200 <= response.status_code < 300:
+                raise requests.exceptions.HTTPError(response=response)
             result = None
             try:
                 result = response.json() if response.content else None
@@ -174,7 +177,7 @@ class ConnectionPool:
                 result = None
             body_obj = result if isinstance(result, dict) else {}
             # 企业微信/钉钉等含 errcode，非 0 视为失败但保留返回体
-            if "errcode" in body_obj and body_obj.get("errcode") != 0:
+            if check_errcode and "errcode" in body_obj and str(body_obj.get("errcode")).strip() != "0":
                 self.logger.error(f"API返回错误: {body_obj}")
                 with self.stats_lock:
                     self.stats.failed_requests += 1
@@ -249,7 +252,7 @@ class ConnectionPool:
         """
         with self.stats_lock:
             self.stats.total_requests += 1
-        out = {"success": False, "response": None, "error": None}
+        out: Dict[str, Any] = {"success": False, "response": None, "error": None}
         try:
             with self._session_headers_lock:
                 original_content_type = self.session.headers.get("Content-Type")

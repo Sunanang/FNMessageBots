@@ -110,7 +110,8 @@ def _parse_parameter(parameter: Optional[str], uname: Optional[str], uid: Option
     data: Dict[str, Any] = {}
     if parameter and parameter.strip():
         try:
-            data = json.loads(parameter)
+            parsed = json.loads(parameter)
+            data = parsed if isinstance(parsed, dict) else {"raw": parameter}
         except json.JSONDecodeError:
             data = {"raw": parameter}
     if uname is not None and "user" not in data:

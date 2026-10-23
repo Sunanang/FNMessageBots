@@ -607,7 +607,7 @@ class Application:
             return
         ok = self.config.reload_from_file(CONFIG_FILE)
         if not ok:
-            return
+            raise ValueError("配置未通过运行时校验，监控仍使用之前的配置")
         has_webhook = any([
             self.config.wechat_webhook_url,
             self.config.dingtalk_webhook_url,

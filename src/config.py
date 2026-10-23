@@ -180,6 +180,9 @@ class Config:
         except Exception:
             return False
 
+        if not isinstance(data, dict):
+            return False
+
         # 先备份全部 dataclass 字段，校验失败时回滚，避免热加载后处于未调用 _validate 的不一致状态
         _backup = {f.name: copy.deepcopy(getattr(self, f.name)) for f in fields(self)}
 

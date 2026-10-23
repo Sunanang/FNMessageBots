@@ -195,6 +195,8 @@ def _client_key() -> str:
 @_config_transaction
 def _apply_initial_password_from_env() -> None:
     """FNMB_WEB_PASSWORD：未设密码时用作初始密码（手装 Docker 可在 compose 中预置）。"""
+    if _current_config_load_error():
+        return
     pw = _normalize_password(os.getenv("FNMB_WEB_PASSWORD") or "")
     if not pw or _has_password_set():
         return
@@ -328,6 +330,8 @@ def create_app(on_config_saved=None) -> Flask:
         # 写接口只接受 JSON，避免跨站表单以 text/plain 绕过预检
         if request.method == "POST" and not request.is_json:
             return jsonify({"ok": False, "message": "请求须为 application/json。"}), 415
+        if request.method == "POST" and not isinstance(request.get_json(silent=True), dict):
+            return jsonify({"ok": False, "message": "请求内容必须为 JSON 对象。"}), 400
         path = request.path
         if path in PUBLIC_PATHS or path.startswith(PUBLIC_PREFIXES):
             return None
@@ -547,6 +551,19 @@ def create_app(on_config_saved=None) -> Flask:
     def save_config():
         payload = request.get_json(silent=True) or {}
 
+        events = payload.get("events") or []
+        channels = payload.get("channels") or []
+        if not isinstance(events, list) or any(not isinstance(item, str) for item in events):
+            return jsonify({"ok": False, "message": "事件列表必须为字符串数组。"}), 400
+        if not isinstance(channels, list) or any(
+            not isinstance(item, dict) or not isinstance(item.get("type"), str)
+            or not isinstance(item.get("url"), str) for item in channels
+        ):
+            return jsonify({"ok": False, "message": "推送渠道必须为包含类型和地址的对象数组。"}), 400
+        for key in ("dnd_start_time", "dnd_end_time", "nas_patrol_cron", "bark_icon"):
+            if key in payload and not isinstance(payload[key], str):
+                return jsonify({"ok": False, "message": f"{key} 必须为字符串。"}), 400
+
         _, _, valid_event_ids, _ = _events_catalog_bundle()
         events = payload.get("events") or []
         # 只保留后端认可的事件 ID，避免写入非法值导致热加载或重启异常
@@ -734,6 +751,7 @@ def create_app(on_config_saved=None) -> Flask:
 
     @app.post("/api/test")
     def test_push():
+        notifier = None
         try:
             payload = request.get_json(silent=True) or {}
             content = (payload.get("content") or "").strip()
@@ -753,10 +771,17 @@ def create_app(on_config_saved=None) -> Flask:
             )
             ok = out.get("success", False) if isinstance(out, dict) else bool(out)
             channel_results = out.get("channel_results") if isinstance(out, dict) else None
+            channel_results = channel_results if isinstance(channel_results, list) else []
             if ok:
+                fail_count = out.get("fail_count", 0) if isinstance(out, dict) else 0
+                failures = [f"{cr.get('channel') or '渠道'}: {cr.get('error') or '发送失败'}"
+                            for cr in channel_results if isinstance(cr, dict) and (cr.get("error") or not cr.get("success"))]
+                partial = bool(fail_count or failures)
                 return jsonify({
                     "ok": True,
-                    "message": "测试消息已发送，请检查各渠道是否收到。",
+                    "partial": partial,
+                    "message": ("测试消息部分发送成功，部分目标失败。" + "；".join(failures)
+                                if partial else "测试消息已发送，请检查各渠道是否收到。"),
                     "channel_results": channel_results or [],
                 })
             # 拼出各渠道失败原因，便于排查魔法推送等自建服务
@@ -779,6 +804,12 @@ def create_app(on_config_saved=None) -> Flask:
             }), 500
         except Exception as e:
             return jsonify({"ok": False, "message": f"测试发送异常：{e}"}), 500
+        finally:
+            if notifier is not None:
+                try:
+                    notifier.close()
+                except Exception:
+                    app.logger.warning("关闭测试推送通知器失败", exc_info=True)
 
     @app.post("/api/nas-patrol/run")
     def run_nas_patrol():

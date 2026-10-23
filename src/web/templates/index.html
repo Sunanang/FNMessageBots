@@ -2279,7 +2279,7 @@
         let json = null;
         try { json = JSON.parse(text); } catch (e) { json = null; }
         if (res.ok && json.ok) {
-          showToast(true, json.message || "测试消息已发送");
+          showToast(!json.partial, json.message || "测试消息已发送");
         } else {
           showToast(false, (json && json.message) ? json.message : ("测试发送失败：" + (text ? text.slice(0, 120) : "")));
         }

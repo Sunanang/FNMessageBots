@@ -153,7 +153,6 @@ class AuthSessionTests(unittest.TestCase):
             return "".join(chr(ord(ch) + 0xFEE0) if "!" <= ch <= "~" else ch for ch in text)
 
         for label, password in {
-            "capital-first": "Test-application-password",
             "fullwidth": fullwidth("test-application-password"),
             "zero-width": "test-application-password\u200b",
             "ideographic-space": "\u3000test-application-password\u3000",
@@ -163,6 +162,7 @@ class AuthSessionTests(unittest.TestCase):
                 response = self.request("/api/auth/login", "post", json={"password": password})
                 self.assertEqual(response.status_code, 200, response.get_json())
         self.assertEqual(self.request("/api/auth/login", "post", json={"password": "test-application-passworD"}).status_code, 401)
+        self.assertEqual(self.request("/api/auth/login", "post", json={"password": "Test-application-password"}).status_code, 401)
         self.assertEqual(self.request("/api/auth/login", "post", json={"password": "Test-application-passworD"}).status_code, 401)
 
     def test_legacy_exact_password_still_matches_after_normalization(self):

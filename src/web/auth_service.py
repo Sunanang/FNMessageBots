@@ -38,18 +38,13 @@ def normalize_password(password: str) -> str:
 
 
 def _password_candidates(password: str) -> list[str]:
-    """先试规范化结果，再试用户原文，最后只把首字母改回小写。"""
+    """兼容输入法标点与旧密码原文，始终保留大小写。"""
     raw = password.strip() if isinstance(password, str) else ""
     normalized = normalize_password(password)
     candidates: list[str] = []
     for item in (normalized, raw):
         if item and item not in candidates:
             candidates.append(item)
-    # 部分手机键盘会把密码首字母自动大写，只多试这一种，不忽略其余大小写。
-    if normalized[:1].isupper():
-        folded = normalized[:1].lower() + normalized[1:]
-        if folded and folded not in candidates:
-            candidates.append(folded)
     return candidates
 
 
@@ -81,8 +76,10 @@ def password_matches(password: str, salt_hex: str, stored_hash: str) -> bool:
 
 def get_password_config(raw: dict) -> Tuple[Optional[str], Optional[str]]:
     """返回 (salt_hex, hash_hex)，未设置则 (None, None)。"""
-    salt = (raw.get("web_password_salt") or "").strip()
-    h = (raw.get("web_password_hash") or "").strip()
+    salt = raw.get("web_password_salt")
+    h = raw.get("web_password_hash")
+    salt = salt.strip() if isinstance(salt, str) else ""
+    h = h.strip() if isinstance(h, str) else ""
     if salt and h:
         return (salt, h)
     return (None, None)
