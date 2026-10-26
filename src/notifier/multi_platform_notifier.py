@@ -34,6 +34,7 @@ from .channel_params import (
     wecom_app_fields,
 )
 from .connection_pool import ConnectionPool
+from monitor.media_summary import MEDIA_SUMMARY_EVENT, format_media_summary
 
 # PushPlus 固定接口地址
 PUSHPLUS_URL = "https://www.pushplus.plus/send"
@@ -251,6 +252,7 @@ class MultiPlatformNotifier:
         'MEDIA_USER_CREATED': '👤 飞牛NAS-影视库创建用户',
         'TRIM_RESOURCE_ADDED': '📥 飞牛NAS-影视资源入库',
         'TRIM_SCRAPE_SUCCESS': '✅ 飞牛NAS-影视刮削完成',
+        'MEDIA_LIBRARY_SUMMARY': '📚 飞牛NAS-影视处理汇总',
         'PHOTO_SHARE_CREATED': '📥 飞牛NAS-相册分享创建',
         'PHOTO_SHARE_EXPIRED': '⏱️ 飞牛NAS-相册分享过期',
         'PHOTO_DEVICE_REGISTERED': '📱 飞牛NAS-相册同步设备',
@@ -459,8 +461,8 @@ class MultiPlatformNotifier:
         'MEDIA_LOGIN_SUCC': '影视库用户登录成功。',
         'MEDIA_LOGOUT': '影视库用户退出登录。',
         'MEDIA_USER_CREATED': '影视库管理员创建用户成功。',
-        'TRIM_RESOURCE_ADDED': '影视库资源入库成功。',
-        'TRIM_SCRAPE_SUCCESS': '影视资源刮削完成。',
+        'TRIM_RESOURCE_ADDED': '资源入库与刮削通知累计后，连续60秒无新增时统一推送本轮汇总。',
+        'TRIM_SCRAPE_SUCCESS': '已观察到的刮削完成记录参与本轮汇总；静默不代表整个任务完成。',
         'PHOTO_SHARE_CREATED': '相册库新增了对外分享链接。',
         'PHOTO_SHARE_EXPIRED': '该相册分享已超过有效期。',
         'PHOTO_DEVICE_REGISTERED': '相册库已登记新的同步设备。',
@@ -1603,7 +1605,7 @@ class MultiPlatformNotifier:
                       timestamp: str, raw_log: str) -> MultiPlatformMessage:
         """构建多平台消息"""
         # 轮询批量汇总、NAS 定时巡检：不受极简模式折叠为一行
-        if self._minimal_push_effective() and event_type not in ("POLL_BATCH_SUMMARY", "NAS_PATROL_REPORT"):
+        if self._minimal_push_effective() and event_type not in ("POLL_BATCH_SUMMARY", "NAS_PATROL_REPORT", MEDIA_SUMMARY_EVENT):
             one_line = self._build_minimal_one_line(event_type, event_data)
             return MultiPlatformMessage(title=one_line, content="")
 
@@ -1778,6 +1780,8 @@ class MultiPlatformNotifier:
     ) -> str:
         """构建消息内容。for_batch_inner=True 时用于多事件汇总内的子块：无首行时间、无 EVENT_NOTES。"""
         # 批量汇总：多条时整段在入口处理（仅一条时间行 + 子块无时间/无备注）
+        if event_type == MEDIA_SUMMARY_EVENT:
+            return self._strip_body_emojis(format_media_summary(event_data))
         if event_type == 'POLL_BATCH_SUMMARY':
             single_event = self._extract_single_event_from_batch(event_data)
             if single_event:

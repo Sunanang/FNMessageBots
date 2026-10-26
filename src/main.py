@@ -26,6 +26,7 @@ from monitor.backup_db_poller import (
     BACKUP_SUCCESS_EVENT,
 )
 from monitor.media_db_poller import MediaDBPoller
+from monitor.media_summary import MEDIA_SUMMARY_EVENT
 from monitor.trim_activity_poller import TrimActivityPoller
 from monitor.photo_db_poller import PHOTO_POLL_EVENTS, PhotoDBPoller
 from monitor.scheduler_db_poller import (
@@ -399,6 +400,8 @@ class Application:
                 )
         else:
             if self.media_db_poller is not None:
+                if not (me & TRIMMEDIA_POLL_EVENTS):
+                    self.media_db_poller.update_config(monitor_events=[])
                 self.media_db_poller.stop()
                 self.media_db_poller = None
 
@@ -594,6 +597,10 @@ class Application:
             if self.ssh_journal_poller and event_type in ssh_ev:
                 self.ssh_journal_poller.add_handler(event_type, handler)
             registered += 1
+        if self.media_db_poller and trim_ev & set(self.config.monitor_events):
+            handler = self.event_processor.get_handler(MEDIA_SUMMARY_EVENT)
+            if handler:
+                self.media_db_poller.add_handler(MEDIA_SUMMARY_EVENT, handler)
         print(f"已注册 {registered} 个事件处理器")
 
     def reload_config(self) -> None:

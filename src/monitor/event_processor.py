@@ -123,6 +123,7 @@ class EventProcessor:
             'MEDIA_USER_CREATED': lambda ed, e: self._handle_simple_notification('MEDIA_USER_CREATED', ed, e),
             'TRIM_RESOURCE_ADDED': lambda ed, e: self._handle_trim_library_db('TRIM_RESOURCE_ADDED', ed, e),
             'TRIM_SCRAPE_SUCCESS': lambda ed, e: self._handle_trim_library_db('TRIM_SCRAPE_SUCCESS', ed, e),
+            'MEDIA_LIBRARY_SUMMARY': lambda ed, e: self._handle_trim_library_db('MEDIA_LIBRARY_SUMMARY', ed, e),
             'PHOTO_SHARE_CREATED': lambda ed, e: self._handle_simple_notification('PHOTO_SHARE_CREATED', ed, e),
             'PHOTO_SHARE_EXPIRED': lambda ed, e: self._handle_simple_notification('PHOTO_SHARE_EXPIRED', ed, e),
             'PHOTO_DEVICE_REGISTERED': lambda ed, e: self._handle_simple_notification('PHOTO_DEVICE_REGISTERED', ed, e),
@@ -654,13 +655,14 @@ class EventProcessor:
         """trimmedia.db / trimactivity.db 轮询产生的影视库事件。"""
         raw_log = getattr(entry, 'raw_data', '{}')
         timestamp = getattr(entry, 'timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-        self.notifier.send_notification(
+        result = self.notifier.send_notification(
             event_type=event_type,
             event_data=event_data,
             raw_log=raw_log,
             timestamp=timestamp
         )
         self._store_notification_log(event_type, event_data, raw_log, entry, source='trim_media_db')
+        return result
 
     def _handle_simple_notification(self, event_type: str, event_data: Dict[str, Any], entry: JournalEntry):
         """可选事件的通用处理：解析 parameter 后直接推送，无额外逻辑。"""

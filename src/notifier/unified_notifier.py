@@ -618,7 +618,7 @@ class UnifiedNotifier:
         """
         if self._in_dnd_window() and event_type != "NAS_PATROL_REPORT":
             # 勿扰时段内：logger_data.db3 事件靠 DB 汇总；外部库走轻量缓冲；批量汇总需展开 by_type。
-            if str(event_type) == "POLL_BATCH_SUMMARY":
+            if str(event_type) in ("POLL_BATCH_SUMMARY", "MEDIA_LIBRARY_SUMMARY"):
                 self._buffer_dnd_poll_batch_summary(event_data)
             else:
                 self._buffer_event_for_dnd_if_needed(str(event_type), event_data)
