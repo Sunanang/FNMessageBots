@@ -38,6 +38,8 @@ for side in "$db-wal" "$db-shm"; do
         setfacl -m "u:$account:r" -- "$side" || exit 1
     fi
 done
+# WAL/SHM 会被重建：给库目录加默认 ACL，让新侧车文件自动继承读权限
+setfacl -d -m "u:$account:r" -- "$(dirname -- "$db")" || true
 FNMB_ACL'''
 
 

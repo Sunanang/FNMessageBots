@@ -35,6 +35,7 @@ from .channel_params import (
 )
 from .connection_pool import ConnectionPool
 from monitor.media_summary import MEDIA_SUMMARY_EVENT, format_media_summary
+from monitor.music_summary import MUSIC_SUMMARY_EVENT, format_music_summary
 
 # PushPlus 固定接口地址
 PUSHPLUS_URL = "https://www.pushplus.plus/send"
@@ -260,6 +261,11 @@ class MultiPlatformNotifier:
         'PHOTO_SHARE_EXPIRED': '⏱️ 飞牛NAS-相册分享过期',
         'PHOTO_DEVICE_REGISTERED': '📱 飞牛NAS-相册同步设备',
         'FACE_RECOGNITION_UPDATED': '✅ 飞牛NAS-相册人脸识别',
+        'MUSIC_TRACK_ADDED': '🎵 飞牛NAS-音乐入库',
+        'MUSIC_TRACK_REMOVED': '🎵 飞牛NAS-音乐移出库',
+        'MUSIC_LIBRARY_SUMMARY': '🎵 飞牛NAS-音乐库汇总',
+        'MUSIC_FAVORITED': '❤️ 飞牛NAS-音乐收藏',
+        'MUSIC_PLAYLIST_TRACK_ADDED': '🎶 飞牛NAS-加入歌单',
         # Docker 容器（Engine events）
         'DOCKER_CONTAINER_CREATE': '📦 飞牛NAS-Docker容器已创建',
         'DOCKER_CONTAINER_START': '▶️ 飞牛NAS-Docker容器已启动',
@@ -369,6 +375,11 @@ class MultiPlatformNotifier:
         'PHOTO_SHARE_EXPIRED': '相册分享过期',
         'PHOTO_DEVICE_REGISTERED': '相册同步设备',
         'FACE_RECOGNITION_UPDATED': '相册人脸识别',
+        'MUSIC_TRACK_ADDED': '音乐入库',
+        'MUSIC_TRACK_REMOVED': '音乐移出库',
+        'MUSIC_LIBRARY_SUMMARY': '音乐库汇总',
+        'MUSIC_FAVORITED': '音乐收藏 {title}',
+        'MUSIC_PLAYLIST_TRACK_ADDED': '加入歌单 {playlist_name}',
         'DOCKER_CONTAINER_CREATE': 'Docker容器 {container_name} 已创建',
         'DOCKER_CONTAINER_START': 'Docker容器 {container_name} 已启动',
         'DOCKER_CONTAINER_STOP': 'Docker容器 {container_name} 已停止',
@@ -476,6 +487,11 @@ class MultiPlatformNotifier:
         'PHOTO_SHARE_EXPIRED': '该相册分享已超过有效期。',
         'PHOTO_DEVICE_REGISTERED': '相册库已登记新的同步设备。',
         'FACE_RECOGNITION_UPDATED': '相册人脸识别告一段落，以下为本次汇总。',
+        'MUSIC_TRACK_ADDED': '曲目入库与移出累计后，连续60秒无新增时统一推送本轮汇总。',
+        'MUSIC_TRACK_REMOVED': '曲目被标记删除或文件失效后参与本轮汇总；静默不代表整个扫描完成。',
+        'MUSIC_LIBRARY_SUMMARY': '音乐库本轮变更汇总。',
+        'MUSIC_FAVORITED': '用户收藏了一首曲目。',
+        'MUSIC_PLAYLIST_TRACK_ADDED': '用户将曲目加入了歌单。',
         'DOCKER_CONTAINER_CREATE': 'Docker 引擎上报容器已创建。',
         'DOCKER_CONTAINER_START': 'Docker 引擎上报容器已开始运行。',
         'DOCKER_CONTAINER_STOP': 'Docker 引擎上报容器停止信号。',
@@ -1509,6 +1525,21 @@ class MultiPlatformNotifier:
                 ).hexdigest()[:20]
                 key = f"{event_type}_{digest}"
         elif event_type in (
+            "MUSIC_FAVORITED",
+            "MUSIC_PLAYLIST_TRACK_ADDED",
+        ):
+            if event_type == "MUSIC_FAVORITED":
+                key = (
+                    f"{event_type}_"
+                    f"{int(event_data.get('favorite_id') or 0) or event_data.get('track_id') or 'na'}"
+                )
+            else:
+                key = (
+                    f"{event_type}_"
+                    f"{int(event_data.get('playlist_track_id') or 0) or event_data.get('track_id') or 'na'}_"
+                    f"{event_data.get('playlist_id') or ''}"
+                )
+        elif event_type in (
             "PHOTO_SHARE_CREATED",
             "PHOTO_SHARE_EXPIRED",
             "PHOTO_DEVICE_REGISTERED",
@@ -1810,6 +1841,8 @@ class MultiPlatformNotifier:
         # 批量汇总：多条时整段在入口处理（仅一条时间行 + 子块无时间/无备注）
         if event_type == MEDIA_SUMMARY_EVENT:
             return self._strip_body_emojis(format_media_summary(event_data))
+        if event_type == MUSIC_SUMMARY_EVENT:
+            return self._strip_body_emojis(format_music_summary(event_data))
         if event_type == 'POLL_BATCH_SUMMARY':
             single_event = self._extract_single_event_from_batch(event_data)
             if single_event:
@@ -1916,6 +1949,13 @@ class MultiPlatformNotifier:
             'FACE_RECOGNITION_UPDATED',
         ):
             detail = self._build_photo_album_content(event_type, event_data)
+        elif event_type in (
+            'MUSIC_TRACK_ADDED',
+            'MUSIC_TRACK_REMOVED',
+            'MUSIC_FAVORITED',
+            'MUSIC_PLAYLIST_TRACK_ADDED',
+        ):
+            detail = self._build_music_library_content(event_type, event_data)
 
         if detail:
             fragments.append(detail.rstrip('\n'))
@@ -2420,6 +2460,28 @@ class MultiPlatformNotifier:
                 lines.append(f"角色: {role}")
             if str(email).strip():
                 lines.append(f"邮箱: {email}")
+        return "\n".join(lines) if lines else "（无额外详情）"
+
+    def _build_music_library_content(self, event_type: str, event_data: Dict[str, Any]) -> str:
+        """音乐库 music.db 事件正文：收藏 / 加入歌单等即时推送。"""
+        lines: List[str] = []
+        if event_data.get("title"):
+            lines.append(f"曲目: {event_data['title']}")
+        elif event_data.get("track_id") is not None:
+            lines.append(f"曲目ID: {event_data['track_id']}")
+        if event_data.get("artist"):
+            lines.append(f"艺人: {event_data['artist']}")
+        if event_data.get("album"):
+            lines.append(f"专辑: {event_data['album']}")
+        if event_type == "MUSIC_PLAYLIST_TRACK_ADDED":
+            if event_data.get("playlist_name"):
+                lines.append(f"歌单: {event_data['playlist_name']}")
+            elif event_data.get("playlist_id") is not None:
+                lines.append(f"歌单ID: {event_data['playlist_id']}")
+        if event_data.get("user_label"):
+            lines.append(f"用户: {event_data['user_label']}")
+        elif event_data.get("user_id") is not None:
+            lines.append(f"用户ID: {event_data['user_id']}")
         return "\n".join(lines) if lines else "（无额外详情）"
 
     def _build_photo_album_content(self, event_type: str, event_data: Dict[str, Any]) -> str:

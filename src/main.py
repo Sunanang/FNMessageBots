@@ -29,6 +29,8 @@ from monitor.media_db_poller import MediaDBPoller
 from monitor.media_summary import MEDIA_SUMMARY_EVENT
 from monitor.trim_activity_poller import TrimActivityPoller
 from monitor.photo_db_poller import PHOTO_POLL_EVENTS, PhotoDBPoller
+from monitor.music_db_poller import MUSIC_POLL_EVENTS, MusicDBPoller
+from monitor.music_summary import MUSIC_SUMMARY_EVENT
 from monitor.scheduler_db_poller import (
     SchedulerDBPoller,
     SCHEDULER_POLL_EVENTS,
@@ -74,6 +76,7 @@ class Application:
         self.media_db_poller = None
         self.trim_activity_poller = None
         self.photo_db_poller = None
+        self.music_db_poller = None
         self.scheduler_db_poller = None
         self.docker_events_poller = None
         self.ssh_journal_poller = None
@@ -240,6 +243,12 @@ class Application:
             )
         if me & PHOTO_POLL_EVENTS:
             self._probe_db_readable("相册库 photo.db", getattr(self.config, "photo_db_path", "") or "")
+        if me & MUSIC_POLL_EVENTS:
+            self._probe_db_readable(
+                "音乐库 music.db",
+                getattr(self.config, "music_db_path", "") or "",
+                table_probe_sql="SELECT 1 FROM track LIMIT 1",
+            )
         if me & SCHEDULER_POLL_EVENTS:
             self._probe_db_readable("任务计划库 scheduler.db", getattr(self.config, "scheduler_db_path", "") or "")
 
@@ -320,6 +329,8 @@ class Application:
                 enabled_sources.append("trimactivity")
             if self.photo_db_poller:
                 enabled_sources.append("相册")
+            if self.music_db_poller:
+                enabled_sources.append("音乐库")
             if self.scheduler_db_poller:
                 enabled_sources.append("任务计划")
             if self.docker_events_poller:
@@ -362,7 +373,7 @@ class Application:
             return False
 
     def _sync_optional_pollers(self) -> None:
-        """按 monitor_events 创建或停止备份库 / trimmedia / trimactivity / photo.db 轮询器。"""
+        """按 monitor_events 创建或停止备份库 / trimmedia / trimactivity / photo / music 轮询器。"""
         if not self.config:
             return
         me = set(self.config.monitor_events or [])
@@ -473,6 +484,37 @@ class Application:
                 self.photo_db_poller.stop()
                 self.photo_db_poller = None
 
+        music_path = getattr(self.config, "music_db_path", "") or ""
+        music_ok = (
+            self._probe_db_readable(
+                "音乐库 music.db",
+                music_path,
+                table_probe_sql="SELECT 1 FROM track LIMIT 1",
+            )
+            if (me & MUSIC_POLL_EVENTS)
+            else False
+        )
+        if (me & MUSIC_POLL_EVENTS) and music_ok:
+            if self.music_db_poller is None:
+                self.music_db_poller = MusicDBPoller(
+                    db_path=music_path,
+                    cursor_dir=cdir,
+                    poll_interval=interval,
+                    monitor_events=self.config.monitor_events,
+                )
+            else:
+                self.music_db_poller.update_config(
+                    monitor_events=self.config.monitor_events,
+                    poll_interval=interval,
+                    db_path=music_path,
+                )
+        else:
+            if self.music_db_poller is not None:
+                if not (me & MUSIC_POLL_EVENTS):
+                    self.music_db_poller.update_config(monitor_events=[])
+                self.music_db_poller.stop()
+                self.music_db_poller = None
+
         scheduler_path = getattr(self.config, "scheduler_db_path", "") or ""
         scheduler_ok = self._probe_db_readable("任务计划库 scheduler.db", scheduler_path) if (me & SCHEDULER_POLL_EVENTS) else False
         if (me & SCHEDULER_POLL_EVENTS) and scheduler_ok:
@@ -565,6 +607,8 @@ class Application:
             self.trim_activity_poller.set_poll_batch_summary(pbs, batch_enq)
         if self.photo_db_poller:
             self.photo_db_poller.set_poll_batch_summary(pbs, batch_enq)
+        if self.music_db_poller:
+            self.music_db_poller.set_poll_batch_summary(pbs, batch_enq)
         if self.docker_events_poller:
             self.docker_events_poller.set_poll_batch_summary(pbs, batch_enq)
         if self.backup_poller:
@@ -622,6 +666,8 @@ class Application:
             self.trim_activity_poller.clear_handlers()
         if self.photo_db_poller:
             self.photo_db_poller.clear_handlers()
+        if self.music_db_poller:
+            self.music_db_poller.clear_handlers()
         if self.scheduler_db_poller:
             self.scheduler_db_poller.clear_handlers()
         if self.docker_events_poller:
@@ -631,6 +677,8 @@ class Application:
         trim_ev = {"TRIM_RESOURCE_ADDED", "TRIM_SCRAPE_SUCCESS"}
         act_ev = {"MEDIA_LOGIN_SUCC", "MEDIA_LOGOUT"}
         photo_ev = set(PHOTO_POLL_EVENTS)
+        music_ev = set(MUSIC_POLL_EVENTS)
+        music_lib_ev = {"MUSIC_TRACK_ADDED", "MUSIC_TRACK_REMOVED"}
         scheduler_ev = set(SCHEDULER_POLL_EVENTS)
         docker_ev = set(DOCKER_POLL_EVENTS)
         ssh_ev = set(SSH_JOURNAL_EVENTS)
@@ -651,6 +699,8 @@ class Application:
                 self.trim_activity_poller.add_handler(event_type, handler)
             if self.photo_db_poller and event_type in photo_ev:
                 self.photo_db_poller.add_handler(event_type, handler)
+            if self.music_db_poller and event_type in music_ev:
+                self.music_db_poller.add_handler(event_type, handler)
             if self.scheduler_db_poller and event_type in scheduler_ev:
                 self.scheduler_db_poller.add_handler(event_type, handler)
             if self.docker_events_poller and event_type in docker_ev:
@@ -668,6 +718,10 @@ class Application:
             handler = self.event_processor.get_handler(MEDIA_SUMMARY_EVENT)
             if handler:
                 self.media_db_poller.add_handler(MEDIA_SUMMARY_EVENT, handler)
+        if self.music_db_poller and music_lib_ev & set(self.config.monitor_events):
+            handler = self.event_processor.get_handler(MUSIC_SUMMARY_EVENT)
+            if handler:
+                self.music_db_poller.add_handler(MUSIC_SUMMARY_EVENT, handler)
         print(f"已注册 {registered} 个事件处理器")
 
     def reload_config(self) -> None:
@@ -711,6 +765,8 @@ class Application:
                 self.trim_activity_poller.start()
             if self.photo_db_poller:
                 self.photo_db_poller.start()
+            if self.music_db_poller:
+                self.music_db_poller.start()
             if self.scheduler_db_poller:
                 self.scheduler_db_poller.start()
             if self.docker_events_poller:
@@ -757,6 +813,8 @@ class Application:
                 self.trim_activity_poller.start()
             if self.photo_db_poller:
                 self.photo_db_poller.start()
+            if self.music_db_poller:
+                self.music_db_poller.start()
             if self.scheduler_db_poller:
                 self.scheduler_db_poller.start()
             if self.docker_events_poller:
@@ -790,7 +848,7 @@ class Application:
                     self.notifier.send_system_notification(
                         'APP_ERROR',
                         '应用初始化失败: 未知错误',
-                        {'hostname': socket.gethostname(), 'version': '2.7.0'}
+                        {'hostname': socket.gethostname(), 'version': '2.7.2'}
                     )
                 sys.exit(1)
             
@@ -827,7 +885,7 @@ class Application:
                     self.notifier.send_system_notification(
                         'APP_START',
                         '飞牛NAS日志监控系统已启动，开始监控系统事件',
-                        {'hostname': socket.gethostname(), 'version': '2.7.0'}
+                        {'hostname': socket.gethostname(), 'version': '2.7.2'}
                     )
                 else:
                     print("距上次启动通知不足 10 分钟，跳过本次启动通知（避免频繁重启刷屏）")
@@ -837,6 +895,7 @@ class Application:
                     self.media_db_poller,
                     self.trim_activity_poller,
                     self.photo_db_poller,
+                    self.music_db_poller,
                     self.scheduler_db_poller,
                     self.docker_events_poller,
                     self.ssh_journal_poller,
@@ -983,7 +1042,7 @@ class Application:
                 self.notifier.send_system_notification(
                     'APP_ERROR',
                     f'触发自动重启: {reason}',
-                    {'hostname': socket.gethostname(), 'version': '2.7.0'}
+                    {'hostname': socket.gethostname(), 'version': '2.7.2'}
                 )
         except Exception:
             pass
@@ -1007,7 +1066,7 @@ class Application:
             self.notifier.send_system_notification(
                 'APP_STOP',
                 '飞牛NAS日志监控系统已停止，监控服务暂停',
-                {'hostname': socket.gethostname(), 'version': '2.7.0'}
+                {'hostname': socket.gethostname(), 'version': '2.7.2'}
             )
 
         # 停止数据库轮询器
@@ -1021,6 +1080,8 @@ class Application:
             self.trim_activity_poller.stop()
         if self.photo_db_poller:
             self.photo_db_poller.stop()
+        if self.music_db_poller:
+            self.music_db_poller.stop()
         if self.scheduler_db_poller:
             self.scheduler_db_poller.stop()
         if self.docker_events_poller:

@@ -131,6 +131,11 @@ class EventProcessor:
             'PHOTO_SHARE_EXPIRED': lambda ed, e: self._handle_simple_notification('PHOTO_SHARE_EXPIRED', ed, e),
             'PHOTO_DEVICE_REGISTERED': lambda ed, e: self._handle_simple_notification('PHOTO_DEVICE_REGISTERED', ed, e),
             'FACE_RECOGNITION_UPDATED': lambda ed, e: self._handle_simple_notification('FACE_RECOGNITION_UPDATED', ed, e),
+            'MUSIC_TRACK_ADDED': lambda ed, e: self._handle_simple_notification('MUSIC_TRACK_ADDED', ed, e),
+            'MUSIC_TRACK_REMOVED': lambda ed, e: self._handle_simple_notification('MUSIC_TRACK_REMOVED', ed, e),
+            'MUSIC_LIBRARY_SUMMARY': lambda ed, e: self._handle_simple_notification('MUSIC_LIBRARY_SUMMARY', ed, e),
+            'MUSIC_FAVORITED': lambda ed, e: self._handle_simple_notification('MUSIC_FAVORITED', ed, e),
+            'MUSIC_PLAYLIST_TRACK_ADDED': lambda ed, e: self._handle_simple_notification('MUSIC_PLAYLIST_TRACK_ADDED', ed, e),
         }
         
         # 磁盘事件合并缓存
@@ -173,6 +178,12 @@ class EventProcessor:
             parts.append(str(event_data.get('device_display'))[:60])
         if event_type == 'FACE_RECOGNITION_UPDATED' and event_data.get('task_log_id') is not None:
             parts.append(f"人脸任务#{event_data.get('task_log_id')}")
+        if event_data.get('title') and (
+            event_type.startswith('MUSIC_') or event_type == 'MUSIC_LIBRARY_SUMMARY'
+        ):
+            parts.append(str(event_data.get('title'))[:60])
+        if event_type == 'MUSIC_PLAYLIST_TRACK_ADDED' and event_data.get('playlist_name'):
+            parts.append(str(event_data.get('playlist_name'))[:40])
         if event_type == 'WAN_IP_CHANGED':
             old_ip = event_data.get('old_wan_ip') or event_data.get('previous_wan_ip')
             new_ip = event_data.get('new_wan_ip') or event_data.get('wan_ip')

@@ -56,6 +56,12 @@ EVENT_CATEGORIES = [
         "PHOTO_DEVICE_REGISTERED",
         "FACE_RECOGNITION_UPDATED",
     ]),
+    ("vm_music", "音乐库", [
+        "MUSIC_TRACK_ADDED",
+        "MUSIC_TRACK_REMOVED",
+        "MUSIC_FAVORITED",
+        "MUSIC_PLAYLIST_TRACK_ADDED",
+    ]),
     ("docker", "Docker 容器", [
         "DOCKER_CONTAINER_CREATE",
         "DOCKER_CONTAINER_START",
@@ -231,10 +237,12 @@ def build_events_for_ui(
     trim_activity_db_path: str,
     photo_db_path: str,
     scheduler_db_path: str = "",
+    music_db_path: str = "",
     titles: Dict[str, str] = None,
     notes: Dict[str, str] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], set, List[str]]:
     """构建配置页事件分类（系统事件 + 三方应用事件）与可选事件集合。"""
+    _ = music_db_path  # 与其它库路径参数对齐；事件目录本身不读库内容
     if titles is None:
         titles = {}
     if notes is None:

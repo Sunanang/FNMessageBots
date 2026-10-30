@@ -316,6 +316,7 @@ def collect_access_warnings(raw_cfg: dict[str, Any], events: list[str], *,
         ({"TRIM_RESOURCE_ADDED", "TRIM_SCRAPE_SUCCESS"}, "影视库", "trim_media_db_path", "SELECT guid FROM item LIMIT 1"),
         ({"MEDIA_LOGIN_SUCC", "MEDIA_LOGOUT"}, "影视登录库", "trim_activity_db_path", "SELECT token FROM user_token LIMIT 1"),
         ({"PHOTO_SHARE_CREATED", "PHOTO_SHARE_EXPIRED", "PHOTO_DEVICE_REGISTERED", "FACE_RECOGNITION_UPDATED"}, "相册库", "photo_db_path", "SELECT id FROM share_link LIMIT 1"),
+        ({"MUSIC_TRACK_ADDED", "MUSIC_TRACK_REMOVED", "MUSIC_FAVORITED", "MUSIC_PLAYLIST_TRACK_ADDED"}, "音乐库", "music_db_path", "SELECT id FROM track LIMIT 1"),
         ({"SCHEDULER_TASK_SUCCESS", "SCHEDULER_TASK_FAILED", "SCHEDULER_TASK_CONDITION_FAILED"}, "任务计划库", "scheduler_db_path", "SELECT id FROM task_results LIMIT 1"),
     )
     # 主日志是一般系统事件的数据源；单独勾选外部源/巡检时不要求它存在。

@@ -96,6 +96,11 @@ class UnifiedNotifier:
         "PHOTO_SHARE_EXPIRED",
         "PHOTO_DEVICE_REGISTERED",
         "FACE_RECOGNITION_UPDATED",
+        "MUSIC_TRACK_ADDED",
+        "MUSIC_TRACK_REMOVED",
+        "MUSIC_LIBRARY_SUMMARY",
+        "MUSIC_FAVORITED",
+        "MUSIC_PLAYLIST_TRACK_ADDED",
         "WAN_IP_CHANGED",
         # SSH 现主要来自 journal，不在 logger_data.db3
         "SSH_LOGIN_SUCCESS",
@@ -621,7 +626,7 @@ class UnifiedNotifier:
         """
         if self._in_dnd_window() and event_type != "NAS_PATROL_REPORT":
             # 勿扰时段内：logger_data.db3 事件靠 DB 汇总；外部库走轻量缓冲；批量汇总需展开 by_type。
-            if str(event_type) in ("POLL_BATCH_SUMMARY", "MEDIA_LIBRARY_SUMMARY"):
+            if str(event_type) in ("POLL_BATCH_SUMMARY", "MEDIA_LIBRARY_SUMMARY", "MUSIC_LIBRARY_SUMMARY"):
                 self._buffer_dnd_poll_batch_summary(event_data)
             else:
                 self._buffer_event_for_dnd_if_needed(str(event_type), event_data)

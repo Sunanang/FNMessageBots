@@ -18,6 +18,7 @@ _DB_PATH_CANDIDATES: Dict[str, Tuple[str, ...]] = {
         "/usr/local/apps/@appdata/trim.media/database/trimactivity.db",
     ),
     "photo_db_path": ("/usr/local/apps/@appdata/trim.photos/db/photo.db",),
+    "music_db_path": ("/usr/local/apps/@appdata/trim.music/db/music.db",),
     "scheduler_db_path": (
         "/var/apps/fn-scheduler/var/scheduler.db",
         "/usr/local/apps/@appdata/fn-scheduler/database/scheduler.db",
@@ -36,6 +37,7 @@ _DB_PATH_ENV_VARS: Dict[str, str] = {
     "trim_media_db_path": "TRIM_MEDIA_DB_PATH",
     "trim_activity_db_path": "TRIM_ACTIVITY_DB_PATH",
     "photo_db_path": "PHOTO_DB_PATH",
+    "music_db_path": "MUSIC_DB_PATH",
     "scheduler_db_path": "SCHEDULER_DB_PATH",
 }
 

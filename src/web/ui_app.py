@@ -243,6 +243,7 @@ def _events_catalog_bundle():
         trim_activity_db_path=(raw.get("trim_activity_db_path") or "").strip(),
         photo_db_path=(raw.get("photo_db_path") or "").strip(),
         scheduler_db_path=(raw.get("scheduler_db_path") or "").strip(),
+        music_db_path=(raw.get("music_db_path") or "").strip(),
         titles=MultiPlatformNotifier.EVENT_TITLES,
         notes=MultiPlatformNotifier.EVENT_NOTES,
     )
@@ -537,7 +538,7 @@ def create_app(on_config_saved=None) -> Flask:
         data = {
             "title": "FnMessageBot",
             "subtitle": "飞牛日志消息推送机器人",
-            "version": "2.7.1",
+            "version": "2.7.2",
             "web_password_enabled": _password_enabled(),
             "events_by_category": events_by_category,
             "third_party_events_by_category": third_party_events_by_category,
@@ -792,7 +793,7 @@ def create_app(on_config_saved=None) -> Flask:
                 content,
                 {
                     "hostname": socket.gethostname(),
-                    "version": "2.7.1",
+                    "version": "2.7.2",
                 },
             )
             ok = out.get("success", False) if isinstance(out, dict) else bool(out)

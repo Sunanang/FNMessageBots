@@ -86,6 +86,7 @@ class Config:
     trim_media_db_path: str = ""
     trim_activity_db_path: str = ""
     photo_db_path: str = ""  # 相册 photo.db，空则不轮询相册事件
+    music_db_path: str = ""  # 音乐库 music.db，空则不轮询音乐事件
     scheduler_db_path: str = ""  # fn-scheduler scheduler.db，空则不轮询任务计划事件
     docker_socket_path: str = "/var/run/docker.sock"  # Docker Engine Unix socket；勾选 Docker 容器事件且文件可访问时监听
     logger_poll_interval: int = 5  # 秒，轮询间隔
@@ -275,6 +276,8 @@ class Config:
             self.trim_activity_db_path = data["trim_activity_db_path"].strip()
         if not env_skip("photo_db_path") and "photo_db_path" in data and isinstance(data["photo_db_path"], str):
             self.photo_db_path = data["photo_db_path"].strip()
+        if not env_skip("music_db_path") and "music_db_path" in data and isinstance(data["music_db_path"], str):
+            self.music_db_path = data["music_db_path"].strip()
         if not env_skip("scheduler_db_path") and "scheduler_db_path" in data and isinstance(data["scheduler_db_path"], str):
             self.scheduler_db_path = data["scheduler_db_path"].strip()
         if not env_skip("docker_socket_path") and "docker_socket_path" in data and isinstance(data["docker_socket_path"], str):
@@ -410,6 +413,9 @@ class Config:
         if photo_p := os.getenv('PHOTO_DB_PATH'):
             self.photo_db_path = photo_p.strip()
             self._env_set_keys.add('photo_db_path')
+        if music_p := os.getenv('MUSIC_DB_PATH'):
+            self.music_db_path = music_p.strip()
+            self._env_set_keys.add('music_db_path')
         if scheduler_p := os.getenv('SCHEDULER_DB_PATH'):
             self.scheduler_db_path = scheduler_p.strip()
             self._env_set_keys.add('scheduler_db_path')
