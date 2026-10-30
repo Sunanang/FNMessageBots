@@ -19,7 +19,7 @@ from utils.logtime_display import get_logtime_display_offset_seconds
 
 from .models import JournalEntry
 from .sqlite_uri import connect_readonly_with_fallback
-from .ssh_journal_poller import should_ignore_loopback_ssh
+from .ssh_journal_poller import should_ignore_ssh_by_source
 
 
 # 数据库 eventId -> 项目内 event_type（通知/处理器使用的类型）
@@ -166,8 +166,9 @@ class DBLogPoller:
         self.batch_handler: Optional[Callable[[List[Dict[str, Any]]], None]] = None
         # 当 SSH journal 轮询可用时，跳过库内 Sshd*，避免双推
         self.skip_ssh_events = False
-        # 与 SshJournalPoller 一致：忽略本机回环的 SSH 登录成功 / 断开
+        # 与 SshJournalPoller 一致：忽略本机回环 / 局域网的 SSH 登录成功 / 断开
         self.ignore_ssh_loopback = False
+        self.ignore_ssh_lan = False
         self.running = False
         self._thread: Optional[threading.Thread] = None
         self._cursor_file = self.cursor_dir / "db_poller_cursor.txt"
@@ -296,7 +297,12 @@ class DBLogPoller:
                 row.get("uname"),
                 row.get("uid"),
             )
-            if self.ignore_ssh_loopback and should_ignore_loopback_ssh(project_type, event_data):
+            if should_ignore_ssh_by_source(
+                project_type,
+                event_data,
+                ignore_loopback=self.ignore_ssh_loopback,
+                ignore_lan=self.ignore_ssh_lan,
+            ):
                 continue
             event_data.setdefault("_source", "logger_db")
             event_data.setdefault("_source_cursor", str(row_id))

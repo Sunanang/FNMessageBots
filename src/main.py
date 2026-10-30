@@ -41,7 +41,14 @@ from monitor.docker_socket_access import check_docker_socket_access
 from monitor.event_processor import EventProcessor
 from monitor.nas_patrol import start_nas_patrol_thread
 from monitor.wan_ip_monitor import start_wan_ip_monitor_thread
-from monitor.ssh_journal_poller import SSH_JOURNAL_EVENTS, SshJournalPoller
+from monitor.ssh_journal_poller import (
+    SSH_DISABLED,
+    SSH_ENABLED,
+    SSH_JOURNAL_EVENTS,
+    SSH_SERVICE_SWITCH_EVENTS,
+    SshJournalPoller,
+)
+from monitor.ssh_open_watch import SSH_OPEN_TIMEOUT, SshOpenWatch
 from monitor.sqlite_uri import probe_readonly_sqlite
 from notifier.unified_notifier import UnifiedNotifier
 from web.ui_app import start_ui_server_in_background
@@ -70,6 +77,7 @@ class Application:
         self.scheduler_db_poller = None
         self.docker_events_poller = None
         self.ssh_journal_poller = None
+        self.ssh_open_watch = None
         self.logger = None
         self.running = False
         self.notification_health_thread = None
@@ -329,11 +337,19 @@ class Application:
                     print(f"已勾选 Docker 容器事件，但未启动监听：{sock_issue}")
                 else:
                     print("Docker 容器事件：依赖未就绪或 docker SDK 不可用，未启动监听")
-            if not (self.ssh_journal_poller and self.ssh_journal_poller.is_available()) and (
-                set(self.config.monitor_events or []) & set(SSH_JOURNAL_EVENTS)
-            ):
+            journal_ok = bool(
+                self.ssh_journal_poller is not None and self.ssh_journal_poller.is_available()
+            )
+            ssh_events_wanted = bool(set(self.config.monitor_events or []) & set(SSH_JOURNAL_EVENTS))
+            ssh_remind_on = bool(self.config.ssh_open_timeout_enabled())
+            if not journal_ok and ssh_events_wanted:
                 print(
                     "已勾选 SSH 事件，但 journal 不可用：将回退 logger_data 中的 Sshd*；"
+                    + journal_permission_action()
+                )
+            if not journal_ok and ssh_remind_on:
+                print(
+                    "已开启 SSH 超时提醒，但 journal 不可用：无法检测 SSH 启停，超时提醒不会生效；"
                     + journal_permission_action()
                 )
 
@@ -501,8 +517,10 @@ class Application:
                 self.docker_events_poller.stop()
                 self.docker_events_poller = None
 
-        ssh_wanted = bool(me & SSH_JOURNAL_EVENTS)
+        ssh_remind_on = bool(self.config.ssh_open_timeout_enabled())
+        ssh_wanted = bool(me & SSH_JOURNAL_EVENTS) or ssh_remind_on
         ssh_ignore_loopback = bool(getattr(self.config, "ssh_ignore_loopback", False))
+        ssh_ignore_lan = bool(getattr(self.config, "ssh_ignore_lan", False))
         if ssh_wanted:
             if self.ssh_journal_poller is None:
                 self.ssh_journal_poller = SshJournalPoller(
@@ -510,17 +528,25 @@ class Application:
                     poll_interval=interval,
                     monitor_events=self.config.monitor_events,
                     ignore_loopback=ssh_ignore_loopback,
+                    ignore_lan=ssh_ignore_lan,
                 )
             else:
                 self.ssh_journal_poller.update_config(
                     monitor_events=self.config.monitor_events,
                     poll_interval=interval,
                     ignore_loopback=ssh_ignore_loopback,
+                    ignore_lan=ssh_ignore_lan,
                 )
         else:
             if self.ssh_journal_poller is not None:
                 self.ssh_journal_poller.stop()
                 self.ssh_journal_poller = None
+
+        self._sync_ssh_open_watch(cursor_dir=cdir, remind_on=ssh_remind_on)
+        if self.ssh_journal_poller is not None:
+            self.ssh_journal_poller.clear_service_hooks()
+            if self.ssh_open_watch is not None:
+                self.ssh_journal_poller.add_service_hook(self.ssh_open_watch.on_service_event)
 
         # journal 可用时跳过 logger_data 中的 Sshd*，避免双推；不可用则回退库表
         if self.log_poller is not None:
@@ -529,6 +555,7 @@ class Application:
             )
             self.log_poller.skip_ssh_events = journal_ok
             self.log_poller.ignore_ssh_loopback = ssh_ignore_loopback
+            self.log_poller.ignore_ssh_lan = ssh_ignore_lan
 
         pbs = bool(getattr(self.config, "poll_batch_summary_enabled", False)) and self.event_processor is not None
         batch_enq = self._enqueue_unified_batch_items if pbs else None
@@ -546,6 +573,40 @@ class Application:
             self.scheduler_db_poller.set_poll_batch_summary(pbs, batch_enq)
         if self.ssh_journal_poller:
             self.ssh_journal_poller.set_poll_batch_summary(pbs, batch_enq)
+
+    def _on_ssh_open_timeout(self, event_data: Dict[str, Any], entry) -> None:
+        """SSH 开启超时：需勾选 SSH_OPEN_TIMEOUT，分钟数由配置自定义。"""
+        if not self.event_processor or not self.config:
+            return
+        if self.ssh_open_watch is None:
+            return
+        if not self.config.ssh_open_timeout_enabled():
+            return
+        handler = self.event_processor.get_handler(SSH_OPEN_TIMEOUT)
+        if handler:
+            handler(event_data, entry)
+
+    def _sync_ssh_open_watch(self, *, cursor_dir: str, remind_on: bool) -> None:
+        """按配置启停 SSH 开启超时提醒。"""
+        if remind_on:
+            if self.ssh_open_watch is None:
+                self.ssh_open_watch = SshOpenWatch(
+                    cursor_dir,
+                    get_remind_minutes=lambda: (
+                        int(getattr(self.config, "ssh_open_remind_minutes", 30) or 30)
+                        if self.config.ssh_open_timeout_enabled()
+                        else 0
+                    ),
+                    on_timeout=self._on_ssh_open_timeout,
+                )
+                self.ssh_open_watch.start()
+            else:
+                self.ssh_open_watch.update_config()
+        else:
+            if self.ssh_open_watch is not None:
+                self.ssh_open_watch.stop()
+                self.ssh_open_watch.on_disabled()
+                self.ssh_open_watch = None
 
     def _register_db_event_handlers(self) -> None:
         """为 logger / 备份 / 影视库 / 相册 SQLite 轮询器注册 monitor_events 中的处理器。"""
@@ -597,6 +658,12 @@ class Application:
             if self.ssh_journal_poller and event_type in ssh_ev:
                 self.ssh_journal_poller.add_handler(event_type, handler)
             registered += 1
+        # SSH 启/停成对：勾选任一则两侧 handler 都挂上，避免只勾关闭/开启时漏推
+        if self.ssh_journal_poller and (SSH_SERVICE_SWITCH_EVENTS & set(self.config.monitor_events or [])):
+            for et in (SSH_ENABLED, SSH_DISABLED):
+                handler = self.event_processor.get_handler(et)
+                if handler:
+                    self.ssh_journal_poller.add_handler(et, handler)
         if self.media_db_poller and trim_ev & set(self.config.monitor_events):
             handler = self.event_processor.get_handler(MEDIA_SUMMARY_EVENT)
             if handler:
@@ -960,6 +1027,9 @@ class Application:
             self.docker_events_poller.stop()
         if self.ssh_journal_poller:
             self.ssh_journal_poller.stop()
+        if self.ssh_open_watch:
+            self.ssh_open_watch.stop()
+            self.ssh_open_watch = None
 
         # 停止运行日志清理线程
         cleanup_flag = getattr(self.logger, 'cleanup_stop_flag', None) if self.logger else None

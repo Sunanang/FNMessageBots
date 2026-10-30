@@ -102,6 +102,9 @@ class UnifiedNotifier:
         "SSH_AUTH_FAILED",
         "SSH_INVALID_USER",
         "SSH_DISCONNECTED",
+        "SSH_ENABLED",
+        "SSH_DISABLED",
+        "SSH_OPEN_TIMEOUT",
     })
     # 外部库轮询事件（不在 logger_data.db3）；主日志事件由 _query_dnd_events_summary 统计，勿重复计入。
     DND_EXTERNAL_POLLER_EVENT_TYPES: frozenset[str] = (

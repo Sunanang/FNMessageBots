@@ -168,7 +168,7 @@ class PatrolRegressionTests(unittest.TestCase):
             self.assertEqual(patrol._read_system_version(), "Debian 12")
 
     def test_api_numeric_and_string_zero_are_success(self):
-        for code in [0, "0"]:
+        for code in [0, "0", 0.0]:
             with self.subTest(code=code):
                 connection = Mock()
                 connection.getresponse.return_value = SimpleNamespace(status=200, read=lambda: json.dumps({"code": code, "data": {"systemVersion": "1.1.3100"}}).encode())

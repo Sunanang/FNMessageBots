@@ -39,6 +39,12 @@ class Config:
     minimal_push_enabled: bool = False
     # 忽略本机回环（127.0.0.1 / ::1）的 SSH 登录成功与断开；SSH 经内网穿透接入时来源同为回环，勿开启
     ssh_ignore_loopback: bool = False
+    # 忽略局域网（私网）来源的 SSH 登录成功 / 断开；失败与无效用户仍推送
+    ssh_ignore_lan: bool = False
+    # SSH 开启超时提醒阈值（分钟）；开关由 monitor_events 中的 SSH_OPEN_TIMEOUT 控制。默认 30
+    ssh_open_remind_minutes: int = 30
+    # 已迁移为「事件勾选 + 分钟数」；旧版用分钟>0 表示开启
+    ssh_open_timeout_by_event: bool = False
 
     # 监控配置
     monitor_events: List[str] = field(default_factory=lambda: [
@@ -53,6 +59,7 @@ class Config:
         "DiskWakeup", "DiskSpindown",
         "SSH_INVALID_USER", "SSH_AUTH_FAILED",
         "SSH_LOGIN_SUCCESS", "SSH_DISCONNECTED",
+        "SSH_ENABLED", "SSH_DISABLED", "SSH_OPEN_TIMEOUT",
         "DISK_IO_ERR",
         "BACKUP_TASK_SUCCESS", "BACKUP_TASK_FAILED", "BACKUP_TASK_PARTIAL_SUCCESS",
     ])
@@ -205,6 +212,15 @@ class Config:
             self.minimal_push_enabled = as_bool(data["minimal_push_enabled"], False)
         if not env_skip("ssh_ignore_loopback") and "ssh_ignore_loopback" in data:
             self.ssh_ignore_loopback = as_bool(data["ssh_ignore_loopback"], False)
+        if not env_skip("ssh_ignore_lan") and "ssh_ignore_lan" in data:
+            self.ssh_ignore_lan = as_bool(data["ssh_ignore_lan"], False)
+        if not env_skip("ssh_open_remind_minutes") and "ssh_open_remind_minutes" in data:
+            try:
+                self.ssh_open_remind_minutes = max(0, min(int(data["ssh_open_remind_minutes"]), 10080))
+            except (TypeError, ValueError):
+                self.ssh_open_remind_minutes = 30
+        if "ssh_open_timeout_by_event" in data:
+            self.ssh_open_timeout_by_event = as_bool(data["ssh_open_timeout_by_event"], False)
         if not env_skip("smtp_params") and "smtp_params" in data and isinstance(data["smtp_params"], str):
             self.smtp_params = data["smtp_params"]
         if "pushplus_params" in data and isinstance(data["pushplus_params"], str):
@@ -307,6 +323,15 @@ class Config:
         if ssh_ignore_loopback := os.getenv('SSH_IGNORE_LOOPBACK'):
             self.ssh_ignore_loopback = ssh_ignore_loopback.lower() in ['1', 'true', 'yes', 'on']
             self._env_set_keys.add('ssh_ignore_loopback')
+        if ssh_ignore_lan := os.getenv('SSH_IGNORE_LAN'):
+            self.ssh_ignore_lan = ssh_ignore_lan.lower() in ['1', 'true', 'yes', 'on']
+            self._env_set_keys.add('ssh_ignore_lan')
+        if ssh_open_remind := os.getenv('SSH_OPEN_REMIND_MINUTES'):
+            try:
+                self.ssh_open_remind_minutes = max(0, min(int(ssh_open_remind.strip()), 10080))
+                self._env_set_keys.add('ssh_open_remind_minutes')
+            except ValueError:
+                pass
         if smtp_params := os.getenv('SMTP_PARAMS'):
             self.smtp_params = smtp_params
             self._env_set_keys.add('smtp_params')
@@ -434,8 +459,42 @@ class Config:
                 print(f"警告: NOTIFY_RESTART_COOLDOWN 不是整数，已忽略: {notify_restart_cooldown}")
 
     
+    def ssh_open_timeout_enabled(self) -> bool:
+        """SSH 开启超时提醒是否启用：需勾选 SSH_OPEN_TIMEOUT 且分钟数 ≥ 1。"""
+        if "SSH_OPEN_TIMEOUT" not in (self.monitor_events or []):
+            return False
+        try:
+            return int(self.ssh_open_remind_minutes or 0) >= 1
+        except (TypeError, ValueError):
+            return False
+
+    def _migrate_ssh_open_timeout_event(self) -> None:
+        """旧版用分钟>0 开关；迁到事件勾选。仅在尚未标记迁移时执行一次（内存）。"""
+        try:
+            minutes = max(0, min(int(self.ssh_open_remind_minutes), 10080))
+        except (TypeError, ValueError):
+            minutes = 30
+
+        if self.ssh_open_timeout_by_event:
+            self.ssh_open_remind_minutes = minutes if minutes >= 1 else 30
+            return
+
+        events = list(self.monitor_events or [])
+        if minutes > 0:
+            if "SSH_OPEN_TIMEOUT" not in events:
+                events.append("SSH_OPEN_TIMEOUT")
+                self.monitor_events = events
+            self.ssh_open_remind_minutes = minutes
+        else:
+            self.monitor_events = [e for e in events if e != "SSH_OPEN_TIMEOUT"]
+            self.ssh_open_remind_minutes = 30
+        # 避免同进程内重复按旧规则加回；落盘由 Web 保存写入
+        self.ssh_open_timeout_by_event = True
+
     def _validate(self):
         """验证配置（部署时不强制 Webhook，可在 UI 中配置）"""
+        self._migrate_ssh_open_timeout_event()
+
         if self.wechat_webhook_url and not self.wechat_webhook_url.startswith('http'):
             raise ValueError("WECHAT_WEBHOOK_URL 必须是有效的URL")
         

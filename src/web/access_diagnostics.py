@@ -334,7 +334,7 @@ def collect_access_warnings(raw_cfg: dict[str, Any], events: list[str], *,
         result = docker_access_issue((raw_cfg.get("docker_socket_path") or "").strip() or "/var/run/docker.sock")
         if result:
             warnings.append(result)
-    if selected & SSH_JOURNAL_EVENTS:
+    if selected & SSH_JOURNAL_EVENTS or "SSH_OPEN_TIMEOUT" in selected:
         warnings.extend(ssh_access_issues())
     # 巡检是独立开关，不在页面可勾选事件目录中；手动触发也需检查。
     if include_patrol or as_bool(raw_cfg.get("nas_patrol_enabled", False), False) or "NAS_PATROL_REPORT" in selected:

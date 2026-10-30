@@ -175,6 +175,9 @@ class MultiPlatformNotifier:
         'SSH_AUTH_FAILED': '❌ 飞牛NAS-SSH认证失败',
         'SSH_LOGIN_SUCCESS': '🔐 飞牛NAS-SSH登录成功',
         'SSH_DISCONNECTED': '👋 飞牛NAS-SSH断开连接',
+        'SSH_ENABLED': '🔓 飞牛NAS-SSH已启用',
+        'SSH_DISABLED': '🔒 飞牛NAS-SSH已关闭',
+        'SSH_OPEN_TIMEOUT': '⏰ 飞牛NAS-SSH开启超时提醒',
         'APP_CRASH': '💥 飞牛NAS-应用崩溃告警',
         'APP_UPDATE_FAILED': '💥 飞牛NAS-应用更新失败告警',
         'APP_START_FAILED_LOCAL_APP_RUN_EXCEPTION': '💥 飞牛NAS-应用启动失败告警',
@@ -285,6 +288,9 @@ class MultiPlatformNotifier:
         'SSH_AUTH_FAILED': 'SSH认证失败{user_info}',
         'SSH_LOGIN_SUCCESS': 'SSH用户{user}登录成功',
         'SSH_DISCONNECTED': 'SSH连接已断开',
+        'SSH_ENABLED': 'SSH服务已启用',
+        'SSH_DISABLED': 'SSH服务已关闭',
+        'SSH_OPEN_TIMEOUT': 'SSH已开启超过{remind_minutes}分钟仍未关闭',
         'APP_CRASH': '应用{name}崩溃',
         'APP_UPDATE_FAILED': '应用{name}更新失败',
         'APP_START_FAILED_LOCAL_APP_RUN_EXCEPTION': '应用{name}启动失败',
@@ -390,6 +396,9 @@ class MultiPlatformNotifier:
         'SSH_AUTH_FAILED': 'SSH认证失败，请确认是否为合法用户。',
         'SSH_LOGIN_SUCCESS': 'SSH登录成功，请确认是否为本人操作。',
         'SSH_DISCONNECTED': 'SSH连接已断开。',
+        'SSH_ENABLED': 'SSH 服务已启用（systemd Started ssh.service）。',
+        'SSH_DISABLED': 'SSH 服务已关闭（systemd Stopped ssh.service）。',
+        'SSH_OPEN_TIMEOUT': '请确认是否仍需保持 SSH 开启；未关闭将按设定间隔继续提醒。',
         'APP_CRASH': '应用程序异常退出，建议检查应用状态和日志。',
         'APP_UPDATE_FAILED': '应用程序更新失败，建议检查应用状态和日志。',
         'APP_START_FAILED_LOCAL_APP_RUN_EXCEPTION': '应用程序启动失败（本地运行异常），建议检查应用状态和日志。',
@@ -1550,6 +1559,25 @@ class MultiPlatformNotifier:
         }:
             minute_window = int(time.time() / 60)
             key = f"{event_type}_{minute_window}"
+        elif event_type in ('SSH_ENABLED', 'SSH_DISABLED'):
+            # 每次启停都应可推；优先用 journal 游标，避免同分钟/300s 窗口吞掉快速开关
+            unit = str(event_data.get("unit") or "")
+            nonce = (
+                event_data.get("_source_cursor")
+                or event_data.get("_source_key")
+                or event_data.get("opened_at")
+                or time.time_ns()
+            )
+            key = f"{event_type}_{unit}_{nonce}"
+        elif event_type == 'SSH_OPEN_TIMEOUT':
+            # 同一开启会话会按间隔反复提醒，指纹需带序号/游标，避免被去重吞掉
+            nonce = (
+                event_data.get("_source_cursor")
+                or event_data.get("remind_seq")
+                or event_data.get("elapsed_minutes")
+                or time.time_ns()
+            )
+            key = f"{event_type}_{event_data.get('opened_at') or ''}_{nonce}"
         elif event_type == 'WAN_IP_CHANGED':
             old_ip = str(event_data.get('old_wan_ip') or event_data.get('previous_wan_ip') or '')
             new_ip = str(event_data.get('new_wan_ip') or event_data.get('wan_ip') or '')
@@ -1869,9 +1897,12 @@ class MultiPlatformNotifier:
             'ARCHIVING_SUCCESS', 'DeleteFile', 'MovetoTrashbin', 'SHARE_EVENTID_DEL', 'SHARE_EVENTID_PUT',
             'WEBDAV_ENABLED', 'WEBDAV_DISABLED', 'SAMBA_ENABLED', 'SAMBA_DISABLED',
             'DLNA_ENABLED', 'DLNA_DISABLED', 'FTP_ENABLED', 'FTP_DISABLED', 'NFS_ENABLED', 'NFS_DISABLED',
+            'SSH_ENABLED', 'SSH_DISABLED',
             'FW_ENABLE', 'FW_DISABLE', 'SECURITY_PORTCHANGED',
         }:
             detail = self._build_simple_content(event_data)
+        elif event_type == 'SSH_OPEN_TIMEOUT':
+            detail = self._build_ssh_open_timeout_content(event_data)
         elif event_type == 'WAN_IP_CHANGED':
             detail = self._build_wan_ip_changed_content(event_data)
         elif event_type in ('MEDIA_LOGIN_SUCC', 'MEDIA_LOGOUT'):
@@ -2270,6 +2301,20 @@ class MultiPlatformNotifier:
                 break
         return content or "（无额外详情）"
 
+    def _build_ssh_open_timeout_content(self, event_data: Dict[str, Any]) -> str:
+        """SSH 开启超时提醒正文。"""
+        remind = event_data.get("remind_minutes", "")
+        elapsed = event_data.get("elapsed_minutes", "")
+        opened = event_data.get("opened_at", "")
+        lines: List[str] = []
+        if remind != "" and remind is not None:
+            lines.append(f"阈值: {remind} 分钟")
+        if elapsed != "" and elapsed is not None:
+            lines.append(f"已开启: 约 {elapsed} 分钟")
+        if opened:
+            lines.append(f"开启时间: {opened}")
+        return ("\n".join(lines) + "\n") if lines else "SSH 开启超时\n"
+
     def _build_wan_ip_changed_content(self, event_data: Dict[str, Any]) -> str:
         """外网 IP 变化正文。"""
         lines: List[str] = []
@@ -2619,6 +2664,16 @@ class MultiPlatformNotifier:
                 parts.append(f"原因: {ed.get('reason')}")
             return [" · ".join(parts)] if parts else [et]
 
+        if et == "SSH_OPEN_TIMEOUT":
+            remind = ed.get("remind_minutes", "")
+            elapsed = ed.get("elapsed_minutes", "")
+            bits = []
+            if remind != "" and remind is not None:
+                bits.append(f"阈值 {remind} 分钟")
+            if elapsed != "" and elapsed is not None:
+                bits.append(f"已开约 {elapsed} 分钟")
+            return [" · ".join(bits)] if bits else ["SSH开启超时"]
+
         if et == "APP_CRASH":
             name = data.get("DISPLAY_NAME") or data.get("APP_NAME")
             return [f"应用名称: {name}"] if name else ["应用: （未知）"]
@@ -2653,6 +2708,15 @@ class MultiPlatformNotifier:
                 cpu_bits.append(f"当前使用率: {usage}%")
             if th != "" and th is not None:
                 cpu_bits.append(f"使用率阈值: {th}%")
+            tops = ed.get("top_cpu_processes") or data.get("top_cpu_processes") or []
+            if tops:
+                try:
+                    from src.utils.cpu_top import format_top_cpu_short
+                except ImportError:
+                    from utils.cpu_top import format_top_cpu_short  # type: ignore
+                short = format_top_cpu_short(tops if isinstance(tops, list) else [])
+                if short:
+                    cpu_bits.append(f"Top: {short}")
             return [" · ".join(cpu_bits)] if cpu_bits else ["CPU使用率告警"]
 
         if et == "CPU_USAGE_RESTORED":
@@ -2807,6 +2871,8 @@ class MultiPlatformNotifier:
             "FTP_DISABLED",
             "NFS_ENABLED",
             "NFS_DISABLED",
+            "SSH_ENABLED",
+            "SSH_DISABLED",
             "FW_ENABLE",
             "FW_DISABLE",
             "SECURITY_PORTCHANGED",
@@ -2816,7 +2882,7 @@ class MultiPlatformNotifier:
                 return [f"用户: {user}"]
             if ed.get("from"):
                 return [f"来源: {ed.get('from')}"]
-            for key in ("path", "PATH", "share_name", "SHARE_NAME", "name"):
+            for key in ("path", "PATH", "share_name", "SHARE_NAME", "name", "unit"):
                 v = ed.get(key) or data.get(key)
                 if v:
                     return [f"{key}: {v}"]
@@ -3225,11 +3291,20 @@ class MultiPlatformNotifier:
         return content
 
     def _build_cpu_usage_alarm_content(self, event_data: Dict[str, Any]) -> str:
-        """构建 CPU 使用率告警内容（parameter 格式: data.THRESHOLD）"""
+        """构建 CPU 使用率告警内容（parameter 格式: data.THRESHOLD；可选 top_cpu_processes）"""
         content = ""
         data = event_data.get('data', {})
         threshold = data.get('THRESHOLD', 0)
         content += f"📊 使用率阈值: {threshold}%\n"
+        tops = event_data.get("top_cpu_processes") or data.get("top_cpu_processes") or []
+        if tops:
+            try:
+                from src.utils.cpu_top import format_top_cpu_lines
+            except ImportError:
+                from utils.cpu_top import format_top_cpu_lines  # type: ignore
+            top_text = format_top_cpu_lines(tops if isinstance(tops, list) else [])
+            if top_text:
+                content += top_text + "\n"
         return content
 
     def _build_cpu_usage_restored_content(self, event_data: Dict[str, Any]) -> str:

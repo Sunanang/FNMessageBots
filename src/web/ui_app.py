@@ -518,10 +518,26 @@ def create_app(on_config_saved=None) -> Flask:
         except Exception:
             _cron = "0 12 * * *"
 
+        try:
+            _ssh_remind = max(0, min(int(raw.get("ssh_open_remind_minutes", 30) or 30), 10080))
+        except (TypeError, ValueError):
+            _ssh_remind = 30
+        # 旧版用分钟>0 开关：未迁移时把 SSH_OPEN_TIMEOUT 并入勾选展示（与 Config 运行时一致）
+        if not as_bool(raw.get("ssh_open_timeout_by_event"), False):
+            monitor_events = list(monitor_events or [])
+            if _ssh_remind > 0:
+                if "SSH_OPEN_TIMEOUT" not in monitor_events and "SSH_OPEN_TIMEOUT" in valid_event_ids:
+                    monitor_events.append("SSH_OPEN_TIMEOUT")
+            else:
+                monitor_events = [e for e in monitor_events if e != "SSH_OPEN_TIMEOUT"]
+                _ssh_remind = 30
+        elif _ssh_remind < 1:
+            _ssh_remind = 30
+
         data = {
             "title": "FnMessageBot",
             "subtitle": "飞牛日志消息推送机器人",
-            "version": "2.7.0",
+            "version": "2.7.1",
             "web_password_enabled": _password_enabled(),
             "events_by_category": events_by_category,
             "third_party_events_by_category": third_party_events_by_category,
@@ -537,6 +553,8 @@ def create_app(on_config_saved=None) -> Flask:
             "poll_batch_summary_enabled": as_bool(raw.get("poll_batch_summary_enabled", False), False),
             "minimal_push_enabled": as_bool(raw.get("minimal_push_enabled", False), False),
             "ssh_ignore_loopback": as_bool(raw.get("ssh_ignore_loopback", False), False),
+            "ssh_ignore_lan": as_bool(raw.get("ssh_ignore_lan", False), False),
+            "ssh_open_remind_minutes": _ssh_remind,
             "nas_patrol_enabled": as_bool(raw.get("nas_patrol_enabled", False), False),
             "nas_patrol_cron": _cron,
             "channel_options": CHANNEL_OPTIONS,
@@ -581,6 +599,11 @@ def create_app(on_config_saved=None) -> Flask:
         poll_batch_summary_enabled = as_bool(payload.get("poll_batch_summary_enabled", False), False)
         minimal_push_enabled = as_bool(payload.get("minimal_push_enabled", False), False)
         ssh_ignore_loopback = as_bool(payload.get("ssh_ignore_loopback", False), False)
+        ssh_ignore_lan = as_bool(payload.get("ssh_ignore_lan", False), False)
+        try:
+            ssh_open_remind_minutes = max(1, min(int(payload.get("ssh_open_remind_minutes", 30) or 30), 10080))
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "message": "SSH 开启超时分钟数必须为 1–10080 的整数。"}), 400
         nas_patrol_enabled = as_bool(payload.get("nas_patrol_enabled", False), False)
         nas_patrol_cron = (payload.get("nas_patrol_cron") or "").strip()
         title_prefix = _title_prefix_from_dict(payload)
@@ -715,6 +738,9 @@ def create_app(on_config_saved=None) -> Flask:
                 "poll_batch_summary_enabled": poll_batch_summary_enabled,
                 "minimal_push_enabled": minimal_push_enabled,
                 "ssh_ignore_loopback": ssh_ignore_loopback,
+                "ssh_ignore_lan": ssh_ignore_lan,
+                "ssh_open_remind_minutes": ssh_open_remind_minutes,
+                "ssh_open_timeout_by_event": True,
                 "nas_patrol_enabled": nas_patrol_enabled,
                 "nas_patrol_cron": nas_patrol_cron,
                 "title_prefix": title_prefix,
@@ -766,7 +792,7 @@ def create_app(on_config_saved=None) -> Flask:
                 content,
                 {
                     "hostname": socket.gethostname(),
-                    "version": "2.7.0",
+                    "version": "2.7.1",
                 },
             )
             ok = out.get("success", False) if isinstance(out, dict) else bool(out)
