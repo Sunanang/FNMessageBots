@@ -86,7 +86,7 @@ class Config:
     trim_media_db_path: str = ""
     trim_activity_db_path: str = ""
     photo_db_path: str = ""  # 相册 photo.db，空则不轮询相册事件
-    music_db_path: str = ""  # 音乐库 music.db，空则不轮询音乐事件
+    music_db_path: str = ""  # 音乐库 music.db；空则回退标准路径 trim.music/db/music.db
     scheduler_db_path: str = ""  # fn-scheduler scheduler.db，空则不轮询任务计划事件
     docker_socket_path: str = "/var/run/docker.sock"  # Docker Engine Unix socket；勾选 Docker 容器事件且文件可访问时监听
     logger_poll_interval: int = 5  # 秒，轮询间隔
@@ -167,14 +167,17 @@ class Config:
                 print(f"警告: 配置文件读取失败 - {e}")
 
     def _apply_discovered_db_paths(self) -> None:
-        """配置项为空时，按 compose 常见挂载路径自动探测可读的数据库文件。"""
-        from config_db_paths import DB_PATH_CONFIG_KEYS, discover_db_path
+        """配置项为空时，按 compose 常见挂载路径自动探测；宿主上空配置回退标准路径。"""
+        from config_db_paths import DB_PATH_CONFIG_KEYS, diagnostic_db_path, discover_db_path
+        from utils.access_guidance import in_container
 
         for key in DB_PATH_CONFIG_KEYS:
             if key in self._env_set_keys:
                 continue
             if not str(getattr(self, key, "") or "").strip():
                 found = discover_db_path(key)
+                if not found and not in_container():
+                    found = diagnostic_db_path(key, "")
                 if found:
                     setattr(self, key, found)
 

@@ -109,6 +109,66 @@ class AccessDiagnosticsTests(unittest.TestCase):
         self.assertEqual(result["code"], "busy")
         self.assertEqual(result["commands"], "")
 
+    def test_sqlite_unable_to_open_offers_acl_commands(self):
+        """主文件探测偶发通过但 SQLite 仍 unable to open 时，也应给出 NAS ACL 命令（音乐库常见）。"""
+        path = self.database("CREATE TABLE track(id INTEGER)", "music.db")
+        result = diagnostics.database_access_issue(
+            "音乐库",
+            path,
+            "SELECT id FROM track LIMIT 1",
+            sqlite_error=sqlite3.OperationalError("unable to open database file"),
+        )
+        self.assertEqual(result["code"], "permission")
+        self.assertIn("FnMessageBot", result["commands"])
+        self.assertIn("setfacl", result["commands"])
+        self.assertIn(path, result["commands"])
+
+    def test_empty_music_path_falls_back_to_canonical_for_diagnostics(self):
+        """升级后 config 无 music_db_path 时，应用标准路径做诊断，才能生成 ACL 命令。"""
+        from config_db_paths import diagnostic_db_path
+
+        canonical = diagnostic_db_path("music_db_path", "")
+        self.assertEqual(canonical, "/usr/local/apps/@appdata/trim.music/db/music.db")
+        captured = {}
+
+        def fake_issue(label, path, sql="SELECT 1", sqlite_error=None):
+            captured["label"] = label
+            captured["path"] = path
+            return diagnostics.issue(
+                label,
+                f"无法进入目录（测试）。",
+                code="permission",
+                commands=f"setfacl ... {path}",
+            )
+
+        with patch.object(diagnostics, "database_access_issue", side_effect=fake_issue):
+            result = diagnostics.collect_access_warnings({"music_db_path": ""}, ["MUSIC_FAVORITED"])
+        self.assertEqual(captured["label"], "音乐库")
+        self.assertEqual(captured["path"], canonical)
+        self.assertEqual(result[0]["code"], "permission")
+        self.assertIn("setfacl", result[0]["commands"])
+        self.assertIn("music.db", result[0]["commands"])
+
+    def test_empty_music_path_missing_still_offers_acl_commands(self):
+        """配置为空且标准路径「看起来不存在」时，仍给出折叠 ACL 命令（0700 假阴性）。"""
+        from config_db_paths import diagnostic_db_path
+
+        canonical = diagnostic_db_path("music_db_path", "")
+
+        def fake_missing(label, path, sql="SELECT 1", sqlite_error=None):
+            return diagnostics.issue(
+                label, "未找到数据库路径。", code="missing",
+                action="确认对应应用已安装，填写实际数据库路径。",
+            )
+
+        with patch.object(diagnostics, "database_access_issue", side_effect=fake_missing), \
+             patch.object(diagnostics, "in_container", return_value=False):
+            result = diagnostics.collect_access_warnings({"music_db_path": ""}, ["MUSIC_FAVORITED"])
+        self.assertEqual(result[0]["code"], "permission")
+        self.assertIn("setfacl", result[0]["commands"])
+        self.assertIn(canonical, result[0]["commands"])
+        self.assertIn(canonical, result[0]["message"])
+
     def test_unreadable_sidecar_has_same_database_acl_instructions(self):
         path = self.database()
         Path(path + "-shm").write_text("mock shm")

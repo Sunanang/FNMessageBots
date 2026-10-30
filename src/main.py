@@ -244,9 +244,10 @@ class Application:
         if me & PHOTO_POLL_EVENTS:
             self._probe_db_readable("相册库 photo.db", getattr(self.config, "photo_db_path", "") or "")
         if me & MUSIC_POLL_EVENTS:
+            from config_db_paths import diagnostic_db_path
             self._probe_db_readable(
                 "音乐库 music.db",
-                getattr(self.config, "music_db_path", "") or "",
+                diagnostic_db_path("music_db_path", getattr(self.config, "music_db_path", "") or ""),
                 table_probe_sql="SELECT 1 FROM track LIMIT 1",
             )
         if me & SCHEDULER_POLL_EVENTS:
@@ -484,7 +485,10 @@ class Application:
                 self.photo_db_poller.stop()
                 self.photo_db_poller = None
 
-        music_path = getattr(self.config, "music_db_path", "") or ""
+        from config_db_paths import diagnostic_db_path
+        music_path = diagnostic_db_path(
+            "music_db_path", getattr(self.config, "music_db_path", "") or ""
+        )
         music_ok = (
             self._probe_db_readable(
                 "音乐库 music.db",
@@ -848,7 +852,7 @@ class Application:
                     self.notifier.send_system_notification(
                         'APP_ERROR',
                         '应用初始化失败: 未知错误',
-                        {'hostname': socket.gethostname(), 'version': '2.7.2'}
+                        {'hostname': socket.gethostname(), 'version': '2.7.4'}
                     )
                 sys.exit(1)
             
@@ -885,7 +889,7 @@ class Application:
                     self.notifier.send_system_notification(
                         'APP_START',
                         '飞牛NAS日志监控系统已启动，开始监控系统事件',
-                        {'hostname': socket.gethostname(), 'version': '2.7.2'}
+                        {'hostname': socket.gethostname(), 'version': '2.7.4'}
                     )
                 else:
                     print("距上次启动通知不足 10 分钟，跳过本次启动通知（避免频繁重启刷屏）")
@@ -1042,7 +1046,7 @@ class Application:
                 self.notifier.send_system_notification(
                     'APP_ERROR',
                     f'触发自动重启: {reason}',
-                    {'hostname': socket.gethostname(), 'version': '2.7.2'}
+                    {'hostname': socket.gethostname(), 'version': '2.7.4'}
                 )
         except Exception:
             pass
@@ -1066,7 +1070,7 @@ class Application:
             self.notifier.send_system_notification(
                 'APP_STOP',
                 '飞牛NAS日志监控系统已停止，监控服务暂停',
-                {'hostname': socket.gethostname(), 'version': '2.7.2'}
+                {'hostname': socket.gethostname(), 'version': '2.7.4'}
             )
 
         # 停止数据库轮询器

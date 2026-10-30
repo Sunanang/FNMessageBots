@@ -14,6 +14,7 @@ from monitor.docker_events_poller import DOCKER_POLL_EVENTS
 from monitor.docker_socket_access import check_docker_socket_access
 from monitor.ssh_journal_poller import SSH_JOURNAL_EVENTS
 from monitor.sqlite_uri import connect_readonly_with_fallback
+from config_db_paths import diagnostic_db_path
 from utils.access_guidance import db_acl_commands, docker_permission_commands, in_container, journal_permission_action, service_user
 from utils.value_parser import as_bool
 
@@ -92,6 +93,9 @@ def database_access_issue(label: str, db_path: str, probe_sql: str = "SELECT 1",
         try:
             if side.exists() and not os.access(side, os.R_OK):
                 return _db_permission_issue(label, str(p), f"SQLite 附属文件不可读：{side}。")
+        except PermissionError:
+            # exists()/access 本身也可能因目录不可遍历而失败，应给出 ACL 命令
+            return _db_permission_issue(label, str(p), f"无法检查 SQLite 附属文件：{side}。")
         except OSError:
             pass
     error = sqlite_error
@@ -103,15 +107,26 @@ def database_access_issue(label: str, db_path: str, probe_sql: str = "SELECT 1",
         except Exception as exc:
             error = exc
     text = str(error)
-    if "no such table" in text.lower() or "no such column" in text.lower():
+    lower = text.lower()
+    if "no such table" in lower or "no such column" in lower:
         return issue(label, f"数据库可访问，但表结构不兼容：{text}。", code="schema", action=(
             "核对是否选择了正确的库；litevideo.sqlite / litegallery.sqlite 与当前适配的 "
-            "trimmedia.db / photo.db 不能直接互换，需要核对表结构并适配程序。增加权限不能解决此错误。"))
-    if "malformed" in text.lower() or "not a database" in text.lower():
+            "trimmedia.db / photo.db / music.db 不能直接互换，需要核对表结构并适配程序。增加权限不能解决此错误。"))
+    if "malformed" in lower or "not a database" in lower:
         return issue(label, f"数据库格式异常：{text}。", code="database", action=(
             "请通过对应应用检查、备份及恢复数据库；不要直接删除系统数据库或卸载本应用。"))
-    if "locked" in text.lower() or "busy" in text.lower():
+    if "locked" in lower or "busy" in lower:
         return issue(label, f"数据库正在被占用：{text}。", code="busy", action="稍后再保存检查，无需提升权限。")
+    # 主文件 os.access 偶发仍显示可读，但 SQLite 因目录/WAL/ACL 打不开——按权限问题给出可复制命令
+    if (
+        "unable to open" in lower
+        or "readonly" in lower
+        or "read-only" in lower
+        or "authorization" in lower
+        or "permission" in lower
+        or "not authorized" in lower
+    ):
+        return _db_permission_issue(label, str(p), f"SQLite 无法打开数据库（多为目录或 WAL/SHM 权限）：{text}。")
     return issue(label, f"路径可访问，但 SQLite 读取失败：{text}。", action=(
         "检查 WAL/SHM 文件权限、数据库格式和存储状态；不要直接放宽整个目录权限。"))
 
@@ -328,8 +343,24 @@ def collect_access_warnings(raw_cfg: dict[str, Any], events: list[str], *,
             warnings.append(result)
     for event_ids, label, key, sql in sources:
         if selected & event_ids:
-            result = database_access_issue(label, raw_cfg.get(key, ""), sql)
+            # 配置为空时用标准候选路径诊断（如 music.db 0700 导致未自动发现）
+            configured = str(raw_cfg.get(key) or "").strip()
+            path = diagnostic_db_path(key, configured)
+            result = database_access_issue(label, path, sql)
             if result:
+                # 升级后 music_db_path 常为空；0700 目录下「找不到」也可能是无权限。
+                # 配置未填时仍按标准路径给出可复制 ACL，与相册库/任务计划库体验一致。
+                if (
+                    not configured
+                    and path
+                    and result.get("code") == "missing"
+                    and not in_container()
+                ):
+                    result = _db_permission_issue(
+                        label,
+                        path,
+                        f"无法确认数据库可读（配置路径为空，已按标准路径检查）：{path}。",
+                    )
                 warnings.append(result)
     if selected & DOCKER_POLL_EVENTS:
         result = docker_access_issue((raw_cfg.get("docker_socket_path") or "").strip() or "/var/run/docker.sock")
