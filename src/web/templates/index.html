@@ -166,7 +166,8 @@
       font-size: 12px;
       color: #9ca3af;
     }
-    .events-by-category { max-height: 420px; overflow: auto; padding-right: 4px; }
+    /* 勿对事件列表使用 max-height+内部滚动：飞牛桌面 iframe/WebView 下会随机出现空白、重影 */
+    .events-by-category { padding-right: 4px; }
     .event-category { margin-bottom: 22px; }
     .event-category-title {
       font-size: 15px; font-weight: 650; color: #111827;
@@ -601,7 +602,6 @@
       .header-ver { font-size: 12px; }
       .section { padding: 12px; margin-bottom: 12px; }
       .section-title { font-size: 14px; margin-bottom: 8px; }
-      .events-by-category { max-height: none; }
       .events-grid { grid-template-columns: 1fr; gap: 8px; padding-right: 0; }
       .event-item { padding: 8px 10px; }
       .channels-header { flex-wrap: wrap; gap: 8px; }
