@@ -1,6 +1,7 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-saved-theme="{{ saved_theme }}">
 <head>
+  <script src="theme.js"></script>
   <meta charset="UTF-8" />
   <meta name="robots" content="noindex, nofollow" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
@@ -349,13 +350,5 @@ cap_add:
       </div>
     </div>
   </div>
-  <script>
-    (function () {
-      var key = "fnmb_theme";
-      var mode = localStorage.getItem(key);
-      var resolved = (mode === "dark") ? "dark" : "light";
-      document.documentElement.setAttribute("data-theme", resolved);
-    })();
-  </script>
 </body>
 </html>

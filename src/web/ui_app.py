@@ -79,6 +79,7 @@ from web.session_service import delete_session as _delete_session
 from web.session_service import delete_all_sessions as _delete_all_sessions
 from web.access_diagnostics import collect_access_warnings as _collect_external_db_access_warnings
 from web.access_diagnostics import warning_messages
+from web.ui_preferences import load_preferences, save_theme
 
 # 配置页密码：会话空闲超时（秒），超时后需重新输入密码
 SESSION_IDLE_SECONDS = 15 * 60
@@ -314,6 +315,7 @@ def create_app(on_config_saved=None) -> Flask:
         "/api/auth/set-password",
         "/api/auth/logout",
         "/session-guard.js",
+        "/theme.js",
     }
     PUBLIC_PREFIXES = ("/assets/",)
 
@@ -360,6 +362,30 @@ def create_app(on_config_saved=None) -> Flask:
     def healthz():
         """仅确认 HTTP 服务可响应，不读取配置或访问 NAS 数据源。"""
         return jsonify({"ok": True, "service": "fn-message-bots"})
+
+    @app.context_processor
+    def theme_context():
+        try:
+            theme = load_preferences(CONFIG_FILE.with_name("ui_preferences.json")).get("theme", "")
+        except (OSError, ValueError):
+            theme = ""
+        return {"saved_theme": theme if theme in ("light", "dark") else ""}
+
+    @app.get("/theme.js")
+    def theme_js():
+        return send_from_directory(str(Path(__file__).resolve().parent / "static"), "theme.js")
+
+    @app.post("/api/ui-preferences")
+    @_config_transaction
+    def set_ui_preferences():
+        theme = request.get_json().get("theme")
+        if theme not in ("light", "dark"):
+            return jsonify({"ok": False, "message": "主题必须为 light 或 dark。"}), 400
+        try:
+            save_theme(CONFIG_FILE.with_name("ui_preferences.json"), theme)
+        except (OSError, ValueError) as exc:
+            return jsonify({"ok": False, "message": f"主题保存失败：{exc}"}), 500
+        return jsonify({"ok": True, "theme": theme})
 
     @app.get("/api/auth/status")
     def auth_status():

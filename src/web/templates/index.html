@@ -1,7 +1,8 @@
 
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-saved-theme="{{ saved_theme }}">
 <head>
+  <script src="theme.js"></script>
   <meta charset="UTF-8" />
   <meta name="robots" content="noindex, nofollow" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
@@ -1081,45 +1082,11 @@
   <div id="toast-container" class="toast-container"></div>
 
   <script>
-    const THEME_STORAGE_KEY = "fnmb_theme";
-    const themeToggleBtn = document.getElementById("theme-toggle-btn");
-
-    function getStoredThemeMode() {
-      const mode = localStorage.getItem(THEME_STORAGE_KEY);
-      return (mode === "light" || mode === "dark") ? mode : "light";
-    }
-
-    function resolveTheme(mode) {
-      return mode === "dark" ? "dark" : "light";
-    }
-
-    function applyTheme(mode) {
-      const resolved = resolveTheme(mode);
-      document.documentElement.setAttribute("data-theme", resolved);
-      if (!themeToggleBtn) return;
-      if (resolved === "dark") {
-        themeToggleBtn.textContent = "☀";
-        themeToggleBtn.title = "切换到浅色模式";
-        themeToggleBtn.setAttribute("aria-label", "切换到浅色模式");
-      } else {
-        themeToggleBtn.textContent = "🌙";
-        themeToggleBtn.title = "切换到深色模式";
-        themeToggleBtn.setAttribute("aria-label", "切换到深色模式");
-      }
-    }
-
     function initTheme() {
-      const mode = getStoredThemeMode();
-      applyTheme(mode);
-      if (themeToggleBtn) {
-        themeToggleBtn.addEventListener("click", function() {
-          const current = resolveTheme(getStoredThemeMode());
-          const nextMode = current === "dark" ? "light" : "dark";
-          localStorage.setItem(THEME_STORAGE_KEY, nextMode);
-          applyTheme(nextMode);
-        });
-      }
+      window.fnmbTheme.bindToggle();
     }
+
+    window.addEventListener("fnmb-theme-error", event => setStatus(false, event.detail));
 
     const eventsContainer = document.getElementById("events-container");
     const thirdPartyEventsContainer = document.getElementById("third-party-events-container");

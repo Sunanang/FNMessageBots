@@ -3,6 +3,11 @@
 prepare_app_data_permissions() {
     local data_dir account group repair root_entry
     account="${TRIM_USERNAME:-FnMessageBot}"
+    # root 包不依赖普通版的 FnMessageBot 账号存在（全新安装也可运行）。
+    local variant_file="$(dirname "${BASH_SOURCE[0]}")/fpk-variant"
+    if [ -f "${variant_file}" ] && [ "$(cat "${variant_file}")" = "root" ]; then
+        account=root
+    fi
     group="$(id -gn "${account}")" || fail_user_visible "无法找到应用用户 ${account}，请检查应用权限配置。"
     data_dir="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "${TRIM_PKGVAR}")" || return 1
     case "${data_dir}" in

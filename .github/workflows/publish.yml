@@ -101,7 +101,7 @@ jobs:
         run: docker rm --force fnmb-smoke >/dev/null 2>&1 || true
 
   fpk:
-    name: Build and verify FPK
+    name: Build and verify package-user and root FPKs
     needs: test
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -119,8 +119,8 @@ jobs:
           printf '%s  %s\n' '54b97fa7b70968c4d05c79840f5daeff508957d0bb2062fdb0376d00d9615c93' "$FNPACK" | sha256sum --check -
           chmod +x "$FNPACK"
           printf 'FNPACK=%s\n' "$FNPACK" >> "$GITHUB_ENV"
-      - name: Build FPK and SHA-256
-        run: bash scripts/build-fpk.sh
+      - name: Build both FPK variants and SHA-256
+        run: bash scripts/build-fpk.sh all
       - name: Verify FPK payload matches this checkout
         run: python scripts/verify-fpk.py dist/*.fpk
       - uses: actions/upload-artifact@v4

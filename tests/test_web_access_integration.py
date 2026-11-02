@@ -208,6 +208,52 @@ class WebAccessIntegrationTests(unittest.TestCase):
         self.assertFalse(response.get_json()["ok"])
         self.callback.assert_not_called()
 
+    def test_theme_survives_new_app_without_changing_push_configuration(self):
+        before = self.config.read_bytes()
+        response = self.client.post("/api/ui-preferences", json={"theme": "dark"})
+        self.assertEqual(response.status_code, 200)
+        preferences = self.config.with_name("ui_preferences.json")
+        self.assertEqual(json.loads(preferences.read_text())["theme"], "dark")
+        self.assertEqual(preferences.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.config.read_bytes(), before)
+        self.callback.assert_not_called()
+        reopened = self.ui.create_app().test_client()
+        self.assertIn('data-saved-theme="dark"', reopened.get("/").get_data(as_text=True))
+        for path in ("/history", "/faq", "/support"):
+            self.assertIn('data-saved-theme="dark"', self.client.get(path).get_data(as_text=True))
+
+    def test_theme_changes_require_authentication(self):
+        anonymous = self.app.test_client()
+        self.assertEqual(anonymous.post("/api/ui-preferences", json={"theme": "dark"}).status_code, 401)
+        self.assertFalse(self.config.with_name("ui_preferences.json").exists())
+        script = anonymous.get("/theme.js")
+        self.assertEqual(script.status_code, 200)
+        self.assertIn("fnmbTheme", script.get_data(as_text=True))
+
+    def test_invalid_theme_does_not_replace_saved_preference(self):
+        preferences = self.config.with_name("ui_preferences.json")
+        preferences.write_text('{"theme":"dark","other":"keep"}')
+        before = preferences.read_bytes()
+        for theme in (None, "auto", [], {}, True, 123):
+            with self.subTest(theme=theme):
+                response = self.client.post("/api/ui-preferences", json={"theme": theme})
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(preferences.read_bytes(), before)
+
+    def test_theme_save_failure_is_reported(self):
+        with patch.object(self.ui, "save_theme", side_effect=OSError("disk full")):
+            response = self.client.post("/api/ui-preferences", json={"theme": "dark"})
+        self.assertEqual(response.status_code, 500)
+        self.assertFalse(response.get_json()["ok"])
+
+    def test_corrupt_preferences_are_not_silently_overwritten(self):
+        preferences = self.config.with_name("ui_preferences.json")
+        preferences.write_text("broken-json")
+        response = self.client.post("/api/ui-preferences", json={"theme": "dark"})
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(preferences.read_text(), "broken-json")
+        self.assertEqual(self.client.get("/").status_code, 200)
+
 
 if __name__ == "__main__":
     unittest.main()

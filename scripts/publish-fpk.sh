@@ -11,9 +11,13 @@ VERSION="$(sed -n 's/^version[[:space:]]*=[[:space:]]*//p' fpk/manifest | head -
 [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || { echo "错误: fpk/manifest 版本无效" >&2; exit 1; }
 
 TAG="v${VERSION}"
-PACKAGE="dist/FnMessageBot-${VERSION}.fpk"
-[ -s "$PACKAGE" ] || { echo "Expected verified package ${PACKAGE}" >&2; exit 1; }
-(cd dist && sha256sum --check "$(basename "$PACKAGE").sha256")
+PACKAGES=("dist/FnMessageBot-${VERSION}.fpk" "dist/FnMessageBot-${VERSION}-root.fpk")
+ASSETS=()
+for PACKAGE in "${PACKAGES[@]}"; do
+    [ -s "$PACKAGE" ] || { echo "Expected verified package ${PACKAGE}" >&2; exit 1; }
+    (cd dist && sha256sum --check "$(basename "$PACKAGE").sha256")
+    ASSETS+=("$PACKAGE" "${PACKAGE}.sha256")
+done
 
 TITLE="FnMessageBot ${VERSION}"
 NOTES="$(mktemp)"
@@ -24,7 +28,9 @@ cat > "$NOTES" <<EOF
 提交：https://github.com/${GH_REPO}/commit/${GITHUB_SHA}
 
 - Docker：\`sunanang/fn-message-bots:latest\`（amd64 / arm64）。Docker 的 \`latest\` 是镜像浮动标签，与本 FPK 的版本标签 \`${TAG}\` 是两套命名。
-- FPK：下载 \`FnMessageBot-${VERSION}.fpk\`，并用对应的 \`.sha256\` 文件核对。
+- FPK 普通用户版：\`FnMessageBot-${VERSION}.fpk\`。
+- FPK root 版：\`FnMessageBot-${VERSION}-root.fpk\`，整个应用以 root 身份运行。
+- 两版均附有独立的 \`.sha256\` 校验文件；应用标识及数据目录相同，可覆盖切换。
 - 安装包内部版本由 \`fpk/manifest\` 决定。同一版本再次合入 main 时，会覆盖标签 \`${TAG}\` 上的 Release 与同名资产。
 EOF
 
@@ -35,6 +41,8 @@ if gh release view "$TAG" >/dev/null 2>&1; then
 else
     gh release create "$TAG" --target "$GITHUB_SHA" --draft --title "$TITLE" --notes-file "$NOTES"
 fi
-gh release upload "$TAG" "$PACKAGE" "${PACKAGE}.sha256" --clobber
+gh release upload "$TAG" "${ASSETS[@]}" --clobber
 gh release edit "$TAG" --draft=false --prerelease=false
-echo "FPK: https://github.com/${GH_REPO}/releases/download/${TAG}/FnMessageBot-${VERSION}.fpk"
+for PACKAGE in "${PACKAGES[@]}"; do
+    echo "FPK: https://github.com/${GH_REPO}/releases/download/${TAG}/$(basename "$PACKAGE")"
+done

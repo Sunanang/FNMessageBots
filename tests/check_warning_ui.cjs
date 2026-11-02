@@ -34,6 +34,10 @@ const data = fixture ? fixture.data : {title: 'FnMessageBot', selected_events: [
     await page.route('**/*', async route => {
       const url = new URL(route.request().url());
       let response = {ok: true};
+      if (url.pathname.endsWith('/theme.js')) {
+        await route.fulfill({contentType: 'application/javascript', body: fs.readFileSync(path.join(source, 'web/static/theme.js'), 'utf8')});
+        return;
+      }
       if (url.pathname.endsWith('/session-guard.js')) {
         await route.fulfill({contentType: 'application/javascript', body: fs.readFileSync(path.join(source, 'web/static/session-guard.js'), 'utf8')});
         return;

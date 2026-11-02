@@ -94,16 +94,21 @@ fi
 rm -f "${TRIM_PKGVAR}/.fnmb_wtest"
 
 source "$(dirname "${BASH_SOURCE[0]}")/ui_port"
-if [ "${wizard_ui_port+x}" = x ]; then
+# 覆盖安装也可能执行 install_callback；安装向导默认值不能改掉原监听端口。
+if [ -f "${TRIM_PKGVAR}/config/config.json" ] || [ -e "${TRIM_PKGVAR}/config/ui_port" ]; then
+    save_fnmb_ui_port
+elif [ "${wizard_ui_port+x}" = x ]; then
     save_fnmb_ui_port "${wizard_ui_port}"
 else
     save_fnmb_ui_port
 fi
 
 # 初始化配置（仅首次）
+FNMB_FRESH_CONFIG=0
 if [ ! -f "${TRIM_PKGVAR}/config/config.json" ]; then
     if [ -f "${DEFAULT_CONFIG_FILE}" ]; then
         cp -f "${DEFAULT_CONFIG_FILE}" "${TRIM_PKGVAR}/config/config.json"
+        FNMB_FRESH_CONFIG=1
     else
         fail_user_visible "安装失败：未找到默认配置（${DEFAULT_CONFIG_FILE}）。${_INSTALL_FAIL_DOCKER_HINT}"
     fi
@@ -111,7 +116,7 @@ fi
 
 # 安装向导设置的访问密码：只写入 PBKDF2 盐值与哈希（与 web/auth_service.py 一致），明文不落盘、不输出。
 # 未经向导安装（变量为空）时跳过，应用启动后走初始化码流程。
-if [ -n "${wizard_web_password:-}" ]; then
+if [ "${FNMB_FRESH_CONFIG}" = "1" ] && [ -n "${wizard_web_password:-}" ]; then
     set +e
     FNMB_PW="${wizard_web_password}" \
     FNMB_PW2="${wizard_web_password_confirm:-}" \

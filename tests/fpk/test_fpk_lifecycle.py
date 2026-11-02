@@ -85,6 +85,27 @@ class FpkLifecycleTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("拒绝修改权限", result.stdout)
 
+    def test_root_variant_preflight_does_not_require_package_account(self):
+        cmd = self.base / "root-cmd"
+        cmd.mkdir()
+        shutil.copy2(fpk / "cmd/data_permissions", cmd / "data_permissions")
+        (cmd / "fpk-variant").write_text("root\n")
+        stubs = self.base / "root-stubs"
+        stubs.mkdir()
+        (stubs / "id").write_text('#!/bin/sh\nif [ "$1" = "-u" ]; then echo 0; elif [ "$2" = root ]; then echo rootgroup; else exit 1; fi\n')
+        (stubs / "chown").write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$CHOWN_CAPTURE"\n')
+        for stub in stubs.iterdir():
+            stub.chmod(0o755)
+        capture = self.base / "chown-args"
+        result = subprocess.run(["bash", "-c",
+            'fail_user_visible() { echo "$1"; exit 1; }; source "$1"; prepare_app_data_permissions',
+            "test", str(cmd / "data_permissions")], env={
+                **self.env, "TRIM_USERNAME": "missing-package-account", "CHOWN_CAPTURE": str(capture),
+                "PATH": str(stubs) + os.pathsep + self.env["PATH"],
+            }, capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("root:rootgroup", capture.read_text())
+
     def run_port_helper(self, function, *args, extra_env=None):
         script = 'fail_user_visible() { printf "%s\\n" "$1"; exit 1; }; source "$1"; shift; "$@"'
         return subprocess.run(["bash", "-c", script, "test", str(fpk / "cmd/ui_port"), function, *args], env={**self.env, **(extra_env or {})}, capture_output=True, text=True, timeout=5)
@@ -127,9 +148,17 @@ class FpkLifecycleTests(unittest.TestCase):
         python = self.data / "venv/bin/python"
         python.write_text("#!/bin/sh\nexit 0\n")
         python.chmod(0o755)
-        result = subprocess.run(["bash", str(install / "cmd/install_callback")], env={**self.env, "wizard_ui_port": "19080"}, capture_output=True, text=True, timeout=10)
+        result = subprocess.run(["bash", str(install / "cmd/install_callback")], env={
+            **self.env, "wizard_ui_port": "19080", "wizard_web_password": "first-password-123",
+            "wizard_web_password_confirm": "first-password-123",
+        }, capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual((self.data / "config/ui_port").read_text(), "19080\n")
+        import hashlib
+        configured = json.loads((self.data / "config/config.json").read_text())
+        self.assertEqual(configured["web_password_hash"], hashlib.pbkdf2_hmac(
+            "sha256", b"first-password-123", bytes.fromhex(configured["web_password_salt"]), 100000).hex())
+        self.assertNotIn("first-password-123", (self.data / "config/config.json").read_text())
         result = subprocess.run(["bash", str(install / "cmd/upgrade_callback")], env={**self.env, "wizard_ui_port": "18230"}, capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual((self.data / "config/ui_port").read_text(), "19080\n")
@@ -143,6 +172,48 @@ class FpkLifecycleTests(unittest.TestCase):
             self.assertIsNotNone(re.fullmatch(pattern, value), value)
         for value in ("", "1023", "0", "65536", "99999", "18080.0", "port"):
             self.assertIsNone(re.fullmatch(pattern, value), value)
+
+    def test_reinstall_preserves_configuration_password_port_and_runtime_data(self):
+        import sqlite3
+        install = self.base / "install"
+        code = install / "cmd/fnmessagebots"
+        (code / "src").mkdir(parents=True)
+        (code / "config").mkdir()
+        (code / "src/main.py").write_text("")
+        (code / "requirements.txt").write_text("")
+        (code / "config/config.json").write_text('{"monitor_events":["LoginFail"]}')
+        for name in ("install_callback", "upgrade_callback", "data_permissions", "ui_port"):
+            shutil.copy2(fpk / "cmd" / name, install / "cmd" / name)
+        (self.data / "config").mkdir()
+        original = {"monitor_events": ["LoginSucc"], "wechat_webhook_url": "https://example.invalid/keep",
+                    "web_password_salt": "old-salt", "web_password_hash": "old-hash", "web_password_enabled": False}
+        (self.data / "config/config.json").write_text(json.dumps(original))
+        (self.data / "config/ui_preferences.json").write_text('{"theme":"dark"}')
+        (self.data / "config/ui_port").write_text("19080\n")
+        cursor = self.data / "data/cursor"
+        cursor.mkdir(parents=True)
+        (cursor / "push_stats.json").write_text('{"total":{"success":123,"fail":4},"daily":{}}')
+        for name in ("push_history.db", "notification_outbox.db"):
+            with sqlite3.connect(cursor / name) as conn:
+                conn.execute("CREATE TABLE saved (value TEXT)")
+                conn.execute("INSERT INTO saved VALUES ('keep me')")
+        log = self.data / "data/logs/old.log"
+        log.parent.mkdir()
+        log.write_text("keep log\n")
+        before = {p.relative_to(self.data): p.read_bytes() for p in self.data.rglob("*") if p.is_file()}
+        (self.data / "venv/bin").mkdir(parents=True)
+        python = self.data / "venv/bin/python"
+        python.write_text("#!/bin/sh\nexit 0\n")
+        python.chmod(0o755)
+        for callback in ("install_callback", "upgrade_callback"):
+            with self.subTest(callback=callback):
+                result = subprocess.run(["bash", str(install / "cmd" / callback)], env={
+                    **self.env, "wizard_ui_port": "18230", "wizard_web_password": "new-password-123",
+                    "wizard_web_password_confirm": "new-password-123",
+                }, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                for path, contents in before.items():
+                    self.assertEqual((self.data / path).read_bytes(), contents, str(path))
 
 
 if __name__ == "__main__":

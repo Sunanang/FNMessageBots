@@ -1,6 +1,7 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-saved-theme="{{ saved_theme }}">
 <head>
+  <script src="theme.js"></script>
   <meta charset="UTF-8" />
   <meta name="robots" content="noindex, nofollow" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
@@ -208,13 +209,6 @@
       <div id="empty" class="empty" style="display:none;">暂无推送记录</div>
       <div class="more-wrap"><button type="button" id="btn-more" class="btn btn-ghost" style="display:none;">加载更多</button></div>
   <script>
-  var THEME_STORAGE_KEY = "fnmb_theme";
-  function applyHistoryTheme() {
-    var mode = localStorage.getItem(THEME_STORAGE_KEY);
-    var resolved = (mode === "dark") ? "dark" : "light";
-    document.documentElement.setAttribute("data-theme", resolved);
-  }
-  applyHistoryTheme();
   var fetchOpts = { credentials: "include" };
   var offset = 0;
   var pageSize = 30;
