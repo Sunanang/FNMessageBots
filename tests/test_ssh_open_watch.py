@@ -4,13 +4,13 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(root / "src"))
 
 from monitor.ssh_journal_poller import SSH_DISABLED, SSH_ENABLED
-from monitor.ssh_open_watch import SshOpenWatch
+from monitor.ssh_open_watch import SshOpenWatch, _ssh_service_active
 
 
 class SshOpenWatchTests(unittest.TestCase):
@@ -115,6 +115,43 @@ class SshOpenWatchTests(unittest.TestCase):
         self.watch.on_disabled()
         self.watch._fire_timeout(opened_at=opened - 31 * 60, due_at=due, minutes=30)
         self.assertEqual(self.calls, [])
+
+    def test_stop_during_callback_does_not_rearm_timer(self):
+        with patch("monitor.ssh_open_watch.threading.Timer") as timer, patch(
+            "monitor.ssh_open_watch._ssh_service_active", return_value=True
+        ):
+            self.watch.on_enabled()
+            opened, due = self.watch._opened_at, self.watch._next_due_at
+            self.watch._on_timeout = lambda *_: self.watch.stop()
+            timer.reset_mock()
+            self.watch._fire_timeout(opened_at=opened, due_at=due, minutes=1)
+            timer.assert_not_called()
+            self.assertIsNone(self.watch._timer)
+            self.watch._fire_timeout(opened_at=opened, due_at=due, minutes=1)
+            self.assertEqual(self.calls, [])
+
+    def test_stopped_watch_ignores_already_queued_timeout(self):
+        with patch("monitor.ssh_open_watch.threading.Timer"), patch(
+            "monitor.ssh_open_watch._ssh_service_active", return_value=True
+        ):
+            self.watch.on_enabled()
+            opened, due = self.watch._opened_at, self.watch._next_due_at
+            self.watch.stop()
+            self.watch._fire_timeout(opened_at=opened, due_at=due, minutes=1)
+            self.assertEqual(self.calls, [])
+
+    def test_systemctl_failure_is_unknown_not_confirmed_inactive(self):
+        result = Mock(returncode=1, stdout="", stderr="System has not been booted with systemd")
+        with patch("monitor.ssh_open_watch.subprocess.run", return_value=result):
+            self.assertIsNone(_ssh_service_active())
+
+    def test_inactive_unit_is_confirmed_and_active_alias_wins(self):
+        inactive = Mock(returncode=3, stdout="inactive\n", stderr="")
+        active = Mock(returncode=0, stdout="active\n", stderr="")
+        with patch("monitor.ssh_open_watch.subprocess.run", return_value=inactive):
+            self.assertFalse(_ssh_service_active())
+        with patch("monitor.ssh_open_watch.subprocess.run", side_effect=[inactive, active]):
+            self.assertTrue(_ssh_service_active())
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -212,6 +213,212 @@ class MusicDBPollerTests(unittest.TestCase):
             summary["by_type"][MUSIC_TRACK_ADDED],
             music_mod._PENDING_DETAIL_CAP + 24,
         )
+
+    def test_restart_preserves_observed_pending_but_skips_offline_additions(self):
+        self.add_track(70, "重启前已观察")
+        self.poll()
+        self.poller._save_dedup()
+        self.add_track(71, "停机期间新增")
+        restarted = MusicDBPoller(str(self.db), str(self.base), monitor_events=ALL_EVENTS)
+        restarted.add_handler(MUSIC_SUMMARY_EVENT, self.summary)
+        self.now += 60
+
+        def run_one_cycle(_seconds):
+            restarted.running = False
+
+        restarted.running = True
+        with patch("monitor.music_db_poller.time.sleep", side_effect=run_one_cycle):
+            restarted._run_loop()
+        self.summary.assert_called_once()
+        data = self.summary.call_args.args[0]
+        self.assertEqual(data["by_type"], {MUSIC_TRACK_ADDED: 1})
+        self.assertIn("重启前已观察", format_music_summary(data))
+        self.assertNotIn("停机期间新增", format_music_summary(data))
+
+    def test_remove_only_tracks_new_songs_for_later_removal(self):
+        self.add_track(1, "已有曲目")
+        self.state["initialized"] = False
+        self.poller.update_config(monitor_events=[MUSIC_TRACK_REMOVED])
+        self.poll()
+        self.add_track(80, "后来入库")
+        self.poll()
+        self.soft_delete(80)
+        self.poll()
+        self.poll(60)
+        self.summary.assert_called_once()
+        self.assertEqual(self.summary.call_args.args[0]["by_type"], {MUSIC_TRACK_REMOVED: 1})
+
+    def test_real_handler_failure_retains_summary_and_favorite_cursor(self):
+        from monitor.event_processor import EventProcessor
+        from notifier.unified_notifier import NotificationResult
+
+        notifier = Mock()
+        notifier.send_notification.return_value = NotificationResult(False, "mock", {})
+        with patch("monitor.event_processor.LogStorage"):
+            processor = EventProcessor(notifier, SimpleNamespace(log_retention_days=7, log_dir=str(self.base)))
+        for event in (MUSIC_SUMMARY_EVENT, MUSIC_FAVORITED):
+            self.poller.add_handler(event, processor.get_handler(event))
+        self.add_track(90, "失败后重试")
+        with sqlite3.connect(self.db) as writer:
+            writer.execute("INSERT INTO favorite_track VALUES (1, 90, 1, 200)")
+        self.poll()
+        self.poll(60)
+        self.assertEqual(self.state["last_favorite_id"], 0)
+        self.assertTrue(self.state["music_pending"])
+        notifier.send_notification.return_value = NotificationResult(True, "mock", {})
+        self.poll(60)
+        self.assertEqual(self.state["last_favorite_id"], 1)
+        self.assertFalse(self.state["music_pending"])
+
+    def test_concurrent_insert_does_not_advance_past_unobserved_track(self):
+        with sqlite3.connect(self.db) as writer:
+            writer.execute("PRAGMA journal_mode=WAL")
+        self.add_track(100, "先入库")
+        original = self.poller._accumulate_library
+
+        def accumulate(*args):
+            original(*args)
+            self.add_track(101, "查询过程中入库")
+
+        with patch.object(self.poller, "_accumulate_library", side_effect=accumulate):
+            self.poll()
+        self.poll()
+        self.poll(60)
+        self.assertEqual(self.summary.call_args.args[0]["by_type"], {MUSIC_TRACK_ADDED: 2})
+
+    def test_legacy_pending_ids_and_capped_details_still_cancel_net_zero(self):
+        from monitor.music_db_poller import _PENDING_DETAIL_CAP
+        for tid in range(1, _PENDING_DETAIL_CAP + 3):
+            self.add_track(tid)
+        self.poll()
+        # 模拟旧版本已保存的列表格式，包含未保留预览的曲目。
+        self.state["music_pending"]["added_ids"] = list(range(1, _PENDING_DETAIL_CAP + 3))
+        self.soft_delete(_PENDING_DETAIL_CAP + 2)
+        self.poll()
+        self.poll(60)
+        self.assertEqual(self.summary.call_args.args[0]["by_type"], {MUSIC_TRACK_ADDED: _PENDING_DETAIL_CAP + 1})
+
+    def test_failed_summary_retries_only_after_sixty_seconds(self):
+        self.add_track(120)
+        self.poll()
+        self.summary.return_value = False
+        self.poll(60)
+        self.poll(59)
+        self.summary.assert_called_once()
+        self.assertTrue(self.state["music_pending"])
+        self.summary.return_value = True
+        self.poll(1)
+        self.assertEqual(self.summary.call_count, 2)
+        self.assertFalse(self.state["music_pending"])
+
+    def test_failed_checkpoint_prevents_summary_delivery(self):
+        self.add_track(130)
+        self.poll()
+        with patch.object(self.poller, "_write_state", return_value=False):
+            self.poll(60)
+        self.summary.assert_not_called()
+        self.assertTrue(self.state["music_pending"])
+        self.poll()
+        self.summary.assert_called_once()
+
+    def test_deselected_pending_stages_are_not_replayed_after_restart(self):
+        self.add_track(140)
+        self.poll()
+        self.poller.update_config(monitor_events=[MUSIC_FAVORITED])
+        restored = self.poller._load_state()
+        restored["initialized"] = False
+        self.poller.update_config(monitor_events=ALL_EVENTS)
+        self.now += 60
+        self.poller._poll_once(restored)
+        self.summary.assert_not_called()
+
+    def test_summary_delivery_releases_read_transaction(self):
+        self.add_track(150)
+        self.poll()
+        # 非 WAL 库：网络回调期间音乐服务仍能写入，不能持有整轮读取事务。
+        self.summary.side_effect = lambda *_: self.add_track(151)
+        self.poll(60)
+        self.summary.assert_called_once()
+        self.assertFalse(self.state["music_pending"])
+
+    def test_dnd_keeps_original_music_stage_counts(self):
+        from notifier.unified_notifier import UnifiedNotifier
+        notifier = UnifiedNotifier.__new__(UnifiedNotifier)
+        notifier.config = SimpleNamespace(monitor_events=LIBRARY_EVENTS)
+        notifier.multi_platform_notifier = Mock()
+        notifier.logger = Mock()
+        import threading
+        notifier._dnd_light_buffer_lock = threading.Lock()
+        notifier._dnd_light_buffer_counts = {}
+        with patch.object(notifier, "_in_dnd_window", return_value=True):
+            result = notifier.send_notification(MUSIC_SUMMARY_EVENT, {
+                "by_type": {MUSIC_TRACK_ADDED: 100, MUSIC_TRACK_REMOVED: 2},
+            }, "{}", "2026-11-01 23:00:00")
+        self.assertTrue(result.success)
+        self.assertEqual(notifier._dnd_light_buffer_counts, {MUSIC_TRACK_ADDED: 100, MUSIC_TRACK_REMOVED: 2})
+        notifier.multi_platform_notifier.send_notification.assert_not_called()
+
+    def test_application_http_failure_then_success_retains_and_delivers_music_summary(self):
+        import json
+        import requests
+        from main import Application
+        from monitor.event_processor import EventProcessor
+        from notifier.multi_platform_notifier import MultiPlatformNotifier
+        from notifier.unified_notifier import UnifiedNotifier
+
+        config = SimpleNamespace(
+            monitor_events=LIBRARY_EVENTS, cursor_dir=str(self.base),
+            wechat_webhook_url="https://example.invalid/hook", dingtalk_webhook_url="",
+            feishu_webhook_url="", bark_url="", pushplus_params="", dedup_window=300,
+            http_pool_size=2, http_retry_count=0, http_timeout=1,
+            poll_batch_summary_enabled=True, minimal_push_enabled=True,
+        )
+        with patch.object(MultiPlatformNotifier, "_start_merge_timer"), patch(
+            "monitor.event_processor.LogStorage"
+        ), patch("utils.push_stats.record"), patch("utils.push_history.add_record"):
+            notifier = UnifiedNotifier(config)
+            self.addCleanup(notifier.close)
+            processor = EventProcessor(notifier, config)
+            app = Application()
+            app.config, app.event_processor, app.music_db_poller = config, processor, self.poller
+            app._register_db_event_handlers()
+            self.poller.set_poll_batch_summary(True, app._enqueue_unified_batch_items)
+            response = requests.Response()
+            response.status_code = 200
+            response._content = b'{"errcode":40001,"errmsg":"invalid credential"}'
+            with patch.object(notifier.multi_platform_notifier.connection_pool.session, "request", return_value=response) as request:
+                self.add_track(160, "真实链路回归")
+                self.poll()
+                self.poll(60)
+                request.assert_called_once()
+                self.assertTrue(self.state["music_pending"])
+                self.poll(59)
+                request.assert_called_once()
+                response._content = b'{"errcode":0}'
+                self.poll(1)
+                self.assertEqual(request.call_count, 2)
+                payload = json.dumps(request.call_args.kwargs["json"], ensure_ascii=False)
+                self.assertIn("音乐库本轮汇总", payload)
+                self.assertIn("真实链路回归", payload)
+                self.assertFalse(self.state["music_pending"])
+                self.assertEqual(app._unified_batch_buf, [])
+
+    def test_long_unicode_previews_leave_room_for_channel_title_and_footer(self):
+        from monitor.music_summary import build_music_summary
+        pending = self.poller._empty_pending()
+        for stage in LIBRARY_EVENTS:
+            pending["stage_counts"][stage] = 10
+            for i in range(10):
+                pending["tracks"][f"{stage}:{i}"] = {
+                    "track_id": i, "title": "音乐🎵" * 40, "artist": "艺人" * 40,
+                    "album": "专辑" * 40, "stages": [stage],
+                }
+        data = build_music_summary(pending)
+        body = format_music_summary(data)
+        self.assertLess(len(body.encode("utf-8")), 1850)
+        self.assertEqual(data["by_type"], {stage: 10 for stage in LIBRARY_EVENTS})
+        self.assertTrue(all(section["omitted"] == 6 for section in data["sections"]))
+        self.assertIn("不代表整个扫描任务完成", body)
 
 
 if __name__ == "__main__":

@@ -261,7 +261,7 @@ def _aggregate_by_name(rows: List[Dict[str, Any]], limit: int) -> List[Dict[str,
             pid = 0
         cur = buckets.get(name)
         if cur is None:
-            buckets[name] = {"name": name, "cpu_percent": pct, "pid": pid}
+            buckets[name] = {"name": name, "cpu_percent": pct, "pid": pid, "_peak": pct}
             continue
         cur["cpu_percent"] = float(cur["cpu_percent"]) + pct
         # 记录该聚合下瞬时占用更高的 PID，便于排查

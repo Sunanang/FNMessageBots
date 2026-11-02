@@ -5,10 +5,13 @@
 """
 
 import json
+import copy
+import hashlib
 import logging
 import os
 import sqlite3
 import threading
+import time
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -17,6 +20,7 @@ from typing import Dict, Any, List, Optional, Set, Tuple
 
 from config import TITLE_PREFIX_DEFAULT
 from utils.logtime_display import get_logtime_display_offset_seconds
+from utils.notification_outbox import NotificationOutbox, OutboxWriteError, RETRY_SECONDS
 from .multi_platform_notifier import DOCKER_CONTAINER_EVENT_TYPES, MultiPlatformNotifier
 from monitor.db_log_poller import DB_EVENT_ID_TO_PROJECT
 from monitor.sqlite_uri import connect_readonly_with_fallback
@@ -145,7 +149,15 @@ class UnifiedNotifier:
         self._last_dnd_end_time = str(getattr(config, "dnd_end_time", "07:00") or "07:00")
         self._dnd_light_buffer_counts: Dict[str, int] = {}
         self._dnd_light_buffer_lock = threading.Lock()
+        self._dnd_delivery_lock = threading.RLock()
+        self._dnd_outbox: Optional[NotificationOutbox] = None
+        self._dnd_memory_state: Dict[str, Any] = {}
         self._load_last_dnd_summary_end()
+        dnd_state = self._read_dnd_state()
+        self._sync_dnd_counts(dnd_state)
+        if not self._last_dnd_enabled and (dnd_state.get("periods") or dnd_state.get("receipts")):
+            # 配置写入关闭后、热加载清理前崩溃，也须在下次启动取消旧状态。
+            self._clear_dnd_light_buffer("启动时勿扰已关闭")
 
         # 根据配置初始化多平台通知器
         self.multi_platform_notifier = MultiPlatformNotifier(
@@ -252,18 +264,23 @@ class UnifiedNotifier:
         return p / "dnd_summary_cursor.txt"
 
     def _load_last_dnd_summary_end(self) -> None:
+        stored = self._read_dnd_state()
+        self._last_dnd_summary_end = str(stored.get("cursor") or "")
         fp = self._dnd_summary_cursor_file()
         if not fp or not fp.exists():
             return
         try:
             raw = fp.read_text(encoding="utf-8").strip()
             if raw:
-                self._last_dnd_summary_end = raw
+                self._last_dnd_summary_end = max(self._last_dnd_summary_end, raw)
         except Exception as e:
             self.logger.debug("读取勿扰游标失败: %s", e)
 
     def _save_last_dnd_summary_end(self, end_key: str) -> None:
-        self._last_dnd_summary_end = end_key
+        def save(state):
+            state["cursor"] = max(str(state.get("cursor") or ""), end_key)
+        self._update_dnd_state(save)
+        self._last_dnd_summary_end = max(self._last_dnd_summary_end, end_key)
         fp = self._dnd_summary_cursor_file()
         if not fp:
             return
@@ -396,7 +413,8 @@ class UnifiedNotifier:
     def _build_dnd_summary_from_db(self, start_dt: datetime, end_dt: datetime, by_type: Dict[str, int]) -> str:
         """基于数据库统计结果生成勿扰汇总文案。"""
         titles = MultiPlatformNotifier.EVENT_TITLES
-        lines = [f"【勿扰时段汇总】{start_dt.strftime('%H:%M')} - {end_dt.strftime('%H:%M')}"]
+        lines = [f"【勿扰时段汇总】{start_dt.strftime('%H:%M')} - {end_dt.strftime('%H:%M')}",
+                 f"时段：{start_dt.strftime('%Y-%m-%d %H:%M')} 至 {end_dt.strftime('%Y-%m-%d %H:%M')}"]
         for event_type in sorted(by_type.keys()):
             count = by_type[event_type]
             label = titles.get(event_type, event_type)
@@ -406,6 +424,91 @@ class UnifiedNotifier:
             lines.append(f"· {label} {count} 次")
         self.logger.info("勿扰结束，发送汇总消息（共 %s 条事件）", sum(by_type.values()))
         return "\n".join(lines)
+
+    def _dnd_store(self) -> Optional[NotificationOutbox]:
+        cursor_dir = str(getattr(self.config, "cursor_dir", "") or "").strip()
+        if not cursor_dir:
+            return None
+        store = getattr(self, "_dnd_outbox", None)
+        if store is None:
+            try:
+                store = NotificationOutbox(cursor_dir)
+            except (OSError, sqlite3.Error) as exc:
+                raise OutboxWriteError("勿扰待发数据库不可用") from exc
+            self._dnd_outbox = store
+        return store
+
+    def _read_dnd_state(self) -> Dict[str, Any]:
+        store = self._dnd_store()
+        try:
+            return store.dnd_state() if store else copy.deepcopy(getattr(self, "_dnd_memory_state", {}))
+        except (OSError, sqlite3.Error) as exc:
+            raise OutboxWriteError("勿扰待发状态不可读") from exc
+
+    def _update_dnd_state(self, update):
+        store = self._dnd_store()
+        if store:
+            try:
+                return store.update_dnd(update)
+            except (OSError, sqlite3.Error) as exc:
+                raise OutboxWriteError("勿扰状态未能持久化") from exc
+        state = self._read_dnd_state()
+        result = update(state)
+        self._dnd_memory_state = state
+        return result
+
+    def _sync_dnd_counts(self, state: Dict[str, Any]) -> None:
+        counts: Dict[str, int] = defaultdict(int)
+        for period in state.get("periods", {}).values():
+            for source in (period.get("counts", {}), period.get("job", {}).get("external_counts", {})):
+                for event_type, count in source.items():
+                    counts[event_type] += int(count)
+        self._dnd_light_buffer_counts = dict(counts)
+
+    def _current_dnd_period(self) -> Tuple[datetime, datetime]:
+        now = datetime.now()
+        start_m = self._dnd_minutes_since_midnight(getattr(self.config, "dnd_start_time", "22:00"))
+        end_m = self._dnd_minutes_since_midnight(getattr(self.config, "dnd_end_time", "07:00"))
+        start = now.replace(hour=start_m // 60, minute=start_m % 60, second=0, microsecond=0)
+        if end_m <= start_m and now.hour * 60 + now.minute < end_m:
+            start -= timedelta(days=1)
+        end = start.replace(hour=end_m // 60, minute=end_m % 60)
+        if end_m <= start_m:
+            end += timedelta(days=1)
+        return start, end
+
+    def _buffer_dnd_counts(self, counts: Dict[str, int], event_data: Dict[str, Any], event_type: str) -> None:
+        if not counts:
+            return
+        start, end = self._current_dnd_period()
+        fingerprint = self._dnd_fingerprint(event_type, event_data)
+
+        def add(state):
+            period = state.setdefault("periods", {}).setdefault(end.isoformat(), {
+                "start": start.isoformat(), "end": end.isoformat(), "counts": {}, "seen": {},
+            })
+            seen = period.setdefault("seen", {})
+            if fingerprint and fingerprint in seen:
+                return
+            for et, count in counts.items():
+                period["counts"][et] = int(period["counts"].get(et, 0)) + count
+            if fingerprint:
+                seen[fingerprint] = True
+                # 交接已提交但上游删队列失败时，重启或跨越勿扰边界也不能再发一次。
+                receipts = state.setdefault("receipts", {})
+                now = time.time()
+                receipts[fingerprint] = now
+                state["receipts"] = {key: ts for key, ts in receipts.items() if now - ts < 7 * 86400}
+
+        with self._dnd_light_buffer_lock:
+            # 写入失败会向调用方传播，不能确认 dnd_skipped 后让上游删除待发批次。
+            self._update_dnd_state(add)
+            self._sync_dnd_counts(self._read_dnd_state())
+
+    @staticmethod
+    def _dnd_fingerprint(event_type: str, event_data: Dict[str, Any]) -> str:
+        key = event_data.get("batch_id") or event_data.get("_source_key") or event_data.get("_source_cursor")
+        return hashlib.sha256(f"{event_type}:{event_data.get('_source', '')}:{key}".encode()).hexdigest() if key else ""
 
     def _is_external_dnd_event(self, event_type: str, event_data: Optional[Dict[str, Any]] = None) -> bool:
         et = str(event_type or "").strip()
@@ -426,14 +529,13 @@ class UnifiedNotifier:
         et = str(event_type or "").strip()
         if not self._is_external_dnd_event(et, event_data):
             return
-        with self._dnd_light_buffer_lock:
-            self._dnd_light_buffer_counts[et] = int(self._dnd_light_buffer_counts.get(et, 0)) + 1
+        self._buffer_dnd_counts({et: 1}, event_data or {}, et)
 
     def _dnd_event_in_monitor_set(self, event_type: str) -> bool:
         monitor_set = set(getattr(self.config, "monitor_events", []) or [])
         return not monitor_set or event_type in monitor_set
 
-    def _buffer_dnd_poll_batch_summary(self, event_data: Dict[str, Any]) -> None:
+    def _buffer_dnd_poll_batch_summary(self, event_data: Dict[str, Any], event_type: str = "POLL_BATCH_SUMMARY") -> None:
         """轮询批量汇总在勿扰内被拦截时，仅把外部来源事件计入轻量缓冲。"""
         counts: Dict[str, int] = defaultdict(int)
         grouped_raw = event_data.get("grouped_events")
@@ -446,66 +548,96 @@ class UnifiedNotifier:
                     row_data = row.get("event_data") if isinstance(row, dict) else {}
                     if self._is_external_dnd_event(et_s, row_data if isinstance(row_data, dict) else None):
                         counts[et_s] += 1
-        if counts:
-            with self._dnd_light_buffer_lock:
-                for et_s, n in counts.items():
-                    self._dnd_light_buffer_counts[et_s] = int(self._dnd_light_buffer_counts.get(et_s, 0)) + n
-            self.logger.debug("勿扰：已从轮询批量汇总计入 %s 条外部库事件", sum(counts.values()))
+        if isinstance(grouped_raw, dict):
+            self._buffer_dnd_counts(dict(counts), event_data, event_type)
+            # 有明细时只按来源分类；全为主日志时不能再用 by_type 兜底重复计数。
             return
 
         by_type_raw = event_data.get("by_type")
         if not isinstance(by_type_raw, dict):
             return
-        merged = 0
-        with self._dnd_light_buffer_lock:
-            for et, cnt in by_type_raw.items():
-                et_s = str(et or "").strip()
-                if not et_s or et_s == "POLL_BATCH_SUMMARY":
-                    continue
-                if not self._is_external_dnd_event(et_s, None):
-                    continue
-                try:
-                    n = int(cnt)
-                except (TypeError, ValueError):
-                    continue
-                if n <= 0:
-                    continue
-                self._dnd_light_buffer_counts[et_s] = int(self._dnd_light_buffer_counts.get(et_s, 0)) + n
-                merged += n
-        if merged:
-            self.logger.debug("勿扰：已从轮询批量汇总计入 %s 条外部库事件", merged)
-
-    def _snapshot_and_clear_dnd_light_buffer(self) -> Dict[str, int]:
-        """获取并清空轻量缓冲。"""
-        with self._dnd_light_buffer_lock:
-            snap = dict(self._dnd_light_buffer_counts)
-            self._dnd_light_buffer_counts.clear()
-        return snap
+        for et, cnt in by_type_raw.items():
+            et_s = str(et or "").strip()
+            if not et_s or et_s == "POLL_BATCH_SUMMARY" or not self._is_external_dnd_event(et_s, None):
+                continue
+            try:
+                n = int(cnt)
+            except (TypeError, ValueError):
+                continue
+            if n > 0:
+                counts[et_s] = n
+        self._buffer_dnd_counts(dict(counts), event_data, event_type)
 
     def _clear_dnd_light_buffer(self, reason: str) -> None:
-        with self._dnd_light_buffer_lock:
+        with self._dnd_delivery_lock, self._dnd_light_buffer_lock:
             had_items = bool(self._dnd_light_buffer_counts)
-            self._dnd_light_buffer_counts.clear()
+            def clear(state):
+                state["periods"] = {}
+                # 计数已取消，回执也必须同时失效，让未确认的上游队列重新真实投递。
+                state["receipts"] = {}
+            self._update_dnd_state(clear)
+            self._sync_dnd_counts(self._read_dnd_state())
         if had_items:
             self.logger.info("勿扰轻量缓冲已清空（原因：%s）", reason)
 
     def flush_dnd_buffer_if_needed(self) -> None:
-        """勿扰结束后汇总推送（主日志库 + 轻量缓冲），同一时段仅发送一次。"""
+        """结束后的批次先落盘，再发送；失败保留原批次，每 60 秒最多重试一次。"""
+        if not getattr(self.config, "dnd_enabled", False) or self._in_dnd_window():
+            return
+        with self._dnd_delivery_lock:
+            self._flush_dnd_once()
+
+    def _flush_dnd_once(self) -> None:
+        state = self._read_dnd_state()
+        cursor = max(self._last_dnd_summary_end, str(state.get("cursor") or ""))
         start_dt, end_dt = self._calc_latest_dnd_period()
-        if start_dt is None or end_dt is None:
+        if start_dt is not None and end_dt is not None and end_dt.isoformat() > cursor:
+            latest_start, latest_end = start_dt.isoformat(), end_dt.isoformat()
+            def ensure_period(saved):
+                saved.setdefault("periods", {}).setdefault(latest_end, {
+                    "start": latest_start, "end": latest_end, "counts": {}, "seen": {},
+                })
+            self._update_dnd_state(ensure_period)
+        state = self._read_dnd_state()
+        now = time.time()
+        due = sorted(key for key in state.get("periods", {}) if datetime.fromisoformat(key).timestamp() <= now)
+        if not due:
             return
-        end_key = end_dt.isoformat()
-        if end_key == self._last_dnd_summary_end:
+        end_key = due[0]
+        period = state["periods"][end_key]
+        job = period.get("job")
+        if not job:
+            start_dt, end_dt = datetime.fromisoformat(period["start"]), datetime.fromisoformat(period["end"])
+            by_type = self._query_dnd_events_summary(start_dt, end_dt) if end_key > cursor else {}
+
+            def prepare(saved):
+                current = saved["periods"][end_key]
+                external = {et: n for et, n in current["counts"].items() if self._dnd_event_in_monitor_set(et)}
+                combined = dict(by_type)
+                for et, n in external.items():
+                    combined[et] = int(combined.get(et, 0)) + n
+                current["counts"] = {}
+                if not combined:
+                    del saved["periods"][end_key]
+                    saved["cursor"] = max(str(saved.get("cursor") or ""), end_key)
+                    return None
+                current["job"] = {
+                    "message": self._build_dnd_summary_from_db(start_dt, end_dt, combined),
+                    "external_counts": external, "by_type": combined,
+                }
+                return copy.deepcopy(current["job"])
+
+            job = self._update_dnd_state(prepare)
+            self._sync_dnd_counts(self._read_dnd_state())
+        if not job:
+            self._last_dnd_summary_end = max(cursor, end_key)
             return
-        by_type = self._query_dnd_events_summary(start_dt, end_dt)
-        buffered_by_type = self._snapshot_and_clear_dnd_light_buffer()
-        for et, cnt in buffered_by_type.items():
-            by_type[et] = int(by_type.get(et, 0)) + int(cnt)
-        if not by_type:
-            self._save_last_dnd_summary_end(end_key)
-            self.logger.debug("勿扰结束：数据库查询到 0 条监控事件，跳过汇总推送")
+        if "last_attempt" in job and 0 <= now - job["last_attempt"] < RETRY_SECONDS:
             return
-        summary = self._build_dnd_summary_from_db(start_dt, end_dt, by_type)
+        def attempted(saved):
+            saved["periods"][end_key]["job"]["last_attempt"] = now
+        self._update_dnd_state(attempted)
+        summary = job["message"]
         try:
             out = self.multi_platform_notifier.send_system_notification(
                 "DND_SUMMARY",
@@ -521,7 +653,6 @@ class UnifiedNotifier:
                 [],
                 failure_summary=f"发送异常: {e}",
             )
-            self._save_last_dnd_summary_end(end_key)
             return
 
         success = out.get("success", False) if isinstance(out, dict) else bool(out)
@@ -536,7 +667,17 @@ class UnifiedNotifier:
                 {"hostname": "", "version": ""},
                 channel_results if isinstance(channel_results, list) else [],
             )
-        # 主汇总请求已完成就推进游标；即使全部渠道失败，也不重试勿扰期间旧事件。
+            return
+
+        def complete(saved):
+            current = saved["periods"][end_key]
+            current.pop("job", None)
+            if not current["counts"]:
+                del saved["periods"][end_key]
+            saved["cursor"] = max(str(saved.get("cursor") or ""), end_key)
+        # 发送期间新到的计数仍留在独立 counts 中，确认本批次不会清除它们。
+        self._update_dnd_state(complete)
+        self._sync_dnd_counts(self._read_dnd_state())
         self._save_last_dnd_summary_end(end_key)
 
         # 勿扰汇总不参与推送汇总统计，仅事件推送（send_notification）统计
@@ -624,10 +765,15 @@ class UnifiedNotifier:
         Returns:
             通知发送结果
         """
+        fingerprint = self._dnd_fingerprint(event_type, event_data)
+        if fingerprint and getattr(self.config, "dnd_enabled", False):
+            accepted_at = self._read_dnd_state().get("receipts", {}).get(fingerprint)
+            if accepted_at is not None and 0 <= time.time() - accepted_at < 7 * 86400:
+                return NotificationResult(True, "dnd_already_buffered", {"event_type": event_type})
         if self._in_dnd_window() and event_type != "NAS_PATROL_REPORT":
             # 勿扰时段内：logger_data.db3 事件靠 DB 汇总；外部库走轻量缓冲；批量汇总需展开 by_type。
             if str(event_type) in ("POLL_BATCH_SUMMARY", "MEDIA_LIBRARY_SUMMARY", "MUSIC_LIBRARY_SUMMARY"):
-                self._buffer_dnd_poll_batch_summary(event_data)
+                self._buffer_dnd_poll_batch_summary(event_data, event_type)
             else:
                 self._buffer_event_for_dnd_if_needed(str(event_type), event_data)
             return NotificationResult(

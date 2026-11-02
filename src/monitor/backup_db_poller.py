@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from .models import JournalEntry
+from utils.notification_outbox import OutboxWriteError
 from .sqlite_uri import connect_readonly_with_fallback
 
 
@@ -344,6 +345,8 @@ class BackupDBPoller:
                 else:
                     handler(ed, entry)
                 self._dedup_seen[fp] = int(time.time())
+            except OutboxWriteError:
+                raise
             except Exception as e:
                 self.logger.error("处理备份事件失败 %s: %s", et, e, exc_info=True)
         self._prune_dedup()

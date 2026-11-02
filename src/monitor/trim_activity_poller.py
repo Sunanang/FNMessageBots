@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from .models import JournalEntry
+from utils.notification_outbox import OutboxWriteError
 from .media_db_poller import _ms_to_str
 from .sqlite_uri import connect_readonly_with_fallback
 
@@ -245,6 +246,8 @@ class TrimActivityPoller:
             else:
                 handler(event_data, entry)
             self._dedup_seen[fp] = now
+        except OutboxWriteError:
+            raise
         except Exception as e:
             self.logger.error("处理 trimactivity 事件失败 %s: %s", event_type, e, exc_info=True)
 

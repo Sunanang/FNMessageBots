@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from .models import JournalEntry
+from utils.notification_outbox import OutboxWriteError
 from utils.access_guidance import journal_permission_action
 
 SSH_LOGIN_SUCCESS = "SSH_LOGIN_SUCCESS"
@@ -571,6 +572,8 @@ class SshJournalPoller:
                 )
             else:
                 handler(event_data, entry)
+        except OutboxWriteError:
+            raise
         except Exception as e:
             self.logger.error("处理 SSH journal 事件失败 %s: %s", event_type, e, exc_info=True)
 

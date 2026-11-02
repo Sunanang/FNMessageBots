@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import Config
 from utils.logger import setup_logging
 from utils.push_stats import init as init_push_stats
+from utils.notification_outbox import NotificationOutbox, OutboxWriteError
 from monitor.db_log_poller import DBLogPoller
 from monitor.backup_db_poller import (
     BackupDBPoller,
@@ -90,6 +91,8 @@ class Application:
         self._exit_code = 0
         self._unified_batch_buf: List[Dict[str, Any]] = []
         self._unified_batch_lock = threading.Lock()
+        self._unified_delivery_lock = threading.Lock()
+        self._batch_outbox: Optional[NotificationOutbox] = None
         self._unified_flush_stop = threading.Event()
         self._unified_flush_thread: Optional[threading.Thread] = None
 
@@ -113,6 +116,14 @@ class Application:
             self._unified_batch_buf = []
             return taken
 
+    def _poll_outbox(self) -> Optional[NotificationOutbox]:
+        cursor_dir = str(getattr(self.config, "cursor_dir", "") or "").strip()
+        if not cursor_dir:
+            return None
+        if self._batch_outbox is None:
+            self._batch_outbox = NotificationOutbox(cursor_dir)
+        return self._batch_outbox
+
     def _enqueue_unified_batch_items(self, items: List[Dict[str, Any]]) -> None:
         """影视/相册/Docker/备份/任务计划 等先入队，在主日志下一轮汇总时或定时刷盘时合并推送。"""
         if not items:
@@ -123,6 +134,17 @@ class Application:
         if not merged:
             return
         with self._unified_batch_lock:
+            try:
+                outbox = self._poll_outbox()
+            except Exception as exc:
+                raise OutboxWriteError("轮询待发数据库不可用") from exc
+            if outbox is not None:
+                # 必须先提交入队事务，调用方才可推进各数据源游标。
+                try:
+                    outbox.enqueue_poll(merged)
+                except Exception as exc:
+                    raise OutboxWriteError("轮询事件未能持久化入队") from exc
+                return
             self._unified_batch_buf.extend(merged)
             self._unified_batch_buf = dedupe_poll_batch_items(self._unified_batch_buf)
 
@@ -133,23 +155,42 @@ class Application:
         for it in batch_events:
             if isinstance(it, dict) and "source" not in it:
                 it["source"] = "db"
-        pending = self._take_unified_batch_buf()
-        pending.extend(batch_events)
-        if pending:
-            self.event_processor.process_batch_events(pending)
+        self._enqueue_unified_batch_items(batch_events)
+        self._flush_unified_batch_pending_only()
 
     def _flush_unified_batch_pending_only(self) -> None:
         """仅刷出队列中外部库事件（无主日志本轮时由定时线程调用）。"""
         if not self.event_processor:
             return
-        buf = self._take_unified_batch_buf()
-        if not buf:
+        if not self._unified_delivery_lock.acquire(blocking=False):
             return
         try:
-            self.event_processor.process_batch_events(buf)
+            outbox = self._poll_outbox()
+            if outbox is not None:
+                job = outbox.claim_poll(time.time())
+                if job is None:
+                    return
+                selected = set(getattr(self.config, "monitor_events", []) or [])
+                buf = [item for item in job["items"] if item.get("event_type") in selected]
+                result = self.event_processor.process_batch_events(buf) if buf else True
+                if result is not False and getattr(result, "success", None) is not False:
+                    outbox.ack_poll(job["ids"])
+                return
+            buf = self._take_unified_batch_buf()
+            if not buf:
+                return
+            try:
+                result = self.event_processor.process_batch_events(buf)
+                if result is False or getattr(result, "success", None) is False:
+                    self._enqueue_unified_batch_items(buf)
+            except Exception:
+                self._enqueue_unified_batch_items(buf)
+                raise
         except Exception as e:
             if self.logger:
                 self.logger.error("轮询汇总（外部库队列）推送失败: %s", e, exc_info=True)
+        finally:
+            self._unified_delivery_lock.release()
 
     def _unified_batch_flush_loop(self) -> None:
         while True:
@@ -163,9 +204,12 @@ class Application:
     def _start_unified_batch_flush_thread(self) -> None:
         if self._unified_flush_thread and self._unified_flush_thread.is_alive():
             return
-        if not getattr(self.config, "poll_batch_summary_enabled", False):
-            return
         if not self.event_processor:
+            return
+        outbox = self._poll_outbox()
+        if not getattr(self.config, "poll_batch_summary_enabled", False) and not (
+            outbox is not None and outbox.poll_items()
+        ):
             return
         self._unified_flush_stop.clear()
         t = threading.Thread(target=self._unified_batch_flush_loop, name="UnifiedPollBatchFlush", daemon=True)
@@ -190,6 +234,7 @@ class Application:
         else:
             self._stop_unified_batch_flush_thread()
             self._flush_unified_batch_pending_only()
+            self._start_unified_batch_flush_thread()
 
 
     def _probe_db_readable(

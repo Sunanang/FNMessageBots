@@ -10,7 +10,8 @@ MUSIC_STAGES = {
     "MUSIC_TRACK_ADDED": "入库",
     "MUSIC_TRACK_REMOVED": "移出库",
 }
-_PREVIEW_LIMIT = 6
+# 两阶段各留四条预览，为渠道标题、时间及静默说明保留 UTF-8 字节预算。
+_PREVIEW_LIMIT = 4
 
 
 def _short(text: str, size: int = 160) -> str:

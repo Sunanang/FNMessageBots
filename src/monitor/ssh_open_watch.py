@@ -28,7 +28,7 @@ _STATE_FILENAME = "ssh_open_watch_state.json"
 
 def _ssh_service_active() -> Optional[bool]:
     """探测 ssh/sshd 是否 active；无法探测时返回 None。"""
-    saw_result = False
+    saw_inactive = False
     for unit in ("ssh", "sshd"):
         try:
             p = subprocess.run(
@@ -38,14 +38,17 @@ def _ssh_service_active() -> Optional[bool]:
                 timeout=3,
                 check=False,
             )
-            saw_result = True
-            if (p.stdout or "").strip() == "active":
+            status = (p.stdout or "").strip()
+            if p.returncode == 0 and status == "active":
                 return True
+            if status in {"inactive", "failed", "deactivating"}:
+                saw_inactive = True
         except FileNotFoundError:
             return None
         except Exception:
             continue
-    return False if saw_result else None
+    # Docker 内 systemctl 可能存在但无法连接宿主 systemd；探测失败不能当成 SSH 已关闭。
+    return False if saw_inactive else None
 
 
 class SshOpenWatch:
@@ -67,11 +70,13 @@ class SshOpenWatch:
         self._next_due_at: Optional[float] = None
         # 推送瞬间防重入（同一次 fire 的竞态），不是「整段会话只提醒一次」
         self._firing: bool = False
+        self._stopped = False
         self.logger = logging.getLogger(__name__)
 
     def start(self) -> None:
         """启动时恢复未关闭的会话计时。"""
         with self._lock:
+            self._stopped = False
             self._load_state()
             if self._opened_at is not None:
                 active = _ssh_service_active()
@@ -85,6 +90,7 @@ class SshOpenWatch:
 
     def stop(self) -> None:
         with self._lock:
+            self._stopped = True
             self._cancel_timer_locked()
 
     def update_config(self) -> None:
@@ -113,6 +119,8 @@ class SshOpenWatch:
 
     def on_enabled(self) -> None:
         with self._lock:
+            if self._stopped:
+                return
             now = time.time()
             minutes = self._effective_minutes()
             self._opened_at = now
@@ -152,7 +160,7 @@ class SshOpenWatch:
     def _reschedule_locked(self, reason: str) -> None:
         self._cancel_timer_locked()
         minutes = self._effective_minutes()
-        if minutes <= 0 or self._opened_at is None:
+        if self._stopped or minutes <= 0 or self._opened_at is None:
             return
         now = time.time()
         if self._next_due_at is None:
@@ -257,7 +265,7 @@ class SshOpenWatch:
                 self._reschedule_locked(reason="repeat")
 
     def _session_still_valid_locked(self, opened_at: float) -> bool:
-        if self._opened_at is None:
+        if self._stopped or self._opened_at is None:
             return False
         if abs(float(self._opened_at) - float(opened_at)) > 0.5:
             return False

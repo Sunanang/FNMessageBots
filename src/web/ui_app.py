@@ -520,7 +520,7 @@ def create_app(on_config_saved=None) -> Flask:
             _cron = "0 12 * * *"
 
         try:
-            _ssh_remind = max(0, min(int(raw.get("ssh_open_remind_minutes", 30) or 30), 10080))
+            _ssh_remind = max(0, min(int(raw.get("ssh_open_remind_minutes", 30)), 10080))
         except (TypeError, ValueError):
             _ssh_remind = 30
         # 旧版用分钟>0 开关：未迁移时把 SSH_OPEN_TIMEOUT 并入勾选展示（与 Config 运行时一致）

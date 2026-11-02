@@ -273,13 +273,13 @@ class EventProcessor:
             summary_event_data["_source_key"] = hashlib.md5(source_sig.encode()).hexdigest()
         raw_log = json.dumps(raw_for_storage, ensure_ascii=False)[:6000]
         self.logger.info("轮询批量汇总推送：count=%s, types=%s", len(batch_events), len(by_type))
-        self.notifier.send_notification(
+        result = self.notifier.send_notification(
             event_type='POLL_BATCH_SUMMARY',
             event_data=summary_event_data,
             raw_log=raw_log,
             timestamp=timestamp
         )
-        return True
+        return result is not False and getattr(result, "success", None) is not False
 
     def _send_ssh_notification(self, event_type: str, event_data: Dict[str, Any], entry: JournalEntry):
         """发送SSH相关通知并存储日志"""
@@ -688,13 +688,14 @@ class EventProcessor:
         """可选事件的通用处理：解析 parameter 后直接推送，无额外逻辑。"""
         timestamp = getattr(entry, 'timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
         raw_log = getattr(entry, 'raw_data', '{}')
-        self.notifier.send_notification(
+        result = self.notifier.send_notification(
             event_type=event_type,
             event_data=event_data,
             raw_log=raw_log,
             timestamp=timestamp
         )
         self._store_notification_log(event_type, event_data, raw_log, entry, source='db')
+        return result
 
     def _handle_docker_notification(self, event_type: str, event_data: Dict[str, Any], entry: JournalEntry):
         """Docker Engine 容器事件：推送并写入推送日志（来源 docker）。"""

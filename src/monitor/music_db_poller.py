@@ -513,7 +513,7 @@ class MusicDBPoller:
             "last_activity_ts": time.time(),
             "tracks": {},
             "stage_counts": {MUSIC_TRACK_ADDED: 0, MUSIC_TRACK_REMOVED: 0},
-            "added_ids": [],
+            "added_ids": {},
         }
 
     def _accumulate_library(
@@ -540,11 +540,11 @@ class MusicDBPoller:
         stage_counts = pending.setdefault(
             "stage_counts", {MUSIC_TRACK_ADDED: 0, MUSIC_TRACK_REMOVED: 0}
         )
-        added_ids = {
-            int(x)
-            for x in (pending.get("added_ids") or [])
-            if _maybe_int(x) is not None
-        }
+        added_ids = pending.get("added_ids")
+        if not isinstance(added_ids, dict):
+            # 兼容旧列表；用 JSON 可持久化的字典作集合，避免大批量入库时逐条重建全量集合。
+            added_ids = {str(int(x)): True for x in (added_ids or []) if _maybe_int(x) is not None}
+            pending["added_ids"] = added_ids
         pending["last_activity_ts"] = now
         tid = data.get("track_id")
         tid_i = _maybe_int(tid)
@@ -554,9 +554,8 @@ class MusicDBPoller:
         stages = set(info.get("stages", []))
 
         # 同一静默窗口内入库后又移出：净变化为 0（即使明细因 cap 未保留也要抵消）
-        if event_type == MUSIC_TRACK_REMOVED and tid_i is not None and tid_i in added_ids:
-            added_ids.discard(tid_i)
-            pending["added_ids"] = list(added_ids)
+        if event_type == MUSIC_TRACK_REMOVED and tid_i is not None and str(tid_i) in added_ids:
+            added_ids.pop(str(tid_i), None)
             stage_counts[MUSIC_TRACK_ADDED] = max(0, int(stage_counts.get(MUSIC_TRACK_ADDED) or 0) - 1)
             tracks.pop(key, None)
             self._dedup_seen[fingerprint] = int(now)
@@ -572,10 +571,7 @@ class MusicDBPoller:
             stage_counts[event_type] = int(stage_counts.get(event_type) or 0) + 1
         stages.add(event_type)
         if event_type == MUSIC_TRACK_ADDED and tid_i is not None:
-            added_ids.add(tid_i)
-            pending["added_ids"] = list(added_ids)
-        else:
-            pending["added_ids"] = list(added_ids)
+            added_ids[str(tid_i)] = True
 
         # 明细只保留有限条供预览；超出后仍计入 stage_counts
         if key not in tracks and len(tracks) >= _PENDING_DETAIL_CAP:
@@ -667,7 +663,6 @@ class MusicDBPoller:
         else:
             state["alive_track_ids"] = []
         state["initialized"] = True
-        state["music_pending"] = {}
         if MUSIC_FAVORITED in self.monitor_events and "id" not in fav_cols:
             self._warn_schema_once(
                 "favorite_track.id",
@@ -707,7 +702,8 @@ class MusicDBPoller:
         max_tid = last_tid
         newly_added_ids: List[int] = []
 
-        if MUSIC_TRACK_ADDED in self.monitor_events:
+        # 移出监控也需要持续跟踪新增 ID，否则只勾选移出时会漏掉后续入库的曲目。
+        if _MUSIC_LIBRARY_STAGES & self.monitor_events:
             q = f"""
             SELECT t.id AS track_id, {title_col} AS title, {guid_col} AS guid,
                    {created_col} AS created_at,
@@ -944,6 +940,9 @@ class MusicDBPoller:
             return
 
         try:
+            # 同一轮水位、曲目与有效 ID 使用同一 SQLite 快照，避免查询后新增的记录
+            # 被稍后的 MAX(id) 越过。只读事务不修改音乐数据库。
+            conn.execute("BEGIN")
             db_identity = os.path.realpath(self.db_path)
             if state.get("db_path") and state["db_path"] != db_identity:
                 state.update(initialized=False, music_pending={}, alive_track_ids=[])
@@ -953,6 +952,7 @@ class MusicDBPoller:
 
             if not state.get("initialized"):
                 self._baseline(conn, state)
+                conn.rollback()
                 if self._save_state(state):
                     self._flush_music_pending(state)
                 return
@@ -973,6 +973,8 @@ class MusicDBPoller:
                 state["alive_track_ids"] = []
                 state["music_pending"] = {}
 
+            # 释放读取快照后再投递通知，避免慢渠道长期占用非 WAL 数据库的读锁。
+            conn.rollback()
             self._poll_favorites(conn, state)
             self._poll_playlist_tracks(conn, state)
 
@@ -987,9 +989,8 @@ class MusicDBPoller:
     def _run_loop(self) -> None:
         self._load_dedup()
         state = self._load_state()
-        # 每次启动重新对齐水位，不补推历史；进行中的静默批次一并丢弃
+        # 重新对齐离线期间的水位，但保留已观察并落盘的待发汇总。
         state["initialized"] = False
-        state["music_pending"] = {}
         self.logger.info(
             "MusicDBPoller 启动 db=%s（曲目变更冷却汇总 %ss）",
             self.db_path or "(未配置)",
@@ -1005,15 +1006,7 @@ class MusicDBPoller:
                 self.logger.error("音乐库轮询异常: %s", e, exc_info=True)
             for _ in range(self.poll_interval):
                 if not self.running:
-                    try:
-                        if self.db_path and (_MUSIC_LIBRARY_STAGES & self.monitor_events):
-                            pending = state.get("music_pending") or {}
-                            if pending.get("tracks"):
-                                last_act = float(pending.get("last_activity_ts") or 0)
-                                if last_act > 0 and (time.time() - last_act) >= float(MUSIC_DEBOUNCE_SEC):
-                                    self._flush_music_pending(state)
-                    except Exception as e:
-                        self.logger.warning("停止时刷新音乐汇总失败: %s", e)
+                    # 待发批次已随每轮水位落盘，停止时不另行触发网络发送。
                     return
                 time.sleep(1)
 

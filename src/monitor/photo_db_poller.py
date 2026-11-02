@@ -20,6 +20,7 @@ from typing import Any, Callable, Dict, List, Optional, Set
 from zoneinfo import ZoneInfo
 
 from .models import JournalEntry
+from utils.notification_outbox import OutboxWriteError
 from .sqlite_uri import connect_readonly_with_fallback
 
 PHOTO_SHARE_CREATED = "PHOTO_SHARE_CREATED"
@@ -261,6 +262,8 @@ class PhotoDBPoller:
                 handler(event_data, entry)
             self._dedup_seen[fp] = now
             return True
+        except OutboxWriteError:
+            raise
         except Exception as e:
             self.logger.error("处理相册事件失败 %s: %s", event_type, e, exc_info=True)
             return False

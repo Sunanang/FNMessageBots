@@ -106,6 +106,14 @@ class CpuTopHelperTests(unittest.TestCase):
 
 
 class CpuAlarmContentTests(unittest.TestCase):
+    def test_aggregation_retains_pid_of_busiest_process(self):
+        rows = cpu_top._aggregate_by_name([
+            {"name": "worker", "cpu_percent": 80, "pid": 1},
+            {"name": "worker", "cpu_percent": 10, "pid": 2},
+            {"name": "worker", "cpu_percent": 20, "pid": 3},
+        ], limit=3)
+        self.assertEqual(rows, [{"name": "worker", "cpu_percent": 110.0, "pid": 1}])
+
     def _build_content(self, event_data):
         """镜像 notifier 正文拼装逻辑，避免拉全量 MultiPlatformNotifier 依赖。"""
         data = event_data.get("data", {})

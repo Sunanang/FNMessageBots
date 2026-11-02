@@ -18,6 +18,7 @@ from typing import Callable, Dict, List, Optional, Any, Sequence
 from utils.logtime_display import get_logtime_display_offset_seconds
 
 from .models import JournalEntry
+from utils.notification_outbox import OutboxWriteError
 from .sqlite_uri import connect_readonly_with_fallback
 from .ssh_journal_poller import should_ignore_ssh_by_source
 
@@ -317,10 +318,15 @@ class DBLogPoller:
                 "handler": handler,
             })
         batch_delivery_failed = False
+        persistence_failed = False
         if batch_events:
             if self.batch_handler:
                 try:
                     self.batch_handler(batch_events)
+                except OutboxWriteError as e:
+                    self.logger.error("批次尚未持久化，保留水位: %s", e)
+                    batch_delivery_failed = True
+                    persistence_failed = True
                 except Exception as e:
                     self.logger.error("批量处理事件失败（count=%s）: %s", len(batch_events), e, exc_info=True)
                     batch_delivery_failed = True
@@ -329,13 +335,15 @@ class DBLogPoller:
                 for item in batch_events:
                     try:
                         item["handler"](item["event_data"], item["entry"])
+                    except OutboxWriteError:
+                        return last_id
                     except Exception as e:
                         self.logger.error("处理事件失败 eventId=%s: %s", item["db_event_id"], e)
         if rows:
             # 汇总投递异常时同批最多重试 BATCH_MAX_ATTEMPTS 次，之后推进游标，避免无限重发
             if self.batch_handler and batch_events and batch_delivery_failed:
                 self._batch_fail_count += 1
-                if self._batch_fail_count < self.BATCH_MAX_ATTEMPTS:
+                if persistence_failed or self._batch_fail_count < self.BATCH_MAX_ATTEMPTS:
                     return last_id
                 self.logger.warning(
                     "批量处理连续失败 %s 次，放弃本批（id %s–%s）",
