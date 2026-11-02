@@ -8,7 +8,7 @@ on:
 permissions:
   contents: read
 
-# 同时串行化旧的手动 manifest 工作流，避免发布期间覆盖 latest。
+# 串行化 Docker latest 与 FPK 版本发布，避免并行运行互相覆盖。
 concurrency:
   group: fnmessagebots-publish
   cancel-in-progress: false
@@ -150,7 +150,7 @@ jobs:
           if [ "$head" = "$GITHUB_SHA" ]; then
             echo 'publish=true' >> "$GITHUB_OUTPUT"
           else
-            echo 'A newer main commit exists; keep artifacts and skip replacing latest.'
+            echo 'A newer main commit exists; keep artifacts and skip publishing Docker latest and the FPK version release.'
             echo 'publish=false' >> "$GITHUB_OUTPUT"
           fi
       - uses: actions/download-artifact@v4
@@ -168,6 +168,6 @@ jobs:
       - name: Publish and verify latest Docker tags
         if: steps.current.outputs.publish == 'true'
         run: bash scripts/publish-docker-tags.sh "$REGISTRY_IMAGE" "$GITHUB_SHA"
-      - name: Publish FPK latest build
+      - name: Publish FPK version release
         if: steps.current.outputs.publish == 'true'
         run: bash scripts/publish-fpk.sh
