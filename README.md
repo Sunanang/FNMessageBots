@@ -232,17 +232,17 @@ gh api --method PUT repos/Sunanang/FNMessageBots/rulesets/18157912 \
 
 规则配置文件不会自行启用远端保护；需在 GitHub 设置中启用，或执行上述管理命令。
 
-测试通过后，在原生 amd64 / arm64 runner 分别构建镜像并启动容器验证 HTTP 健康检查；FPK 使用与 Pome Panel 相同的固定版本官方 fnpack 1.2.3，并校验工具的 SHA-256。两个架构及 FPK 均成功后才更新公开的最新构建：
+测试通过后，在原生 amd64 / arm64 runner 分别构建镜像并启动容器验证 HTTP 健康检查；FPK 使用与 Pome Panel 相同的固定版本官方 fnpack 1.2.3，并校验工具的 SHA-256。两个架构及 FPK 均成功后才发布：
 
 | 产物 | 发布位置 |
 | --- | --- |
 | amd64 Docker 镜像 | `sunanang/fn-message-bots:latest-amd64` |
 | arm64 Docker 镜像 | `sunanang/fn-message-bots:latest-arm64` |
 | 自动选择架构的 Docker 镜像 | `sunanang/fn-message-bots:latest`（同时包含 amd64、arm64） |
-| FPK 安装包 | [FnMessageBot-latest.fpk](https://github.com/Sunanang/FNMessageBots/releases/download/latest/FnMessageBot-latest.fpk) |
-| FPK 校验文件 | [FnMessageBot-latest.fpk.sha256](https://github.com/Sunanang/FNMessageBots/releases/download/latest/FnMessageBot-latest.fpk.sha256) |
+| FPK 安装包 | `FnMessageBot-{version}.fpk`，GitHub Release 标签 `v{version}`（例如 `v2.7.5`） |
+| FPK 校验文件 | 同标签下的 `FnMessageBot-{version}.fpk.sha256` |
 
-FPK 保存在固定 `latest` 标签的[最新构建预发布](https://github.com/Sunanang/FNMessageBots/releases/tag/latest)，同时提供带版本号的安装包和校验文件。它随通过检查的 `main` 提交更新，不要求每次改版本号；包内版本仍以 `fpk/manifest` 为准，正式升级时需同步维护 `pyproject.toml` 与 manifest 版本。每次构建的 FPK 也会保存为 Actions Artifact。
+FPK 按 `fpk/manifest` 的 `version` 发布到标签 `v{version}`（例如 `v2.7.5`），只上传 `FnMessageBot-{version}.fpk` 与对应 `.sha256`。同一版本再次合入 `main` 时覆盖该版本 Release。Docker 镜像仍使用浮动标签 `latest` / `latest-amd64` / `latest-arm64`，与 FPK 的版本标签是两套命名。包内版本以 `fpk/manifest` 为准，正式升级时需同步维护 `pyproject.toml` 与 manifest 版本。每次构建的 FPK 也会保存为 Actions Artifact。仓库里旧的固定标签 `latest` Release 不会被这次发布自动删除。
 
 仓库的 **Settings → Secrets and variables → Actions** 需配置 `DOCKERHUB_USERNAME` 和 `DOCKERHUB_TOKEN`，与原有手动合并工作流使用的名称一致。Token 使用可推送 `sunanang/fn-message-bots` 的 Docker Hub Personal Access Token；FPK 发布使用工作流自带的 `GITHUB_TOKEN`，无需 NAS 凭据。发布前会核对镜像的提交与平台，再用 digest 合并，防止不同提交混入 `latest`；旧提交重跑时若 `main` 已前进，会保留构建产物并跳过覆盖最新构建。
 

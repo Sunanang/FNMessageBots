@@ -170,6 +170,8 @@ class FpkPublishTests(unittest.TestCase):
         (self.base / "scripts").mkdir()
         (self.base / "dist").mkdir()
         shutil.copy2(ROOT / "scripts/publish-fpk.sh", self.base / "scripts/publish-fpk.sh")
+        (self.base / "fpk").mkdir()
+        (self.base / "fpk/manifest").write_text("appname = FnMessageBot\nversion = 2.6.0\nplatform = all\n")
         self.package = self.base / "dist/FnMessageBot-2.6.0.fpk"
         self.package.write_bytes(b"verified FPK")
         Path(str(self.package) + ".sha256").write_text(hashlib.sha256(self.package.read_bytes()).hexdigest() + "  " + self.package.name + "\n")
@@ -177,9 +179,13 @@ class FpkPublishTests(unittest.TestCase):
         gh = self.base / "gh"
         gh.write_text(f"#!{sys.executable}\n" + '''
 import json, os, sys
-with open(os.environ['GH_COMMANDS'], 'a') as log:
-    log.write(json.dumps(sys.argv[1:]) + '\\n')
-if sys.argv[1:3] == ['release', 'view'] and not os.environ.get('EXISTING_RELEASE'):
+from pathlib import Path
+entry = {"args": sys.argv[1:]}
+if "--notes-file" in sys.argv:
+    entry["notes"] = Path(sys.argv[sys.argv.index("--notes-file") + 1]).read_text()
+with open(os.environ["GH_COMMANDS"], "a") as log:
+    log.write(json.dumps(entry) + "\\n")
+if sys.argv[1:3] == ["release", "view"] and not os.environ.get("EXISTING_RELEASE"):
     sys.exit(1)
 ''')
         gh.chmod(0o755)
@@ -190,16 +196,65 @@ if sys.argv[1:3] == ['release', 'view'] and not os.environ.get('EXISTING_RELEASE
             "GITHUB_SHA": "a" * 40, "GH_REPO": "Sunanang/FNMessageBots", "EXISTING_RELEASE": "1" if existing else "",
         })
 
-    def test_first_release_and_rerun_have_matching_stable_alias_and_checksum(self):
-        for existing in (False, True):
-            result = self.publish(existing)
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            alias = self.base / "dist/FnMessageBot-latest.fpk"
-            self.assertEqual(alias.read_bytes(), self.package.read_bytes())
-            self.assertEqual(Path(str(alias) + ".sha256").read_text().split(), [hashlib.sha256(alias.read_bytes()).hexdigest(), alias.name])
-        commands = [json.loads(line) for line in self.log.read_text().splitlines()]
-        self.assertTrue(any(args[:2] == ["release", "create"] for args in commands))
-        self.assertTrue(any(args[:3] == ["api", "--method", "PATCH"] for args in commands))
+    def entries(self):
+        return [json.loads(line) for line in self.log.read_text().splitlines()]
+
+    def assert_version_release(self, entries, created):
+        args_list = [entry["args"] for entry in entries]
+        blob = "\n".join(" ".join(args) for args in args_list)
+        self.assertNotIn("FnMessageBot-latest", blob)
+        self.assertNotIn("refs/tags/latest", blob)
+        self.assertNotIn("release view latest", blob)
+        self.assertNotIn("release create latest", blob)
+        self.assertNotIn("release edit latest", blob)
+        self.assertNotIn("release upload latest", blob)
+        self.assertFalse((self.base / "dist/FnMessageBot-latest.fpk").exists())
+        self.assertFalse((self.base / "dist/FnMessageBot-latest.fpk.sha256").exists())
+        uploads = [args for args in args_list if args[:3] == ["release", "upload", "v2.6.0"]]
+        self.assertEqual(len(uploads), 1)
+        self.assertEqual([arg for arg in uploads[0] if not arg.startswith("-")], [
+            "release", "upload", "v2.6.0", "dist/FnMessageBot-2.6.0.fpk", "dist/FnMessageBot-2.6.0.fpk.sha256",
+        ])
+        notes = [entry["notes"] for entry in entries if "notes" in entry]
+        self.assertTrue(notes)
+        for text in notes:
+            self.assertIn("FnMessageBot-2.6.0.fpk", text)
+            self.assertIn("`v2.6.0`", text)
+            self.assertIn("两套命名", text)
+            self.assertNotIn("FnMessageBot-latest.fpk", text)
+        titles = [args[args.index("--title") + 1] for args in args_list if "--title" in args]
+        self.assertEqual(titles, ["FnMessageBot 2.6.0"])
+        sha = "a" * 40
+        if created:
+            self.assertTrue(any(
+                args[:3] == ["release", "create", "v2.6.0"] and sha in args for args in args_list
+            ))
+            self.assertFalse(any(args[:2] == ["api", "--method"] for args in args_list))
+        else:
+            self.assertTrue(any(
+                args[:3] == ["api", "--method", "PATCH"]
+                and "repos/Sunanang/FNMessageBots/git/refs/tags/v2.6.0" in args
+                and f"sha={sha}" in args
+                for args in args_list
+            ))
+            self.assertTrue(any(
+                args[:3] == ["release", "edit", "v2.6.0"] and "--target" in args and sha in args
+                for args in args_list
+            ))
+            self.assertTrue(any(args[:3] == ["release", "edit", "v2.6.0"] and "--draft=false" in args for args in args_list))
+            self.assertFalse(any(args[:2] == ["release", "create"] for args in args_list))
+
+    def test_version_tag_is_created_or_updated_without_latest_alias(self):
+        created = self.publish(existing=False)
+        self.assertEqual(created.returncode, 0, created.stdout + created.stderr)
+        self.assertIn("releases/download/v2.6.0/FnMessageBot-2.6.0.fpk", created.stdout)
+        self.assert_version_release(self.entries(), created=True)
+
+        self.log.write_text("")
+        updated = self.publish(existing=True)
+        self.assertEqual(updated.returncode, 0, updated.stdout + updated.stderr)
+        self.assertIn("releases/download/v2.6.0/FnMessageBot-2.6.0.fpk", updated.stdout)
+        self.assert_version_release(self.entries(), created=False)
 
     def test_invalid_checksum_never_calls_github(self):
         self.package.write_bytes(b"corrupted FPK")

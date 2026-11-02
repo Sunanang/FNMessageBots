@@ -4,7 +4,7 @@
 
 - `dev` 是长期开发分支，所有功能、修复、文档和测试改动默认在 `dev` 完成。开始工作前检查当前分支；若在 `main`，先切回 `dev`。
 - `main` 仅用于发布：禁止在 `main` 开发、创建普通提交、直接推送、强制推送或删除分支。只能通过同一仓库的 `dev → main` Pull Request 更新。
-- 发版前先完成开发和验证，再使用 **Create a merge commit** 合并 `dev → main`；不使用 squash/rebase，不删除长期 `dev` 分支。合入 `main` 后自动构建并发布 Docker amd64、arm64、综合 `latest` 和 FPK。
+- 发版前先完成开发和验证，再使用 **Create a merge commit** 合并 `dev → main`；不使用 squash/rebase，不删除长期 `dev` 分支。合入 `main` 后自动构建并发布 Docker amd64、arm64、综合 `latest`，以及按 `fpk/manifest` 版本号打标签的 FPK（`v{version}`，例如 `v2.7.5`）。Docker 的 `latest` 与 FPK 版本标签是两套命名。
 - 普通开发请求只提交/推送 `dev`，不会发布；用户要求发版或合并时再合入 `main`。本次建立分支流程的配置通过 `dev → main` PR 初始化到发布分支。
 - 合并发布后继续使用 `dev`，先抓取远端并将 `dev` 快进到 `origin/main`，再推送 `dev`，保持后续开发的共同历史。
 - 本机使用 `git config --local core.hooksPath .githooks` 启用提交和推送保护。新克隆也需执行此命令；不能将本地 hook 当作 GitHub 远端分支保护的替代。
