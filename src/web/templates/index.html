@@ -166,7 +166,8 @@
       font-size: 12px;
       color: #9ca3af;
     }
-    .events-by-category { max-height: 420px; overflow: auto; padding-right: 4px; }
+    /* 勿对事件列表使用 max-height+内部滚动：飞牛桌面 iframe/WebView 下会随机出现空白、重影 */
+    .events-by-category { padding-right: 4px; }
     .event-category { margin-bottom: 22px; }
     .event-category-title {
       font-size: 15px; font-weight: 650; color: #111827;
@@ -208,6 +209,21 @@
     .event-item .field-helper {
       margin-top: 4px;
       margin-bottom: 0;
+    }
+    .event-item .ssh-timeout-minutes-row {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+      font-size: 12px;
+      color: #6b7280;
+    }
+    .event-item .ssh-timeout-minutes-row input[type="number"] {
+      margin-top: 0;
+      width: 72px;
+      padding: 4px 8px;
+      font-size: 13px;
     }
     .tag {
       display: inline-flex;
@@ -601,7 +617,6 @@
       .header-ver { font-size: 12px; }
       .section { padding: 12px; margin-bottom: 12px; }
       .section-title { font-size: 14px; margin-bottom: 8px; }
-      .events-by-category { max-height: none; }
       .events-grid { grid-template-columns: 1fr; gap: 8px; padding-right: 0; }
       .event-item { padding: 8px 10px; }
       .channels-header { flex-wrap: wrap; gap: 8px; }
@@ -799,12 +814,20 @@
       margin-top: 16px;
       text-align: center;
     }
-    input[type="password"] {
+    .auth-form input {
       width: 100%;
-      padding: 7px 9px;
+      padding: 12px;
       border-radius: 8px;
       border: 1px solid #d1d5db;
-      font-size: 13px;
+      font-size: 16px;
+      line-height: 1.4;
+    }
+    @media (max-width: 768px) {
+      .auth-page {
+        justify-content: flex-start;
+        padding: 16px 12px;
+      }
+      .auth-card { padding: 24px 16px; }
     }
   </style>
   <script src="{{ url_for('session_guard_js') }}"></script>
@@ -818,14 +841,14 @@
         <form class="auth-form" id="form-set-password">
           <div id="set-pw-code-wrap" style="display:none;">
             <div class="field-label">初始化码</div>
-            <input type="text" id="set-pw-code" placeholder="请输入初始化码" autocomplete="off" />
+            <input type="text" id="set-pw-code" placeholder="请输入初始化码" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" disabled />
             <div class="field-helper">为防止他人抢先设置密码，需要填写初始化码：Docker 版执行 <code>docker logs 容器名</code> 查看，或查看配置目录下的 <code>.setup_code</code> 文件。</div>
           </div>
           <div class="field-label">密码</div>
-          <input type="password" id="set-pw-password" placeholder="请输入密码" autocomplete="new-password" />
+          <input type="password" id="set-pw-password" name="new-password" placeholder="请输入密码" autocomplete="new-password" autocapitalize="none" autocorrect="off" spellcheck="false" disabled />
           <div class="field-label">确认密码</div>
-          <input type="password" id="set-pw-confirm" placeholder="请再次输入密码" autocomplete="new-password" />
-          <button type="submit" class="btn btn-primary btn-block">确认设置</button>
+          <input type="password" id="set-pw-confirm" name="confirm-password" placeholder="请再次输入密码" autocomplete="new-password" autocapitalize="none" autocorrect="off" spellcheck="false" disabled />
+          <button type="submit" class="btn btn-primary btn-block" disabled>确认设置</button>
         </form>
         <div id="auth-set-msg" class="auth-msg"></div>
       </div>
@@ -834,8 +857,8 @@
         <div class="auth-sub">登录后连续 15 分钟无操作才需重新输入密码；未过期时打开或刷新可直接进入</div>
         <form class="auth-form" id="form-login">
           <div class="field-label">密码</div>
-          <input type="password" id="login-password" placeholder="请输入密码" autocomplete="current-password" />
-          <button type="submit" class="btn btn-primary btn-block">登录</button>
+          <input type="password" id="login-password" name="password" placeholder="请输入密码" autocomplete="current-password" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="go" disabled />
+          <button type="submit" class="btn btn-primary btn-block" disabled>登录</button>
         </form>
         <div id="auth-login-msg" class="auth-msg"></div>
       </div>
@@ -856,7 +879,7 @@
           <div class="header-title" id="app-title">FnMessageBot</div>
         </div>
         <div class="header-sub" id="app-subtitle">飞牛日志消息推送机器人</div>
-        <div class="header-ver" id="app-version">2.6.0</div>
+        <div class="header-ver" id="app-version">2.7.1</div>
       </div>
 
       <div class="section stats-section">
@@ -932,9 +955,14 @@
 
       <div class="section">
         <div class="section-title">
-          <span>系统设置 <small>影响日志缓存与轮询行为</small></span>
+          <span>系统设置 <small>访问密码、日志缓存与轮询</small></span>
         </div>
         <div class="system-grid">
+          <div>
+            <div class="field-label">事件标题前缀</div>
+            <input id="input-title-prefix" type="text" placeholder="飞牛NAS" />
+            <div class="field-helper">默认「飞牛NAS」，内容为空则无前缀。</div>
+          </div>
           <div>
             <div class="field-label">日志缓存天数 (day)</div>
             <input id="input-log-days" type="number" min="1" />
@@ -946,9 +974,11 @@
             <div class="field-helper">轮询日志数据库的间隔时间，过小会增加磁盘 IO。</div>
           </div>
           <div>
-            <div class="field-label">事件标题前缀</div>
-            <input id="input-title-prefix" type="text" placeholder="飞牛NAS" />
-            <div class="field-helper">默认「飞牛NAS」，内容为空则无前缀。</div>
+            <label class="field-label" style="display: flex; align-items: center; gap: 8px;">
+              <input type="checkbox" id="input-web-password-enabled" checked />
+              <span>启用访问密码</span>
+            </label>
+            <div class="field-helper">开启后连续 15 分钟无操作需重新输入密码。关闭并保存后免输密码，仅建议在可信网络使用；再次开启时沿用原密码。</div>
           </div>
           <div>
             <div class="field-label" style="display: flex; align-items: center; gap: 8px;">
@@ -970,6 +1000,13 @@
               <span>忽略本机 SSH 登录/断开</span>
             </div>
             <div class="field-helper">来源为 127.0.0.1 / ::1 的 SSH 登录成功与断开不推送（如 fnOS Web 终端、本机工具定时 SSH 自查），失败与无效用户告警仍会推送。<strong>通过 frp 等内网穿透访问 SSH 时来源同为本机，请勿开启。</strong></div>
+          </div>
+          <div>
+            <div class="field-label" style="display: flex; align-items: center; gap: 8px;">
+              <input type="checkbox" id="input-ssh-ignore-lan" />
+              <span>忽略局域网 SSH 登录/断开</span>
+            </div>
+            <div class="field-helper">来源为私网地址（如 <code>192.168.1.0/24</code>、<code>10.0.0.0/8</code>、<code>172.16.0.0/12</code>）的 SSH 登录成功与断开不推送，适合忽略家里/办公室内网设备；失败与无效用户仍会推送。外网 IP 不受影响。</div>
           </div>
         </div>
         <div class="dnd-section" style="margin-top: 16px; padding-top: 16px; border-top: 1px solid #e5e7eb;">
@@ -1100,9 +1137,75 @@
     let setupRequiresCode = false;
     let passwordMinLength = 8;
     let authRequestNumber = 0;
+    let loadedPasswordEnabled = true;
+    let authSubmitting = false;
+    const secretDrafts = new WeakMap();
+
+    function rememberSecret(input) {
+      secretDrafts.set(input, input.value);
+    }
+
+    function trackSecret(input) {
+      ["input", "keyup", "change", "compositionend"].forEach(name => {
+        input.addEventListener(name, () => rememberSecret(input));
+      });
+    }
+
+    function captureSecretDrafts(form) {
+      form.addEventListener("pointerdown", () => {
+        form.querySelectorAll("input").forEach(input => {
+          if (!input.disabled) rememberSecret(input);
+        });
+      }, true);
+    }
+
+    async function readSecret(input) {
+      const captured = secretDrafts.get(input) || "";
+      if (document.activeElement === input) input.blur();
+      await new Promise(resolve => setTimeout(resolve, 0));
+      const choose = window.fnmbSecret ? window.fnmbSecret.chooseSubmittedPassword : (_typed, current) => current;
+      return choose(captured, input.value).trim();
+    }
+
+    function setAuthFormEnabled(formId, enabled) {
+      document.getElementById(formId).querySelectorAll("input, button").forEach(field => {
+        field.disabled = !enabled;
+      });
+    }
+
+    function showAuthForm(mode) {
+      const showSetup = mode === "setup";
+      const showLogin = mode === "login";
+      setAuthFormEnabled("form-set-password", showSetup);
+      setAuthFormEnabled("form-login", showLogin);
+      document.getElementById("auth-set-password").style.display = showSetup ? "block" : "none";
+      document.getElementById("auth-login").style.display = showLogin ? "block" : "none";
+    }
+
+    function enterAuthenticatedSession(data) {
+      // 作废进行中的 status 轮询，避免旧响应把刚登录的页面又打回密码框。
+      authRequestNumber += 1;
+      const authGate = document.getElementById("auth-gate");
+      const appMain = document.getElementById("app-main");
+      if (data.session_token && window.fnmbSession.remember) {
+        window.fnmbSession.remember(data.session_token);
+      }
+      window.fnmbSession.start({
+        authenticated: true,
+        password_enabled: data.password_enabled !== false,
+        idle_seconds: data.idle_seconds || 900,
+        remaining_seconds: data.remaining_seconds ?? data.idle_seconds ?? 900,
+        session_token: data.session_token,
+      });
+      authGate.style.display = "none";
+      appMain.style.display = "flex";
+      loadConfig();
+    }
 
     window.addEventListener("fnmb-session-expired", () => {
       authRequestNumber += 1;
+      if (window.fnmbSession && window.fnmbSession.forget) window.fnmbSession.forget();
+      secretDrafts.set(document.getElementById("login-password"), "");
       renderPersistentWarnings([]);
       setStatus(false, "");
     });
@@ -1123,8 +1226,7 @@
         window.fnmbSession.start({authenticated: false});
         authGate.style.display = "flex";
         appMain.style.display = "none";
-        document.getElementById("auth-set-password").style.display = "none";
-        document.getElementById("auth-login").style.display = "block";
+        showAuthForm("login");
         const message = document.getElementById("auth-login-msg");
         message.textContent = error.message || "无法连接应用，请稍后重试。";
         message.className = "auth-msg error";
@@ -1144,81 +1246,101 @@
       }
       authGate.style.display = "flex";
       appMain.style.display = "none";
-      document.getElementById("auth-set-password").style.display = data.need_setup ? "block" : "none";
-      document.getElementById("auth-login").style.display = data.need_login ? "block" : "none";
+      showAuthForm(data.need_setup ? "setup" : (data.need_login ? "login" : "none"));
       document.getElementById("auth-set-msg").textContent = "";
       document.getElementById("auth-login-msg").textContent = "";
     }
 
     document.getElementById("auth-retry-btn").addEventListener("click", initAuth);
 
+    document.querySelectorAll("#form-set-password input, #form-login input").forEach(trackSecret);
+    captureSecretDrafts(document.getElementById("form-set-password"));
+    captureSecretDrafts(document.getElementById("form-login"));
+
     document.getElementById("form-set-password").addEventListener("submit", async function(e) {
       e.preventDefault();
+      if (authSubmitting) return;
+      authSubmitting = true;
       const msgEl = document.getElementById("auth-set-msg");
-      const p1 = document.getElementById("set-pw-password").value.trim();
-      const p2 = document.getElementById("set-pw-confirm").value.trim();
-      const setupCode = document.getElementById("set-pw-code").value.trim();
-      msgEl.textContent = "";
-      msgEl.className = "auth-msg";
-      if (setupRequiresCode && !setupCode) {
-        msgEl.textContent = "请输入初始化码";
-        msgEl.className = "auth-msg error";
-        return;
-      }
-      if (p1.length < passwordMinLength) {
-        msgEl.textContent = "密码长度至少 " + passwordMinLength + " 位";
-        msgEl.className = "auth-msg error";
-        return;
-      }
-      if (p1 !== p2) {
-        msgEl.textContent = "两次输入的密码不一致";
-        msgEl.className = "auth-msg error";
-        return;
-      }
-      const res = await fetch("api/auth/set-password", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ password: p1, password_confirm: p2, setup_code: setupCode }),
-      });
-      const json = await res.json();
-      if (json.ok) {
-        msgEl.textContent = "设置成功，正在进入配置页…";
-        msgEl.className = "auth-msg ok";
-        document.getElementById("form-set-password").reset();
-        initAuth();
-      } else {
-        msgEl.textContent = json.message || "设置失败";
-        msgEl.className = "auth-msg error";
+      try {
+        const p1 = await readSecret(document.getElementById("set-pw-password"));
+        const p2 = await readSecret(document.getElementById("set-pw-confirm"));
+        const setupCode = await readSecret(document.getElementById("set-pw-code"));
+        msgEl.textContent = "";
+        msgEl.className = "auth-msg";
+        if (setupRequiresCode && !setupCode) {
+          msgEl.textContent = "请输入初始化码";
+          msgEl.className = "auth-msg error";
+          return;
+        }
+        const normalize = window.fnmbSecret ? window.fnmbSecret.normalizePassword : value => value.trim();
+        const normalizedPassword = normalize(p1);
+        if (normalizedPassword.length < passwordMinLength) {
+          msgEl.textContent = "密码长度至少 " + passwordMinLength + " 位";
+          msgEl.className = "auth-msg error";
+          return;
+        }
+        if (normalizedPassword !== normalize(p2)) {
+          msgEl.textContent = "两次输入的密码不一致";
+          msgEl.className = "auth-msg error";
+          return;
+        }
+        const res = await fetch("api/auth/set-password", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ password: p1, password_confirm: p2, setup_code: setupCode }),
+        });
+        const json = await res.json();
+        if (json.ok) {
+          msgEl.textContent = "设置成功，正在进入配置页…";
+          msgEl.className = "auth-msg ok";
+          document.getElementById("form-set-password").reset();
+          enterAuthenticatedSession(json);
+        } else {
+          msgEl.textContent = json.message || "设置失败";
+          msgEl.className = "auth-msg error";
+        }
+      } finally {
+        authSubmitting = false;
       }
     });
 
     document.getElementById("form-login").addEventListener("submit", async function(e) {
       e.preventDefault();
+      if (authSubmitting) return;
+      authSubmitting = true;
       const msgEl = document.getElementById("auth-login-msg");
-      const password = document.getElementById("login-password").value.trim();
-      msgEl.textContent = "";
-      msgEl.className = "auth-msg";
-      if (!password) {
-        msgEl.textContent = "请输入密码";
-        msgEl.className = "auth-msg error";
-        return;
-      }
-      const res = await fetch("api/auth/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ password }),
-      });
-      const json = await res.json();
-      if (json.ok) {
-        msgEl.textContent = "登录成功，正在进入配置页…";
-        msgEl.className = "auth-msg ok";
-        document.getElementById("form-login").reset();
-        initAuth();
-      } else {
-        msgEl.textContent = json.message || "登录失败";
-        msgEl.className = "auth-msg error";
+      const loginPassword = document.getElementById("login-password");
+      try {
+        const password = await readSecret(loginPassword);
+        msgEl.textContent = "";
+        msgEl.className = "auth-msg";
+        if (!password) {
+          msgEl.textContent = "请输入密码";
+          msgEl.className = "auth-msg error";
+          return;
+        }
+        const res = await fetch("api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ password }),
+        });
+        const json = await res.json();
+        if (json.ok) {
+          msgEl.textContent = "登录成功，正在进入配置页…";
+          msgEl.className = "auth-msg ok";
+          secretDrafts.set(loginPassword, "");
+          document.getElementById("form-login").reset();
+          // 直接进入配置页，不再等待二次 status；手机端二次请求失败时会一直停在密码页。
+          enterAuthenticatedSession(json);
+        } else {
+          msgEl.textContent = json.message || "登录失败";
+          msgEl.className = "auth-msg error";
+        }
+      } finally {
+        authSubmitting = false;
       }
     });
 
@@ -1874,9 +1996,12 @@
       channelsBody.appendChild(tr);
     }
 
-    function renderEventCategories(container, categories, selected) {
+    function renderEventCategories(container, categories, selected, opts) {
       if (!container) return;
       container.innerHTML = "";
+      const sshRemindMinutes = (opts && opts.sshOpenRemindMinutes != null)
+        ? opts.sshOpenRemindMinutes
+        : 30;
       for (const cat of categories || []) {
         const catBlock = document.createElement("div");
         catBlock.className = "event-category";
@@ -1927,7 +2052,36 @@
           const title = document.createElement("span");
           title.textContent = ev.title || ev.id;
           label.appendChild(title);
-          if (ev.note) {
+          if (ev.id === "SSH_OPEN_TIMEOUT") {
+            const row = document.createElement("div");
+            row.className = "ssh-timeout-minutes-row";
+            const prefix = document.createElement("span");
+            prefix.textContent = "超过";
+            const minutesInput = document.createElement("input");
+            minutesInput.type = "number";
+            minutesInput.id = "input-ssh-open-remind-minutes";
+            minutesInput.min = "1";
+            minutesInput.max = "10080";
+            minutesInput.step = "1";
+            minutesInput.value = String(sshRemindMinutes);
+            const suffix = document.createElement("span");
+            suffix.textContent = "分钟仍未关闭则提醒，并按该间隔重复，直到关闭";
+            row.appendChild(prefix);
+            row.appendChild(minutesInput);
+            row.appendChild(suffix);
+            label.appendChild(row);
+            const helper = document.createElement("div");
+            helper.className = "field-helper";
+            helper.textContent = (ev.note || "") +
+              (ev.note ? " " : "") +
+              "勾选后生效；间隔 1–10080 分钟，默认 30。关闭 SSH 后停止提醒。需能读取 journal。";
+            label.appendChild(helper);
+            function syncMinutesEnabled() {
+              minutesInput.disabled = !cb.checked;
+            }
+            cb.addEventListener("change", syncMinutesEnabled);
+            syncMinutesEnabled();
+          } else if (ev.note) {
             const helper = document.createElement("div");
             helper.className = "field-helper";
             helper.textContent = ev.note;
@@ -1941,7 +2095,10 @@
         catToggle.addEventListener("change", () => {
           const boxes = grid.querySelectorAll("input[type=checkbox]");
           const target = catToggle.checked;
-          boxes.forEach(b => { b.checked = target; });
+          boxes.forEach(b => {
+            b.checked = target;
+            b.dispatchEvent(new Event("change"));
+          });
         });
 
         updateCatToggle();
@@ -1964,6 +2121,8 @@
         }
         if (refreshWarnings) renderPersistentWarnings(json.warning_details || json.warnings || []);
         const data = json.data;
+        loadedPasswordEnabled = data.web_password_enabled !== false;
+        document.getElementById("input-web-password-enabled").checked = loadedPasswordEnabled;
         document.getElementById("app-title").textContent = data.title || "FnMessageBot";
         document.getElementById("app-subtitle").textContent = data.subtitle || "";
         document.getElementById("app-version").textContent = data.version || "";
@@ -1974,7 +2133,12 @@
           typeof data.bark_icon === "string" ? data.bark_icon : "";
 
         const selected = new Set(data.selected_events || []);
-        renderEventCategories(eventsContainer, data.events_by_category || [], selected);
+        let sshRemindMin = parseInt(data.ssh_open_remind_minutes, 10);
+        if (!Number.isFinite(sshRemindMin) || sshRemindMin < 1) sshRemindMin = 30;
+        sshRemindMin = Math.min(sshRemindMin, 10080);
+        renderEventCategories(eventsContainer, data.events_by_category || [], selected, {
+          sshOpenRemindMinutes: sshRemindMin,
+        });
         renderEventCategories(thirdPartyEventsContainer, data.third_party_events_by_category || [], selected);
 
         // 渲染渠道
@@ -1993,6 +2157,8 @@
         document.getElementById("input-poll-batch-summary").checked = !!data.poll_batch_summary_enabled;
         document.getElementById("input-minimal-push-enabled").checked = !!data.minimal_push_enabled;
         document.getElementById("input-ssh-ignore-loopback").checked = !!data.ssh_ignore_loopback;
+        const sshLanEl = document.getElementById("input-ssh-ignore-lan");
+        if (sshLanEl) sshLanEl.checked = !!data.ssh_ignore_lan;
         document.getElementById("input-title-prefix").value =
           typeof data.title_prefix === "string" ? data.title_prefix : "飞牛NAS";
         syncBarkIconInputsFromMaster();
@@ -2107,12 +2273,23 @@
       const payload = {
         events,
         channels,
+        web_password_enabled: document.getElementById("input-web-password-enabled").checked,
         log_retention_days: document.getElementById("input-log-days").value,
         logger_poll_interval: document.getElementById("input-poll-interval").value,
         title_prefix: (document.getElementById("input-title-prefix").value || "").trim(),
         poll_batch_summary_enabled: document.getElementById("input-poll-batch-summary").checked,
         minimal_push_enabled: document.getElementById("input-minimal-push-enabled").checked,
         ssh_ignore_loopback: document.getElementById("input-ssh-ignore-loopback").checked,
+        ssh_ignore_lan: (function () {
+          const el = document.getElementById("input-ssh-ignore-lan");
+          return !!(el && el.checked);
+        })(),
+        ssh_open_remind_minutes: (function () {
+          const el = document.getElementById("input-ssh-open-remind-minutes");
+          const n = parseInt(el && el.value, 10);
+          if (!Number.isFinite(n) || n < 1) return 30;
+          return Math.min(n, 10080);
+        })(),
         dnd_enabled: document.getElementById("input-dnd-enabled").checked,
         dnd_start_time: document.getElementById("input-dnd-start").value || "22:00",
         dnd_end_time: document.getElementById("input-dnd-end").value || "07:00",
@@ -2139,7 +2316,13 @@
           }
           renderPersistentWarnings(json.warning_details || json.warnings || []);
           testBtn.disabled = false;
-          loadConfig(false);
+          if (payload.web_password_enabled !== loadedPasswordEnabled) {
+            window.fnmbSession.start({authenticated: !payload.web_password_enabled,
+              password_enabled: payload.web_password_enabled});
+            await initAuth();
+          } else {
+            loadConfig(false);
+          }
         } else {
           showToast(false, json.message || "保存失败");
         }
@@ -2170,7 +2353,7 @@
         let json = null;
         try { json = JSON.parse(text); } catch (e) { json = null; }
         if (res.ok && json.ok) {
-          showToast(true, json.message || "测试消息已发送");
+          showToast(!json.partial, json.message || "测试消息已发送");
         } else {
           showToast(false, (json && json.message) ? json.message : ("测试发送失败：" + (text ? text.slice(0, 120) : "")));
         }

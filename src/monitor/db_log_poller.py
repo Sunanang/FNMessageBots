@@ -18,8 +18,9 @@ from typing import Callable, Dict, List, Optional, Any, Sequence
 from utils.logtime_display import get_logtime_display_offset_seconds
 
 from .models import JournalEntry
+from utils.notification_outbox import OutboxWriteError
 from .sqlite_uri import connect_readonly_with_fallback
-from .ssh_journal_poller import should_ignore_loopback_ssh
+from .ssh_journal_poller import should_ignore_ssh_by_source
 
 
 # 数据库 eventId -> 项目内 event_type（通知/处理器使用的类型）
@@ -110,7 +111,8 @@ def _parse_parameter(parameter: Optional[str], uname: Optional[str], uid: Option
     data: Dict[str, Any] = {}
     if parameter and parameter.strip():
         try:
-            data = json.loads(parameter)
+            parsed = json.loads(parameter)
+            data = parsed if isinstance(parsed, dict) else {"raw": parameter}
         except json.JSONDecodeError:
             data = {"raw": parameter}
     if uname is not None and "user" not in data:
@@ -165,8 +167,9 @@ class DBLogPoller:
         self.batch_handler: Optional[Callable[[List[Dict[str, Any]]], None]] = None
         # 当 SSH journal 轮询可用时，跳过库内 Sshd*，避免双推
         self.skip_ssh_events = False
-        # 与 SshJournalPoller 一致：忽略本机回环的 SSH 登录成功 / 断开
+        # 与 SshJournalPoller 一致：忽略本机回环 / 局域网的 SSH 登录成功 / 断开
         self.ignore_ssh_loopback = False
+        self.ignore_ssh_lan = False
         self.running = False
         self._thread: Optional[threading.Thread] = None
         self._cursor_file = self.cursor_dir / "db_poller_cursor.txt"
@@ -295,7 +298,12 @@ class DBLogPoller:
                 row.get("uname"),
                 row.get("uid"),
             )
-            if self.ignore_ssh_loopback and should_ignore_loopback_ssh(project_type, event_data):
+            if should_ignore_ssh_by_source(
+                project_type,
+                event_data,
+                ignore_loopback=self.ignore_ssh_loopback,
+                ignore_lan=self.ignore_ssh_lan,
+            ):
                 continue
             event_data.setdefault("_source", "logger_db")
             event_data.setdefault("_source_cursor", str(row_id))
@@ -310,10 +318,15 @@ class DBLogPoller:
                 "handler": handler,
             })
         batch_delivery_failed = False
+        persistence_failed = False
         if batch_events:
             if self.batch_handler:
                 try:
                     self.batch_handler(batch_events)
+                except OutboxWriteError as e:
+                    self.logger.error("批次尚未持久化，保留水位: %s", e)
+                    batch_delivery_failed = True
+                    persistence_failed = True
                 except Exception as e:
                     self.logger.error("批量处理事件失败（count=%s）: %s", len(batch_events), e, exc_info=True)
                     batch_delivery_failed = True
@@ -322,13 +335,15 @@ class DBLogPoller:
                 for item in batch_events:
                     try:
                         item["handler"](item["event_data"], item["entry"])
+                    except OutboxWriteError:
+                        return last_id
                     except Exception as e:
                         self.logger.error("处理事件失败 eventId=%s: %s", item["db_event_id"], e)
         if rows:
             # 汇总投递异常时同批最多重试 BATCH_MAX_ATTEMPTS 次，之后推进游标，避免无限重发
             if self.batch_handler and batch_events and batch_delivery_failed:
                 self._batch_fail_count += 1
-                if self._batch_fail_count < self.BATCH_MAX_ATTEMPTS:
+                if persistence_failed or self._batch_fail_count < self.BATCH_MAX_ATTEMPTS:
                     return last_id
                 self.logger.warning(
                     "批量处理连续失败 %s 次，放弃本批（id %s–%s）",

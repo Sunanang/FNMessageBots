@@ -34,9 +34,11 @@ from .channel_params import (
     wecom_app_fields,
 )
 from .connection_pool import ConnectionPool
+from monitor.media_summary import MEDIA_SUMMARY_EVENT, format_media_summary
+from monitor.music_summary import MUSIC_SUMMARY_EVENT, format_music_summary
 
 # PushPlus 固定接口地址
-PUSHPLUS_URL = "http://www.pushplus.plus/send"
+PUSHPLUS_URL = "https://www.pushplus.plus/send"
 
 # 企业微信应用文本消息上限 2048 字节
 WECOM_TEXT_MAX_BYTES = 2000
@@ -174,6 +176,9 @@ class MultiPlatformNotifier:
         'SSH_AUTH_FAILED': '❌ 飞牛NAS-SSH认证失败',
         'SSH_LOGIN_SUCCESS': '🔐 飞牛NAS-SSH登录成功',
         'SSH_DISCONNECTED': '👋 飞牛NAS-SSH断开连接',
+        'SSH_ENABLED': '🔓 飞牛NAS-SSH已启用',
+        'SSH_DISABLED': '🔒 飞牛NAS-SSH已关闭',
+        'SSH_OPEN_TIMEOUT': '⏰ 飞牛NAS-SSH开启超时提醒',
         'APP_CRASH': '💥 飞牛NAS-应用崩溃告警',
         'APP_UPDATE_FAILED': '💥 飞牛NAS-应用更新失败告警',
         'APP_START_FAILED_LOCAL_APP_RUN_EXCEPTION': '💥 飞牛NAS-应用启动失败告警',
@@ -251,10 +256,16 @@ class MultiPlatformNotifier:
         'MEDIA_USER_CREATED': '👤 飞牛NAS-影视库创建用户',
         'TRIM_RESOURCE_ADDED': '📥 飞牛NAS-影视资源入库',
         'TRIM_SCRAPE_SUCCESS': '✅ 飞牛NAS-影视刮削完成',
+        'MEDIA_LIBRARY_SUMMARY': '📚 飞牛NAS-影视处理汇总',
         'PHOTO_SHARE_CREATED': '📥 飞牛NAS-相册分享创建',
         'PHOTO_SHARE_EXPIRED': '⏱️ 飞牛NAS-相册分享过期',
         'PHOTO_DEVICE_REGISTERED': '📱 飞牛NAS-相册同步设备',
         'FACE_RECOGNITION_UPDATED': '✅ 飞牛NAS-相册人脸识别',
+        'MUSIC_TRACK_ADDED': '🎵 飞牛NAS-音乐入库',
+        'MUSIC_TRACK_REMOVED': '🎵 飞牛NAS-音乐移出库',
+        'MUSIC_LIBRARY_SUMMARY': '🎵 飞牛NAS-音乐库汇总',
+        'MUSIC_FAVORITED': '❤️ 飞牛NAS-音乐收藏',
+        'MUSIC_PLAYLIST_TRACK_ADDED': '🎶 飞牛NAS-加入歌单',
         # Docker 容器（Engine events）
         'DOCKER_CONTAINER_CREATE': '📦 飞牛NAS-Docker容器已创建',
         'DOCKER_CONTAINER_START': '▶️ 飞牛NAS-Docker容器已启动',
@@ -283,6 +294,9 @@ class MultiPlatformNotifier:
         'SSH_AUTH_FAILED': 'SSH认证失败{user_info}',
         'SSH_LOGIN_SUCCESS': 'SSH用户{user}登录成功',
         'SSH_DISCONNECTED': 'SSH连接已断开',
+        'SSH_ENABLED': 'SSH服务已启用',
+        'SSH_DISABLED': 'SSH服务已关闭',
+        'SSH_OPEN_TIMEOUT': 'SSH已开启超过{remind_minutes}分钟仍未关闭',
         'APP_CRASH': '应用{name}崩溃',
         'APP_UPDATE_FAILED': '应用{name}更新失败',
         'APP_START_FAILED_LOCAL_APP_RUN_EXCEPTION': '应用{name}启动失败',
@@ -361,6 +375,11 @@ class MultiPlatformNotifier:
         'PHOTO_SHARE_EXPIRED': '相册分享过期',
         'PHOTO_DEVICE_REGISTERED': '相册同步设备',
         'FACE_RECOGNITION_UPDATED': '相册人脸识别',
+        'MUSIC_TRACK_ADDED': '音乐入库',
+        'MUSIC_TRACK_REMOVED': '音乐移出库',
+        'MUSIC_LIBRARY_SUMMARY': '音乐库汇总',
+        'MUSIC_FAVORITED': '音乐收藏 {title}',
+        'MUSIC_PLAYLIST_TRACK_ADDED': '加入歌单 {playlist_name}',
         'DOCKER_CONTAINER_CREATE': 'Docker容器 {container_name} 已创建',
         'DOCKER_CONTAINER_START': 'Docker容器 {container_name} 已启动',
         'DOCKER_CONTAINER_STOP': 'Docker容器 {container_name} 已停止',
@@ -388,6 +407,9 @@ class MultiPlatformNotifier:
         'SSH_AUTH_FAILED': 'SSH认证失败，请确认是否为合法用户。',
         'SSH_LOGIN_SUCCESS': 'SSH登录成功，请确认是否为本人操作。',
         'SSH_DISCONNECTED': 'SSH连接已断开。',
+        'SSH_ENABLED': 'SSH 服务已启用（systemd Started ssh.service）。',
+        'SSH_DISABLED': 'SSH 服务已关闭（systemd Stopped ssh.service）。',
+        'SSH_OPEN_TIMEOUT': '请确认是否仍需保持 SSH 开启；未关闭将按设定间隔继续提醒。',
         'APP_CRASH': '应用程序异常退出，建议检查应用状态和日志。',
         'APP_UPDATE_FAILED': '应用程序更新失败，建议检查应用状态和日志。',
         'APP_START_FAILED_LOCAL_APP_RUN_EXCEPTION': '应用程序启动失败（本地运行异常），建议检查应用状态和日志。',
@@ -459,12 +481,17 @@ class MultiPlatformNotifier:
         'MEDIA_LOGIN_SUCC': '影视库用户登录成功。',
         'MEDIA_LOGOUT': '影视库用户退出登录。',
         'MEDIA_USER_CREATED': '影视库管理员创建用户成功。',
-        'TRIM_RESOURCE_ADDED': '影视库资源入库成功。',
-        'TRIM_SCRAPE_SUCCESS': '影视资源刮削完成。',
+        'TRIM_RESOURCE_ADDED': '资源入库与刮削通知累计后，连续60秒无新增时统一推送本轮汇总。',
+        'TRIM_SCRAPE_SUCCESS': '已观察到的刮削完成记录参与本轮汇总；静默不代表整个任务完成。',
         'PHOTO_SHARE_CREATED': '相册库新增了对外分享链接。',
         'PHOTO_SHARE_EXPIRED': '该相册分享已超过有效期。',
         'PHOTO_DEVICE_REGISTERED': '相册库已登记新的同步设备。',
         'FACE_RECOGNITION_UPDATED': '相册人脸识别告一段落，以下为本次汇总。',
+        'MUSIC_TRACK_ADDED': '曲目入库与移出累计后，连续60秒无新增时统一推送本轮汇总。',
+        'MUSIC_TRACK_REMOVED': '曲目被标记删除或文件失效后参与本轮汇总；静默不代表整个扫描完成。',
+        'MUSIC_LIBRARY_SUMMARY': '音乐库本轮变更汇总。',
+        'MUSIC_FAVORITED': '用户收藏了一首曲目。',
+        'MUSIC_PLAYLIST_TRACK_ADDED': '用户将曲目加入了歌单。',
         'DOCKER_CONTAINER_CREATE': 'Docker 引擎上报容器已创建。',
         'DOCKER_CONTAINER_START': 'Docker 引擎上报容器已开始运行。',
         'DOCKER_CONTAINER_STOP': 'Docker 引擎上报容器停止信号。',
@@ -555,6 +582,7 @@ class MultiPlatformNotifier:
         
         # 事件去重缓存
         self.sent_events = {}
+        self._dedup_lock = threading.RLock()
         
         # 磁盘事件合并缓存 - 使用时间窗口缓存多个磁盘事件
         self.disk_wakeup_cache = {}  # {time_window: [event_data_list]}
@@ -672,25 +700,13 @@ class MultiPlatformNotifier:
                 current_time = time.time()
                 current_window = int(current_time / self.merge_window)
 
-                # 检查前一个窗口是否有待合并的事件
-                prev_window = current_window - 1
-
-                # 使用锁保护缓存访问
-                with self._cache_lock:
-                    # 处理待合并的磁盘唤醒事件
-                    if prev_window in self.disk_wakeup_cache and self.disk_wakeup_cache[prev_window]:
-                        self._send_merged_disk_event('DiskWakeup', self.disk_wakeup_cache[prev_window], prev_window)
-                        del self.disk_wakeup_cache[prev_window]
-
-                    # 处理待合并的磁盘休眠事件
-                    if prev_window in self.disk_spindown_cache and self.disk_spindown_cache[prev_window]:
-                        self._send_merged_disk_event('DiskSpindown', self.disk_spindown_cache[prev_window], prev_window)
-                        del self.disk_spindown_cache[prev_window]
-
-                    # 清理太久之前的缓存（超过2个窗口的）
-                    too_old_window = current_window - 3
-                    self.disk_wakeup_cache = {k: v for k, v in self.disk_wakeup_cache.items() if k > too_old_window}
-                    self.disk_spindown_cache = {k: v for k, v in self.disk_spindown_cache.items() if k > too_old_window}
+                # 网络请求可能跨越多个窗口；取出全部到期事件，避免仅处理上一窗口而丢弃旧事件。
+                self.cleanup_cache()
+                for event_type, window, events in self._take_disk_events(current_window):
+                    try:
+                        self._send_merged_disk_event(event_type, events, window)
+                    except Exception:
+                        self.logger.exception("磁盘合并事件处理失败: %s，窗口 %s", event_type, window)
 
                 # 使用短间隔睡眠以便快速响应停止信号
                 for _ in range(10):
@@ -868,7 +884,8 @@ class MultiPlatformNotifier:
         
         if results and any(results):  # 至少一个平台发送成功
             if not skip_dedup and event_fingerprint:
-                self.sent_events[event_fingerprint] = time.time()
+                with self._dedup_lock:
+                    self.sent_events[event_fingerprint] = time.time()
             self._record_send_result(True)
             self.logger.info(f"通知发送成功: {event_type}")
             return True, channel_results
@@ -949,19 +966,35 @@ class MultiPlatformNotifier:
         return [u.strip() for u in str(raw).split('|') if u.strip()]
 
     def _channel_result(self, channel_name: str, results: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """从多次请求结果聚合成一条渠道结果（多 URL 取首个成功或最后一条）。"""
+        """保留每个目标的结果，部分成功不会隐藏其余目标的失败。"""
         if not results:
             return {"channel": channel_name, "success": False, "response": None, "error": "未请求"}
         ok = next((r for r in results if r.get("success")), None)
         last = results[-1]
-        if ok:
-            return {"channel": channel_name, "success": True, "response": ok.get("response"), "error": None}
+        failures = [f"#{i}: {r.get('error') or '请求失败'}" for i, r in enumerate(results, 1) if not r.get("success")]
         return {
             "channel": channel_name,
-            "success": False,
-            "response": last.get("response"),
-            "error": last.get("error") or "请求失败",
+            "success": ok is not None,
+            "response": (ok if ok is not None else last).get("response"),
+            "error": "；".join(failures)[:1000] if failures else None,
+            "success_count": len(results) - len(failures),
+            "fail_count": len(failures),
+            "results": results,
         }
+
+    @staticmethod
+    def _check_business_result(result: Dict[str, Any], success_code: int, *fields: str) -> Dict[str, Any]:
+        """已知平台需验证业务码；HTTP 成功仅表示请求到达服务器。"""
+        if not result.get("success"):
+            return result
+        body = result.get("response")
+        body = body if isinstance(body, dict) else {}
+        field = next((key for key in fields if key in body), None)
+        if field and str(body[field]).strip() == str(success_code):
+            return result
+        error = (body.get("msg") or body.get("message") or body.get("StatusMessage")
+                 or body.get("errmsg") or (f"{field}={body[field]}" if field else "平台未返回有效业务状态码"))
+        return {**result, "success": False, "error": str(error)}
 
     def _send_to_wechat(self, message: MultiPlatformMessage) -> tuple:
         """发送到企业微信。返回 (是否有任一成功, 渠道结果 dict)。"""
@@ -983,7 +1016,7 @@ class MultiPlatformNotifier:
         """发送到飞书。返回 (是否有任一成功, 渠道结果 dict)。"""
         payload = message.to_feishu_format()
         urls = self._iter_urls(self.feishu_webhook_url)
-        results = [self.connection_pool.post(url, payload) for url in urls]
+        results = [self._check_business_result(self.connection_pool.post(url, payload), 0, "code", "StatusCode") for url in urls]
         any_ok = any(r.get("success") for r in results)
         return any_ok, self._channel_result("飞书", results)
 
@@ -1011,7 +1044,7 @@ class MultiPlatformNotifier:
             }
             if self.bark_icon:
                 payload["icon"] = self.bark_icon
-            results.append(self.connection_pool.post(push_url, payload))
+            results.append(self._check_business_result(self.connection_pool.post(push_url, payload), 200, "code"))
         any_ok = any(r.get("success") for r in results)
         return any_ok, self._channel_result("Bark", results)
 
@@ -1025,6 +1058,7 @@ class MultiPlatformNotifier:
             try:
                 payload = json.loads(param_str)
                 if not isinstance(payload, dict) or 'token' not in payload:
+                    results.append({"success": False, "response": None, "error": "参数须包含 token"})
                     continue
                 user_title = (payload.get('title') or '').strip()
                 if user_title == '{title}':
@@ -1035,7 +1069,7 @@ class MultiPlatformNotifier:
                     final_content = message.merged_plain_text(blank_line_between=True)
                 payload['title'] = final_title
                 payload['content'] = final_content
-                results.append(self.connection_pool.post(PUSHPLUS_URL, payload))
+                results.append(self._check_business_result(self.connection_pool.post(PUSHPLUS_URL, payload), 200, "code"))
             except json.JSONDecodeError:
                 results.append({"success": False, "response": None, "error": "参数 JSON 解析失败"})
             except Exception as e:
@@ -1328,7 +1362,7 @@ class MultiPlatformNotifier:
                 continue
             results.append(
                 self.connection_pool.request(
-                    req["method"], req["url"], body=req["body"], headers=req["headers"]
+                    req["method"], req["url"], body=req["body"], headers=req["headers"], check_errcode=False
                 )
             )
         any_ok = any(r.get("success") for r in results)
@@ -1491,6 +1525,21 @@ class MultiPlatformNotifier:
                 ).hexdigest()[:20]
                 key = f"{event_type}_{digest}"
         elif event_type in (
+            "MUSIC_FAVORITED",
+            "MUSIC_PLAYLIST_TRACK_ADDED",
+        ):
+            if event_type == "MUSIC_FAVORITED":
+                key = (
+                    f"{event_type}_"
+                    f"{int(event_data.get('favorite_id') or 0) or event_data.get('track_id') or 'na'}"
+                )
+            else:
+                key = (
+                    f"{event_type}_"
+                    f"{int(event_data.get('playlist_track_id') or 0) or event_data.get('track_id') or 'na'}_"
+                    f"{event_data.get('playlist_id') or ''}"
+                )
+        elif event_type in (
             "PHOTO_SHARE_CREATED",
             "PHOTO_SHARE_EXPIRED",
             "PHOTO_DEVICE_REGISTERED",
@@ -1541,6 +1590,25 @@ class MultiPlatformNotifier:
         }:
             minute_window = int(time.time() / 60)
             key = f"{event_type}_{minute_window}"
+        elif event_type in ('SSH_ENABLED', 'SSH_DISABLED'):
+            # 每次启停都应可推；优先用 journal 游标，避免同分钟/300s 窗口吞掉快速开关
+            unit = str(event_data.get("unit") or "")
+            nonce = (
+                event_data.get("_source_cursor")
+                or event_data.get("_source_key")
+                or event_data.get("opened_at")
+                or time.time_ns()
+            )
+            key = f"{event_type}_{unit}_{nonce}"
+        elif event_type == 'SSH_OPEN_TIMEOUT':
+            # 同一开启会话会按间隔反复提醒，指纹需带序号/游标，避免被去重吞掉
+            nonce = (
+                event_data.get("_source_cursor")
+                or event_data.get("remind_seq")
+                or event_data.get("elapsed_minutes")
+                or time.time_ns()
+            )
+            key = f"{event_type}_{event_data.get('opened_at') or ''}_{nonce}"
         elif event_type == 'WAN_IP_CHANGED':
             old_ip = str(event_data.get('old_wan_ip') or event_data.get('previous_wan_ip') or '')
             new_ip = str(event_data.get('new_wan_ip') or event_data.get('wan_ip') or '')
@@ -1579,12 +1647,11 @@ class MultiPlatformNotifier:
     
     def _is_duplicate(self, fingerprint: str) -> bool:
         """检查是否为重复事件"""
-        if fingerprint in self.sent_events:
-            last_time = self.sent_events[fingerprint]
-            if time.time() - last_time < self.dedup_window:
-                return True
-            else:
-                # 超过去重窗口，删除旧记录
+        with self._dedup_lock:
+            if fingerprint in self.sent_events:
+                last_time = self.sent_events[fingerprint]
+                if time.time() - last_time < self.dedup_window:
+                    return True
                 del self.sent_events[fingerprint]
         
         return False
@@ -1597,7 +1664,7 @@ class MultiPlatformNotifier:
                       timestamp: str, raw_log: str) -> MultiPlatformMessage:
         """构建多平台消息"""
         # 轮询批量汇总、NAS 定时巡检：不受极简模式折叠为一行
-        if self._minimal_push_effective() and event_type not in ("POLL_BATCH_SUMMARY", "NAS_PATROL_REPORT"):
+        if self._minimal_push_effective() and event_type not in ("POLL_BATCH_SUMMARY", "NAS_PATROL_REPORT", MEDIA_SUMMARY_EVENT):
             one_line = self._build_minimal_one_line(event_type, event_data)
             return MultiPlatformMessage(title=one_line, content="")
 
@@ -1772,6 +1839,10 @@ class MultiPlatformNotifier:
     ) -> str:
         """构建消息内容。for_batch_inner=True 时用于多事件汇总内的子块：无首行时间、无 EVENT_NOTES。"""
         # 批量汇总：多条时整段在入口处理（仅一条时间行 + 子块无时间/无备注）
+        if event_type == MEDIA_SUMMARY_EVENT:
+            return self._strip_body_emojis(format_media_summary(event_data))
+        if event_type == MUSIC_SUMMARY_EVENT:
+            return self._strip_body_emojis(format_music_summary(event_data))
         if event_type == 'POLL_BATCH_SUMMARY':
             single_event = self._extract_single_event_from_batch(event_data)
             if single_event:
@@ -1859,9 +1930,12 @@ class MultiPlatformNotifier:
             'ARCHIVING_SUCCESS', 'DeleteFile', 'MovetoTrashbin', 'SHARE_EVENTID_DEL', 'SHARE_EVENTID_PUT',
             'WEBDAV_ENABLED', 'WEBDAV_DISABLED', 'SAMBA_ENABLED', 'SAMBA_DISABLED',
             'DLNA_ENABLED', 'DLNA_DISABLED', 'FTP_ENABLED', 'FTP_DISABLED', 'NFS_ENABLED', 'NFS_DISABLED',
+            'SSH_ENABLED', 'SSH_DISABLED',
             'FW_ENABLE', 'FW_DISABLE', 'SECURITY_PORTCHANGED',
         }:
             detail = self._build_simple_content(event_data)
+        elif event_type == 'SSH_OPEN_TIMEOUT':
+            detail = self._build_ssh_open_timeout_content(event_data)
         elif event_type == 'WAN_IP_CHANGED':
             detail = self._build_wan_ip_changed_content(event_data)
         elif event_type in ('MEDIA_LOGIN_SUCC', 'MEDIA_LOGOUT'):
@@ -1875,6 +1949,13 @@ class MultiPlatformNotifier:
             'FACE_RECOGNITION_UPDATED',
         ):
             detail = self._build_photo_album_content(event_type, event_data)
+        elif event_type in (
+            'MUSIC_TRACK_ADDED',
+            'MUSIC_TRACK_REMOVED',
+            'MUSIC_FAVORITED',
+            'MUSIC_PLAYLIST_TRACK_ADDED',
+        ):
+            detail = self._build_music_library_content(event_type, event_data)
 
         if detail:
             fragments.append(detail.rstrip('\n'))
@@ -2260,6 +2341,20 @@ class MultiPlatformNotifier:
                 break
         return content or "（无额外详情）"
 
+    def _build_ssh_open_timeout_content(self, event_data: Dict[str, Any]) -> str:
+        """SSH 开启超时提醒正文。"""
+        remind = event_data.get("remind_minutes", "")
+        elapsed = event_data.get("elapsed_minutes", "")
+        opened = event_data.get("opened_at", "")
+        lines: List[str] = []
+        if remind != "" and remind is not None:
+            lines.append(f"阈值: {remind} 分钟")
+        if elapsed != "" and elapsed is not None:
+            lines.append(f"已开启: 约 {elapsed} 分钟")
+        if opened:
+            lines.append(f"开启时间: {opened}")
+        return ("\n".join(lines) + "\n") if lines else "SSH 开启超时\n"
+
     def _build_wan_ip_changed_content(self, event_data: Dict[str, Any]) -> str:
         """外网 IP 变化正文。"""
         lines: List[str] = []
@@ -2365,6 +2460,28 @@ class MultiPlatformNotifier:
                 lines.append(f"角色: {role}")
             if str(email).strip():
                 lines.append(f"邮箱: {email}")
+        return "\n".join(lines) if lines else "（无额外详情）"
+
+    def _build_music_library_content(self, event_type: str, event_data: Dict[str, Any]) -> str:
+        """音乐库 music.db 事件正文：收藏 / 加入歌单等即时推送。"""
+        lines: List[str] = []
+        if event_data.get("title"):
+            lines.append(f"曲目: {event_data['title']}")
+        elif event_data.get("track_id") is not None:
+            lines.append(f"曲目ID: {event_data['track_id']}")
+        if event_data.get("artist"):
+            lines.append(f"艺人: {event_data['artist']}")
+        if event_data.get("album"):
+            lines.append(f"专辑: {event_data['album']}")
+        if event_type == "MUSIC_PLAYLIST_TRACK_ADDED":
+            if event_data.get("playlist_name"):
+                lines.append(f"歌单: {event_data['playlist_name']}")
+            elif event_data.get("playlist_id") is not None:
+                lines.append(f"歌单ID: {event_data['playlist_id']}")
+        if event_data.get("user_label"):
+            lines.append(f"用户: {event_data['user_label']}")
+        elif event_data.get("user_id") is not None:
+            lines.append(f"用户ID: {event_data['user_id']}")
         return "\n".join(lines) if lines else "（无额外详情）"
 
     def _build_photo_album_content(self, event_type: str, event_data: Dict[str, Any]) -> str:
@@ -2609,6 +2726,16 @@ class MultiPlatformNotifier:
                 parts.append(f"原因: {ed.get('reason')}")
             return [" · ".join(parts)] if parts else [et]
 
+        if et == "SSH_OPEN_TIMEOUT":
+            remind = ed.get("remind_minutes", "")
+            elapsed = ed.get("elapsed_minutes", "")
+            bits = []
+            if remind != "" and remind is not None:
+                bits.append(f"阈值 {remind} 分钟")
+            if elapsed != "" and elapsed is not None:
+                bits.append(f"已开约 {elapsed} 分钟")
+            return [" · ".join(bits)] if bits else ["SSH开启超时"]
+
         if et == "APP_CRASH":
             name = data.get("DISPLAY_NAME") or data.get("APP_NAME")
             return [f"应用名称: {name}"] if name else ["应用: （未知）"]
@@ -2643,6 +2770,15 @@ class MultiPlatformNotifier:
                 cpu_bits.append(f"当前使用率: {usage}%")
             if th != "" and th is not None:
                 cpu_bits.append(f"使用率阈值: {th}%")
+            tops = ed.get("top_cpu_processes") or data.get("top_cpu_processes") or []
+            if tops:
+                try:
+                    from src.utils.cpu_top import format_top_cpu_short
+                except ImportError:
+                    from utils.cpu_top import format_top_cpu_short  # type: ignore
+                short = format_top_cpu_short(tops if isinstance(tops, list) else [])
+                if short:
+                    cpu_bits.append(f"Top: {short}")
             return [" · ".join(cpu_bits)] if cpu_bits else ["CPU使用率告警"]
 
         if et == "CPU_USAGE_RESTORED":
@@ -2797,6 +2933,8 @@ class MultiPlatformNotifier:
             "FTP_DISABLED",
             "NFS_ENABLED",
             "NFS_DISABLED",
+            "SSH_ENABLED",
+            "SSH_DISABLED",
             "FW_ENABLE",
             "FW_DISABLE",
             "SECURITY_PORTCHANGED",
@@ -2806,7 +2944,7 @@ class MultiPlatformNotifier:
                 return [f"用户: {user}"]
             if ed.get("from"):
                 return [f"来源: {ed.get('from')}"]
-            for key in ("path", "PATH", "share_name", "SHARE_NAME", "name"):
+            for key in ("path", "PATH", "share_name", "SHARE_NAME", "name", "unit"):
                 v = ed.get(key) or data.get(key)
                 if v:
                     return [f"{key}: {v}"]
@@ -3215,11 +3353,20 @@ class MultiPlatformNotifier:
         return content
 
     def _build_cpu_usage_alarm_content(self, event_data: Dict[str, Any]) -> str:
-        """构建 CPU 使用率告警内容（parameter 格式: data.THRESHOLD）"""
+        """构建 CPU 使用率告警内容（parameter 格式: data.THRESHOLD；可选 top_cpu_processes）"""
         content = ""
         data = event_data.get('data', {})
         threshold = data.get('THRESHOLD', 0)
         content += f"📊 使用率阈值: {threshold}%\n"
+        tops = event_data.get("top_cpu_processes") or data.get("top_cpu_processes") or []
+        if tops:
+            try:
+                from src.utils.cpu_top import format_top_cpu_lines
+            except ImportError:
+                from utils.cpu_top import format_top_cpu_lines  # type: ignore
+            top_text = format_top_cpu_lines(tops if isinstance(tops, list) else [])
+            if top_text:
+                content += top_text + "\n"
         return content
 
     def _build_cpu_usage_restored_content(self, event_data: Dict[str, Any]) -> str:
@@ -3319,7 +3466,7 @@ class MultiPlatformNotifier:
         message = self._build_message(event_type, event_data, timestamp, raw_log)
         return MultiPlatformMessage(title=message.title, content=message.content)
     
-    def send_system_notification(self, event_type: str, message: str, additional_info: Optional[Dict[str, Any]] = None):
+    def send_system_notification(self, event_type: str, message: str, additional_info: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         发送系统事件通知
         
@@ -3405,11 +3552,12 @@ class MultiPlatformNotifier:
             channel_results.append(cr)
             self.logger.debug("SMTP邮件系统通知: %s", cr)
         self._send_to_extra_channels(multi_msg, results, channel_results)
-        success_count = sum(1 for r in results if r)
-        fail_count = len(results) - success_count
+        success_count = sum(cr.get("success_count", int(bool(cr.get("success")))) for cr in channel_results)
+        fail_count = sum(cr.get("fail_count", int(not cr.get("success"))) for cr in channel_results)
         any_ok = bool(results and success_count > 0)
         if any_ok:
-            self.sent_events[event_fingerprint] = time.time()
+            with self._dedup_lock:
+                self.sent_events[event_fingerprint] = time.time()
             self._record_send_result(True)
             self.logger.info(f"系统事件通知发送成功: {event_type}")
         else:
@@ -3440,6 +3588,9 @@ class MultiPlatformNotifier:
         elif event_type == 'TEST_PUSH':
             # 测试推送：每次发送独立，不去重
             key = f"TEST_PUSH_{time.time()}"
+        elif event_type == 'DND_SUMMARY':
+            # 汇总正文和发送状态共用事件类型，但不能互相去重。
+            key = f"DND_SUMMARY_{int(time.time() / 60)}_{event_data.get('message', '')}"
         else:
             # 其他事件：按分钟去重
             minute_window = int(time.time() / 60)
@@ -3451,13 +3602,11 @@ class MultiPlatformNotifier:
     def cleanup_cache(self):
         """清理过期的缓存"""
         current_time = time.time()
-        expired_keys = [
-            key for key, ts in self.sent_events.items()
-            if current_time - ts > self.dedup_window * 2
-        ]
-        
-        for key in expired_keys:
-            del self.sent_events[key]
+        with self._dedup_lock:
+            expired_keys = [key for key, ts in self.sent_events.items()
+                            if current_time - ts > self.dedup_window * 2]
+            for key in expired_keys:
+                del self.sent_events[key]
         
         if expired_keys:
             self.logger.debug(f"清理了 {len(expired_keys)} 个过期缓存")
@@ -3506,24 +3655,22 @@ class MultiPlatformNotifier:
 
         self.logger.debug("多平台通知器已关闭")
 
+    def _take_disk_events(self, before_window=None):
+        pending = []
+        with self._cache_lock:
+            for event_type, cache in (("DiskWakeup", self.disk_wakeup_cache), ("DiskSpindown", self.disk_spindown_cache)):
+                for window in sorted(cache):
+                    if before_window is None or window < before_window:
+                        events = cache.pop(window)
+                        if events:
+                            pending.append((event_type, window, events))
+        return pending
+
     def _flush_pending_disk_events(self):
         """刷新所有待发送的磁盘事件"""
         try:
-            with self._cache_lock:
-                # 发送所有待发送的磁盘唤醒事件
-                for time_window, event_list in self.disk_wakeup_cache.items():
-                    if event_list:
-                        self.logger.info(f"刷新待发送的磁盘唤醒事件: {len(event_list)} 个")
-                        self._send_merged_disk_event('DiskWakeup', event_list, time_window)
-
-                # 发送所有待发送的磁盘休眠事件
-                for time_window, event_list in self.disk_spindown_cache.items():
-                    if event_list:
-                        self.logger.info(f"刷新待发送的磁盘休眠事件: {len(event_list)} 个")
-                        self._send_merged_disk_event('DiskSpindown', event_list, time_window)
-
-                # 清空缓存
-                self.disk_wakeup_cache.clear()
-                self.disk_spindown_cache.clear()
+            for event_type, window, events in self._take_disk_events():
+                self.logger.info("刷新待发送的磁盘事件: %s %s 个", event_type, len(events))
+                self._send_merged_disk_event(event_type, events, window)
         except Exception as e:
             self.logger.error(f"刷新待发送事件时出错: {e}", exc_info=True)

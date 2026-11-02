@@ -84,3 +84,9 @@ def delete_session(session_id: str, scope: Optional[str] = None) -> None:
         if entry is not None and (scope is None or entry["scope"] == scope):
             _sessions.pop(session_id, None)
 
+
+def delete_all_sessions() -> None:
+    """密码模式属于整个应用；切换时撤销直连和网关的全部旧会话。"""
+    with _sessions_lock:
+        _sessions.clear()
+

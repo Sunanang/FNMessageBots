@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from .models import JournalEntry
+from utils.notification_outbox import OutboxWriteError
 
 try:
     import docker  # type: ignore
@@ -366,6 +367,8 @@ class DockerEventsPoller:
             else:
                 handler(ed, entry)
             self._dedup_seen[dk] = int(time.time())
+        except OutboxWriteError:
+            raise
         except Exception as e:
             self.logger.error("处理 Docker 事件失败 %s: %s", et, e, exc_info=True)
 
@@ -414,8 +417,8 @@ class DockerEventsPoller:
                     if self._event_before_start_cutoff(ev):
                         self._advance_since_from_stream_event(ev)
                         continue
-                    self._advance_since_from_stream_event(ev)
                     self._handle_one(ev)
+                    self._advance_since_from_stream_event(ev)
                     self._prune_dedup()
                     self._events_since_dedup_flush += 1
                     if self._events_since_dedup_flush >= 50:

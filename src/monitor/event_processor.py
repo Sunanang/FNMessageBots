@@ -52,6 +52,9 @@ class EventProcessor:
             'SSH_AUTH_FAILED': self._handle_ssh_auth_failed,
             'SSH_LOGIN_SUCCESS': self._handle_ssh_login_success,
             'SSH_DISCONNECTED': self._handle_ssh_disconnected,
+            'SSH_ENABLED': lambda ed, e: self._handle_simple_notification('SSH_ENABLED', ed, e),
+            'SSH_DISABLED': lambda ed, e: self._handle_simple_notification('SSH_DISABLED', ed, e),
+            'SSH_OPEN_TIMEOUT': lambda ed, e: self._handle_simple_notification('SSH_OPEN_TIMEOUT', ed, e),
             'APP_CRASH': self._handle_app_crash,
             'APP_UPDATE_FAILED': self._handle_app_update_failed,
             'APP_START_FAILED_LOCAL_APP_RUN_EXCEPTION': self._handle_app_start_failed_local,
@@ -123,10 +126,16 @@ class EventProcessor:
             'MEDIA_USER_CREATED': lambda ed, e: self._handle_simple_notification('MEDIA_USER_CREATED', ed, e),
             'TRIM_RESOURCE_ADDED': lambda ed, e: self._handle_trim_library_db('TRIM_RESOURCE_ADDED', ed, e),
             'TRIM_SCRAPE_SUCCESS': lambda ed, e: self._handle_trim_library_db('TRIM_SCRAPE_SUCCESS', ed, e),
+            'MEDIA_LIBRARY_SUMMARY': lambda ed, e: self._handle_trim_library_db('MEDIA_LIBRARY_SUMMARY', ed, e),
             'PHOTO_SHARE_CREATED': lambda ed, e: self._handle_simple_notification('PHOTO_SHARE_CREATED', ed, e),
             'PHOTO_SHARE_EXPIRED': lambda ed, e: self._handle_simple_notification('PHOTO_SHARE_EXPIRED', ed, e),
             'PHOTO_DEVICE_REGISTERED': lambda ed, e: self._handle_simple_notification('PHOTO_DEVICE_REGISTERED', ed, e),
             'FACE_RECOGNITION_UPDATED': lambda ed, e: self._handle_simple_notification('FACE_RECOGNITION_UPDATED', ed, e),
+            'MUSIC_TRACK_ADDED': lambda ed, e: self._handle_simple_notification('MUSIC_TRACK_ADDED', ed, e),
+            'MUSIC_TRACK_REMOVED': lambda ed, e: self._handle_simple_notification('MUSIC_TRACK_REMOVED', ed, e),
+            'MUSIC_LIBRARY_SUMMARY': lambda ed, e: self._handle_simple_notification('MUSIC_LIBRARY_SUMMARY', ed, e),
+            'MUSIC_FAVORITED': lambda ed, e: self._handle_simple_notification('MUSIC_FAVORITED', ed, e),
+            'MUSIC_PLAYLIST_TRACK_ADDED': lambda ed, e: self._handle_simple_notification('MUSIC_PLAYLIST_TRACK_ADDED', ed, e),
         }
         
         # 磁盘事件合并缓存
@@ -169,6 +178,12 @@ class EventProcessor:
             parts.append(str(event_data.get('device_display'))[:60])
         if event_type == 'FACE_RECOGNITION_UPDATED' and event_data.get('task_log_id') is not None:
             parts.append(f"人脸任务#{event_data.get('task_log_id')}")
+        if event_data.get('title') and (
+            event_type.startswith('MUSIC_') or event_type == 'MUSIC_LIBRARY_SUMMARY'
+        ):
+            parts.append(str(event_data.get('title'))[:60])
+        if event_type == 'MUSIC_PLAYLIST_TRACK_ADDED' and event_data.get('playlist_name'):
+            parts.append(str(event_data.get('playlist_name'))[:40])
         if event_type == 'WAN_IP_CHANGED':
             old_ip = event_data.get('old_wan_ip') or event_data.get('previous_wan_ip')
             new_ip = event_data.get('new_wan_ip') or event_data.get('wan_ip')
@@ -197,9 +212,15 @@ class EventProcessor:
         raw_for_storage: List[Dict[str, Any]] = []
         source_keys: List[str] = []
 
+        # 同一批次内 CPU 告警共用一次 Top3 采样，避免 N 次阻塞
+        cpu_top_cache: Dict[str, Any] = {}
         for item in batch_events:
             event_type = str(item.get("event_type") or "unknown")
             event_data = item.get("event_data") or {}
+            if event_type == "CPU_USAGE_ALARM":
+                event_data = self._enrich_cpu_usage_alarm_event_data(
+                    event_data, shared_cache=cpu_top_cache
+                )
             entry = item.get("entry")
             source = str(item.get("source") or event_data.get("_source") or "db")
             source_cursor = str(
@@ -252,13 +273,13 @@ class EventProcessor:
             summary_event_data["_source_key"] = hashlib.md5(source_sig.encode()).hexdigest()
         raw_log = json.dumps(raw_for_storage, ensure_ascii=False)[:6000]
         self.logger.info("轮询批量汇总推送：count=%s, types=%s", len(batch_events), len(by_type))
-        self.notifier.send_notification(
+        result = self.notifier.send_notification(
             event_type='POLL_BATCH_SUMMARY',
             event_data=summary_event_data,
             raw_log=raw_log,
             timestamp=timestamp
         )
-        return True
+        return result is not False and getattr(result, "success", None) is not False
 
     def _send_ssh_notification(self, event_type: str, event_data: Dict[str, Any], entry: JournalEntry):
         """发送SSH相关通知并存储日志"""
@@ -654,25 +675,27 @@ class EventProcessor:
         """trimmedia.db / trimactivity.db 轮询产生的影视库事件。"""
         raw_log = getattr(entry, 'raw_data', '{}')
         timestamp = getattr(entry, 'timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-        self.notifier.send_notification(
+        result = self.notifier.send_notification(
             event_type=event_type,
             event_data=event_data,
             raw_log=raw_log,
             timestamp=timestamp
         )
         self._store_notification_log(event_type, event_data, raw_log, entry, source='trim_media_db')
+        return result
 
     def _handle_simple_notification(self, event_type: str, event_data: Dict[str, Any], entry: JournalEntry):
         """可选事件的通用处理：解析 parameter 后直接推送，无额外逻辑。"""
         timestamp = getattr(entry, 'timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
         raw_log = getattr(entry, 'raw_data', '{}')
-        self.notifier.send_notification(
+        result = self.notifier.send_notification(
             event_type=event_type,
             event_data=event_data,
             raw_log=raw_log,
             timestamp=timestamp
         )
         self._store_notification_log(event_type, event_data, raw_log, entry, source='db')
+        return result
 
     def _handle_docker_notification(self, event_type: str, event_data: Dict[str, Any], entry: JournalEntry):
         """Docker Engine 容器事件：推送并写入推送日志（来源 docker）。"""
@@ -777,6 +800,39 @@ class EventProcessor:
         )
         self._store_notification_log('SCHEDULER_TASK_CONDITION_FAILED', event_data, raw_log, entry, source='scheduler_db')
 
+    def _enrich_cpu_usage_alarm_event_data(
+        self,
+        event_data: Dict[str, Any],
+        shared_cache: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """为 CPU 告警补采 Top3；失败静默。shared_cache 用于批量场景复用同一次采样。"""
+        try:
+            tops: Optional[List[Dict[str, Any]]] = None
+            if shared_cache is not None and "tops" in shared_cache:
+                tops = shared_cache.get("tops")  # type: ignore[assignment]
+            else:
+                try:
+                    from src.utils.cpu_top import sample_top_cpu_processes
+                except ImportError:
+                    from utils.cpu_top import sample_top_cpu_processes  # type: ignore
+                tops = sample_top_cpu_processes()
+                if shared_cache is not None:
+                    shared_cache["tops"] = tops
+            if tops:
+                event_data = dict(event_data or {})
+                event_data["top_cpu_processes"] = tops
+                self.logger.info(
+                    "CPU告警 Top3: %s",
+                    ", ".join(
+                        f"{p.get('name')}={p.get('cpu_percent')}%" for p in tops
+                    ),
+                )
+        except Exception as exc:
+            self.logger.debug("CPU Top3 采样跳过: %s", exc)
+            if shared_cache is not None and "tops" not in shared_cache:
+                shared_cache["tops"] = []
+        return event_data
+
     def _handle_cpu_usage_alarm(self, event_data: Dict[str, Any], entry: JournalEntry):
         """处理 CPU 使用率告警（parameter 含 data.THRESHOLD，如 {"from":"trim.resource-manager","eventId":"CPU_USAGE_ALARM","data":{"THRESHOLD":90},"datetime":...}）"""
         data = event_data.get('data', {})
@@ -784,6 +840,7 @@ class EventProcessor:
         timestamp = getattr(entry, 'timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
         self.logger.warning(f"CPU使用率告警: 超过 {threshold}%")
         raw_log = getattr(entry, 'raw_data', '{}')
+        event_data = self._enrich_cpu_usage_alarm_event_data(event_data)
         self.notifier.send_notification(
             event_type='CPU_USAGE_ALARM',
             event_data=event_data,

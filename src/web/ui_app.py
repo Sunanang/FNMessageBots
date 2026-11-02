@@ -32,7 +32,8 @@ from web.auth_service import PASSWORD_MIN_LENGTH
 from web.auth_service import apply_new_password as _apply_new_password
 from web.auth_service import get_password_config as _get_password_config
 from web.auth_service import has_password_set as _has_password_set_fn
-from web.auth_service import verify_password as _verify_password
+from web.auth_service import normalize_password as _normalize_password
+from web.auth_service import password_matches as _password_matches
 from web.api_helpers import build_notifier_from_raw as _build_notifier_from_raw
 from web.api_helpers import parse_success_filter as _parse_success_filter
 from web.app_paths import BASE_DIR
@@ -75,12 +76,14 @@ from web.session_service import create_session as _create_session
 from web.session_service import touch_session as _touch_session
 from web.session_service import session_remaining_seconds as _session_remaining_seconds
 from web.session_service import delete_session as _delete_session
+from web.session_service import delete_all_sessions as _delete_all_sessions
 from web.access_diagnostics import collect_access_warnings as _collect_external_db_access_warnings
 from web.access_diagnostics import warning_messages
 
 # 配置页密码：会话空闲超时（秒），超时后需重新输入密码
 SESSION_IDLE_SECONDS = 15 * 60
 AUTH_COOKIE_NAME = "fnmb_session"
+AUTH_SESSION_HEADER = "X-Fnmb-Session"
 _TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
 _config_lock = threading.RLock()
 
@@ -117,14 +120,43 @@ def _auth_cookie_kwargs() -> dict:
     }
 
 
+def _auth_session_payload(message: str, session_id: str) -> dict:
+    """登录/设密成功后把会话字段一并返回，避免手机端再等一次 status 才跳转。"""
+    return {
+        "ok": True,
+        "message": message,
+        "authenticated": True,
+        "need_login": False,
+        "need_setup": False,
+        "password_enabled": _password_enabled(),
+        "idle_seconds": SESSION_IDLE_SECONDS,
+        "remaining_seconds": float(SESSION_IDLE_SECONDS),
+        # 网关/WebView 可能吃掉 Set-Cookie；前端用 sessionStorage + 请求头续上会话。
+        "session_token": session_id,
+    }
+
+
 def _has_password_set() -> bool:
     return _has_password_set_fn(_load_raw_config)
 
 
+def _password_enabled() -> bool:
+    """默认验证密码；仅显式配置关闭时免登录，配置损坏时保持验证。"""
+    if _current_config_load_error():
+        return True
+    return as_bool(_load_raw_config().get("web_password_enabled"), True)
+
+
 def _get_session_id_from_cookie() -> str:
+    """兼容旧名：Cookie 或 X-Fnmb-Session 中的有效会话。"""
+    candidates = []
+    header = (request.headers.get(AUTH_SESSION_HEADER) or "").strip()
+    if header:
+        candidates.append(header)
     # 浏览器可能同时持有旧根路径和网关路径的同名 Cookie；按服务端作用域选有效会话。
-    for sid in request.cookies.getlist(AUTH_COOKIE_NAME):
-        if _session_remaining_seconds(sid, SESSION_IDLE_SECONDS, scope=_auth_cookie_path()) > 0:
+    candidates.extend(request.cookies.getlist(AUTH_COOKIE_NAME))
+    for sid in candidates:
+        if sid and _session_remaining_seconds(sid, SESSION_IDLE_SECONDS, scope=_auth_cookie_path()) > 0:
             return sid
     return ""
 
@@ -138,10 +170,12 @@ def _gateway_identity():
 
 
 def _is_authenticated() -> bool:
-    """两版均要求应用密码会话；网关管理员身份不能代替应用登录。"""
+    """密码开关对两版均生效；网关非管理员始终拒绝访问。"""
     gw = _gateway_identity()
     if gw is not None and not gw["is_admin"]:
         return False
+    if not _password_enabled():
+        return True
     return _session_remaining_seconds(_get_session_id_from_cookie(), SESSION_IDLE_SECONDS, scope=_auth_cookie_path()) > 0
 
 
@@ -161,7 +195,9 @@ def _client_key() -> str:
 @_config_transaction
 def _apply_initial_password_from_env() -> None:
     """FNMB_WEB_PASSWORD：未设密码时用作初始密码（手装 Docker 可在 compose 中预置）。"""
-    pw = (os.getenv("FNMB_WEB_PASSWORD") or "").strip()
+    if _current_config_load_error():
+        return
+    pw = _normalize_password(os.getenv("FNMB_WEB_PASSWORD") or "")
     if not pw or _has_password_set():
         return
     if len(pw) < PASSWORD_MIN_LENGTH:
@@ -207,6 +243,7 @@ def _events_catalog_bundle():
         trim_activity_db_path=(raw.get("trim_activity_db_path") or "").strip(),
         photo_db_path=(raw.get("photo_db_path") or "").strip(),
         scheduler_db_path=(raw.get("scheduler_db_path") or "").strip(),
+        music_db_path=(raw.get("music_db_path") or "").strip(),
         titles=MultiPlatformNotifier.EVENT_TITLES,
         notes=MultiPlatformNotifier.EVENT_NOTES,
     )
@@ -249,7 +286,7 @@ def create_app(on_config_saved=None) -> Flask:
         resp.headers.setdefault("X-Robots-Tag", "noindex, nofollow, noarchive")
         if request.path == "/" or request.path.startswith("/api/") or resp.mimetype == "text/html":
             resp.headers["Cache-Control"] = "no-store"
-        if getattr(g, "refresh_auth_cookie", False) and _is_authenticated():
+        if getattr(g, "refresh_auth_cookie", False) and _password_enabled() and _is_authenticated():
             resp.set_cookie(AUTH_COOKIE_NAME, _get_session_id_from_cookie(), **_auth_cookie_kwargs())
         return resp
 
@@ -294,6 +331,8 @@ def create_app(on_config_saved=None) -> Flask:
         # 写接口只接受 JSON，避免跨站表单以 text/plain 绕过预检
         if request.method == "POST" and not request.is_json:
             return jsonify({"ok": False, "message": "请求须为 application/json。"}), 415
+        if request.method == "POST" and not isinstance(request.get_json(silent=True), dict):
+            return jsonify({"ok": False, "message": "请求内容必须为 JSON 对象。"}), 400
         path = request.path
         if path in PUBLIC_PATHS or path.startswith(PUBLIC_PREFIXES):
             return None
@@ -302,7 +341,7 @@ def create_app(on_config_saved=None) -> Flask:
             return jsonify(_config_load_error_payload(config_error)), 500
         if _is_authenticated():
             # 写操作代表用户交互；统计、配置读取和身份轮询均不续期。
-            if request.method == "POST" and not _touch_session(_get_session_id_from_cookie(), SESSION_IDLE_SECONDS, scope=_auth_cookie_path()):
+            if request.method == "POST" and _password_enabled() and not _touch_session(_get_session_id_from_cookie(), SESSION_IDLE_SECONDS, scope=_auth_cookie_path()):
                 return jsonify({"ok": False, "message": "会话已过期，请重新输入密码。"}), 401
             if request.method == "POST":
                 g.refresh_auth_cookie = True
@@ -342,14 +381,17 @@ def create_app(on_config_saved=None) -> Flask:
             "authenticated": authenticated,
             "via_gateway": _gateway_identity() is not None,
             "password_min_length": PASSWORD_MIN_LENGTH,
+            "password_enabled": _password_enabled(),
             "idle_seconds": SESSION_IDLE_SECONDS,
-            "remaining_seconds": _session_remaining_seconds(_get_session_id_from_cookie(), SESSION_IDLE_SECONDS, scope=_auth_cookie_path()),
+            "remaining_seconds": (_session_remaining_seconds(_get_session_id_from_cookie(), SESSION_IDLE_SECONDS, scope=_auth_cookie_path())
+                                  if _password_enabled() else None),
         })
 
     @app.post("/api/auth/activity")
     def auth_activity():
         """前端仅在真实用户交互后调用；鉴权钩子已刷新活跃时间。"""
         return jsonify({"ok": True, "authenticated": True, "idle_seconds": SESSION_IDLE_SECONDS,
+                        "password_enabled": _password_enabled(),
                         "remaining_seconds": _session_remaining_seconds(_get_session_id_from_cookie(), SESSION_IDLE_SECONDS, scope=_auth_cookie_path())})
 
     @app.post("/api/auth/logout")
@@ -384,8 +426,8 @@ def create_app(on_config_saved=None) -> Flask:
                     "ok": False,
                     "message": "初始化码错误。请在应用运行日志或配置目录的 .setup_code 文件中查看。",
                 }), 403
-        p1 = (payload.get("password") or "").strip()
-        p2 = (payload.get("password_confirm") or "").strip()
+        p1 = _normalize_password(payload.get("password") or "")
+        p2 = _normalize_password(payload.get("password_confirm") or "")
         if not p1:
             return jsonify({"ok": False, "message": "请输入密码。"}), 400
         if len(p1) < PASSWORD_MIN_LENGTH:
@@ -400,7 +442,7 @@ def create_app(on_config_saved=None) -> Flask:
         _login_limiter.reset(key)
         _delete_session(_get_session_id_from_cookie(), scope=_auth_cookie_path())
         session_id = _create_session(SESSION_IDLE_SECONDS, scope=_auth_cookie_path())
-        resp = jsonify({"ok": True, "message": "密码设置成功。"})
+        resp = jsonify(_auth_session_payload("密码设置成功。", session_id))
         resp.set_cookie(AUTH_COOKIE_NAME, session_id, **_auth_cookie_kwargs())
         return resp
 
@@ -417,20 +459,20 @@ def create_app(on_config_saved=None) -> Flask:
         if wait:
             return jsonify({"ok": False, "message": f"密码错误次数过多，请 {wait} 秒后再试。"}), 429
         payload = request.get_json(silent=True) or {}
-        password = (payload.get("password") or "").strip()
-        if not password:
+        password = payload.get("password")
+        if not isinstance(password, str) or not _normalize_password(password):
             return jsonify({"ok": False, "message": "请输入密码。"}), 400
         raw = _load_raw_config()
         salt, stored_hash = _get_password_config(raw)
         if not salt or not stored_hash:
             return jsonify({"ok": False, "message": "密码配置无效，请重新设置密码。"}), 400
-        if not _verify_password(password, salt, stored_hash):
+        if not _password_matches(password, salt, stored_hash):
             _login_limiter.record_failure(key)
             return jsonify({"ok": False, "message": "密码错误。"}), 401
         _login_limiter.reset(key)
         _delete_session(_get_session_id_from_cookie(), scope=_auth_cookie_path())
         session_id = _create_session(SESSION_IDLE_SECONDS, scope=_auth_cookie_path())
-        resp = jsonify({"ok": True, "message": "登录成功。"})
+        resp = jsonify(_auth_session_payload("登录成功。", session_id))
         resp.set_cookie(AUTH_COOKIE_NAME, session_id, **_auth_cookie_kwargs())
         return resp
 
@@ -477,10 +519,27 @@ def create_app(on_config_saved=None) -> Flask:
         except Exception:
             _cron = "0 12 * * *"
 
+        try:
+            _ssh_remind = max(0, min(int(raw.get("ssh_open_remind_minutes", 30)), 10080))
+        except (TypeError, ValueError):
+            _ssh_remind = 30
+        # 旧版用分钟>0 开关：未迁移时把 SSH_OPEN_TIMEOUT 并入勾选展示（与 Config 运行时一致）
+        if not as_bool(raw.get("ssh_open_timeout_by_event"), False):
+            monitor_events = list(monitor_events or [])
+            if _ssh_remind > 0:
+                if "SSH_OPEN_TIMEOUT" not in monitor_events and "SSH_OPEN_TIMEOUT" in valid_event_ids:
+                    monitor_events.append("SSH_OPEN_TIMEOUT")
+            else:
+                monitor_events = [e for e in monitor_events if e != "SSH_OPEN_TIMEOUT"]
+                _ssh_remind = 30
+        elif _ssh_remind < 1:
+            _ssh_remind = 30
+
         data = {
             "title": "FnMessageBot",
             "subtitle": "飞牛日志消息推送机器人",
-            "version": "2.6.0",
+            "version": "2.7.4",
+            "web_password_enabled": _password_enabled(),
             "events_by_category": events_by_category,
             "third_party_events_by_category": third_party_events_by_category,
             "selected_events": monitor_events,
@@ -495,6 +554,8 @@ def create_app(on_config_saved=None) -> Flask:
             "poll_batch_summary_enabled": as_bool(raw.get("poll_batch_summary_enabled", False), False),
             "minimal_push_enabled": as_bool(raw.get("minimal_push_enabled", False), False),
             "ssh_ignore_loopback": as_bool(raw.get("ssh_ignore_loopback", False), False),
+            "ssh_ignore_lan": as_bool(raw.get("ssh_ignore_lan", False), False),
+            "ssh_open_remind_minutes": _ssh_remind,
             "nas_patrol_enabled": as_bool(raw.get("nas_patrol_enabled", False), False),
             "nas_patrol_cron": _cron,
             "channel_options": CHANNEL_OPTIONS,
@@ -508,6 +569,19 @@ def create_app(on_config_saved=None) -> Flask:
     @_config_transaction
     def save_config():
         payload = request.get_json(silent=True) or {}
+
+        events = payload.get("events") or []
+        channels = payload.get("channels") or []
+        if not isinstance(events, list) or any(not isinstance(item, str) for item in events):
+            return jsonify({"ok": False, "message": "事件列表必须为字符串数组。"}), 400
+        if not isinstance(channels, list) or any(
+            not isinstance(item, dict) or not isinstance(item.get("type"), str)
+            or not isinstance(item.get("url"), str) for item in channels
+        ):
+            return jsonify({"ok": False, "message": "推送渠道必须为包含类型和地址的对象数组。"}), 400
+        for key in ("dnd_start_time", "dnd_end_time", "nas_patrol_cron", "bark_icon"):
+            if key in payload and not isinstance(payload[key], str):
+                return jsonify({"ok": False, "message": f"{key} 必须为字符串。"}), 400
 
         _, _, valid_event_ids, _ = _events_catalog_bundle()
         events = payload.get("events") or []
@@ -526,6 +600,11 @@ def create_app(on_config_saved=None) -> Flask:
         poll_batch_summary_enabled = as_bool(payload.get("poll_batch_summary_enabled", False), False)
         minimal_push_enabled = as_bool(payload.get("minimal_push_enabled", False), False)
         ssh_ignore_loopback = as_bool(payload.get("ssh_ignore_loopback", False), False)
+        ssh_ignore_lan = as_bool(payload.get("ssh_ignore_lan", False), False)
+        try:
+            ssh_open_remind_minutes = max(1, min(int(payload.get("ssh_open_remind_minutes", 30) or 30), 10080))
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "message": "SSH 开启超时分钟数必须为 1–10080 的整数。"}), 400
         nas_patrol_enabled = as_bool(payload.get("nas_patrol_enabled", False), False)
         nas_patrol_cron = (payload.get("nas_patrol_cron") or "").strip()
         title_prefix = _title_prefix_from_dict(payload)
@@ -643,6 +722,10 @@ def create_app(on_config_saved=None) -> Flask:
         flat_keys = _sync_channel_flat_keys(channels)
 
         raw = _load_raw_config()
+        previous_password_enabled = _password_enabled()
+        password_enabled = payload.get("web_password_enabled", previous_password_enabled)
+        if not isinstance(password_enabled, bool):
+            return jsonify({"ok": False, "message": "访问密码开关必须为布尔值。"}), 400
         raw.update(
             {
                 **flat_keys,
@@ -656,10 +739,14 @@ def create_app(on_config_saved=None) -> Flask:
                 "poll_batch_summary_enabled": poll_batch_summary_enabled,
                 "minimal_push_enabled": minimal_push_enabled,
                 "ssh_ignore_loopback": ssh_ignore_loopback,
+                "ssh_ignore_lan": ssh_ignore_lan,
+                "ssh_open_remind_minutes": ssh_open_remind_minutes,
+                "ssh_open_timeout_by_event": True,
                 "nas_patrol_enabled": nas_patrol_enabled,
                 "nas_patrol_cron": nas_patrol_cron,
                 "title_prefix": title_prefix,
                 "bark_icon": bark_icon,
+                "web_password_enabled": password_enabled,
             }
         )
 
@@ -667,6 +754,10 @@ def create_app(on_config_saved=None) -> Flask:
             _save_raw_config(raw)
         except Exception as e:
             return jsonify({"ok": False, "message": f"配置写入失败（{e}），请检查 config 目录是否可写。"}), 500
+
+        if password_enabled != previous_password_enabled:
+            _delete_all_sessions()
+            g.refresh_auth_cookie = False
 
         db_access_warnings = _collect_external_db_access_warnings(raw, events)
         if callable(on_config_saved):
@@ -687,6 +778,7 @@ def create_app(on_config_saved=None) -> Flask:
 
     @app.post("/api/test")
     def test_push():
+        notifier = None
         try:
             payload = request.get_json(silent=True) or {}
             content = (payload.get("content") or "").strip()
@@ -701,15 +793,22 @@ def create_app(on_config_saved=None) -> Flask:
                 content,
                 {
                     "hostname": socket.gethostname(),
-                    "version": "2.6.0",
+                    "version": "2.7.4",
                 },
             )
             ok = out.get("success", False) if isinstance(out, dict) else bool(out)
             channel_results = out.get("channel_results") if isinstance(out, dict) else None
+            channel_results = channel_results if isinstance(channel_results, list) else []
             if ok:
+                fail_count = out.get("fail_count", 0) if isinstance(out, dict) else 0
+                failures = [f"{cr.get('channel') or '渠道'}: {cr.get('error') or '发送失败'}"
+                            for cr in channel_results if isinstance(cr, dict) and (cr.get("error") or not cr.get("success"))]
+                partial = bool(fail_count or failures)
                 return jsonify({
                     "ok": True,
-                    "message": "测试消息已发送，请检查各渠道是否收到。",
+                    "partial": partial,
+                    "message": ("测试消息部分发送成功，部分目标失败。" + "；".join(failures)
+                                if partial else "测试消息已发送，请检查各渠道是否收到。"),
                     "channel_results": channel_results or [],
                 })
             # 拼出各渠道失败原因，便于排查魔法推送等自建服务
@@ -732,6 +831,12 @@ def create_app(on_config_saved=None) -> Flask:
             }), 500
         except Exception as e:
             return jsonify({"ok": False, "message": f"测试发送异常：{e}"}), 500
+        finally:
+            if notifier is not None:
+                try:
+                    notifier.close()
+                except Exception:
+                    app.logger.warning("关闭测试推送通知器失败", exc_info=True)
 
     @app.post("/api/nas-patrol/run")
     def run_nas_patrol():

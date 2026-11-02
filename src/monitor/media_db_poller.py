@@ -1,15 +1,18 @@
 """
-影视库 trimmedia.db 轮询：资源入库、资源删除、刮削完成（fetch_status 变为 1）。
+影视库 trimmedia.db 轮询：入库与刮削完成累计至连续 60 秒静默后统一通知。
 """
 
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import sqlite3
 import threading
 import time
+import tempfile
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
@@ -17,6 +20,7 @@ from zoneinfo import ZoneInfo
 
 from .models import JournalEntry
 from .sqlite_uri import connect_readonly_with_fallback
+from .media_summary import MEDIA_DEBOUNCE_SEC, MEDIA_SUMMARY_EVENT, build_media_summary
 
 TRIM_RESOURCE_ADDED = "TRIM_RESOURCE_ADDED"
 TRIM_SCRAPE_SUCCESS = "TRIM_SCRAPE_SUCCESS"
@@ -72,6 +76,9 @@ class MediaDBPoller:
         self.cursor_dir.mkdir(parents=True, exist_ok=True)
         self._dedup_seen: Dict[str, int] = {}
         self._open_db_error_count = 0
+        self._parent_cache: Dict[str, Dict[str, Any]] = {}
+        self._state_lock = threading.RLock()
+        self._active_state: Optional[Dict[str, Any]] = None
 
     def add_handler(self, event_type: str, handler: Callable) -> None:
         self.event_handlers[event_type] = handler
@@ -87,6 +94,13 @@ class MediaDBPoller:
     ) -> None:
         if monitor_events is not None:
             self.monitor_events = set(monitor_events)
+            if not (_TRIM_EVENTS & self.monitor_events):
+                with self._state_lock:
+                    if self._active_state is not None:
+                        self._active_state["media_pending"] = {}
+                    saved = self._load_state()
+                    saved["media_pending"] = {}
+                    self._save_state(saved)
         if poll_interval is not None:
             self.poll_interval = max(1, int(poll_interval))
         if db_path is not None:
@@ -102,13 +116,14 @@ class MediaDBPoller:
 
     def _load_state(self) -> Dict[str, Any]:
         default: Dict[str, Any] = {
-            "version": 1,
+            "version": 2,
             "initialized": False,
             "last_item_create_ms": 0,
             "last_item_update_ms": 0,
             "last_media_ts_ms": 0,
             "last_media_delete_ms": 0,
             "fetch_by_guid": {},
+            "media_pending": {},
         }
         try:
             if self._state_file.exists():
@@ -123,16 +138,37 @@ class MediaDBPoller:
             self.logger.warning("读取影视库轮询状态失败: %s", e)
         return default
 
-    def _save_state(self, state: Dict[str, Any]) -> None:
+    def _save_state(self, state: Dict[str, Any]) -> bool:
+        with self._state_lock:
+            if not (_TRIM_EVENTS & self.monitor_events):
+                state["media_pending"] = {}
+            return self._write_state(state)
+
+    def _write_state(self, state: Dict[str, Any]) -> bool:
+        temporary = None
         try:
+            state["version"] = 2
             fb = state.get("fetch_by_guid")
             if isinstance(fb, dict) and len(fb) > 80000:
                 # 防止状态无限膨胀：仅保留最近有变更的条目由 fetch 快照自然收缩困难，故截断
                 items = list(fb.items())[-60000:]
                 state["fetch_by_guid"] = dict(items)
-            self._state_file.write_text(json.dumps(state, ensure_ascii=False))
+            fd, temporary = tempfile.mkstemp(prefix=".media-state-", dir=str(self.cursor_dir))
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(state, stream, ensure_ascii=False)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self._state_file)
+            return True
         except Exception as e:
             self.logger.warning("写入影视库轮询状态失败: %s", e)
+            return False
+        finally:
+            if temporary and os.path.exists(temporary):
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
 
     def _load_dedup(self) -> None:
         try:
@@ -179,22 +215,23 @@ class MediaDBPoller:
         event_data: Dict[str, Any],
         raw_obj: Dict[str, Any],
         ts_field_ms: Optional[int],
-    ) -> None:
-        if self.monitor_events and event_type not in self.monitor_events:
-            return
-        fp = self._fingerprint(event_type, json.dumps(raw_obj, sort_keys=True, ensure_ascii=False)[:500])
+    ) -> bool:
+        if event_type != MEDIA_SUMMARY_EVENT and self.monitor_events and event_type not in self.monitor_events:
+            return False
+        key = event_data.get("batch_id") or json.dumps(raw_obj, sort_keys=True, ensure_ascii=False)
+        fp = self._fingerprint(event_type, hashlib.sha256(str(key).encode()).hexdigest())
         now = int(time.time())
         if fp in self._dedup_seen:
-            return
+            return True
         handler = self.event_handlers.get(event_type)
         if not handler:
-            return
+            return False
         event_data = dict(event_data)
         event_data.setdefault("_source", "trim_media_db")
         event_data.setdefault("_source_cursor", fp)
         event_data.setdefault("_source_event_id", event_type)
         raw_log = json.dumps(raw_obj, ensure_ascii=False)
-        ts = _ms_to_str(ts_field_ms)
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S") if event_type == MEDIA_SUMMARY_EVENT else _ms_to_str(ts_field_ms)
         entry = JournalEntry(
             cursor=f"trimmedia-{event_type}-{now}-{hash(fp) & 0xFFFFFFFF:x}",
             timestamp=ts,
@@ -207,7 +244,7 @@ class MediaDBPoller:
             original_line=raw_log,
         )
         try:
-            if self.poll_batch_summary_enabled and self.summary_batch_enqueue:
+            if event_type != MEDIA_SUMMARY_EVENT and self.poll_batch_summary_enabled and self.summary_batch_enqueue:
                 rid = hash(fp) & 0x7FFFFFFF
                 self.summary_batch_enqueue(
                     [
@@ -223,10 +260,89 @@ class MediaDBPoller:
                     ]
                 )
             else:
-                handler(event_data, entry)
+                result = handler(event_data, entry)
+                if result is False or getattr(result, "success", None) is False:
+                    return False
             self._dedup_seen[fp] = now
+            return True
         except Exception as e:
             self.logger.error("处理影视库事件失败 %s: %s", event_type, e, exc_info=True)
+            return False
+
+    def _accumulate(self, conn: sqlite3.Connection, state: Dict[str, Any], event_type: str,
+                    data: Dict[str, Any], raw: Dict[str, Any]) -> None:
+        if event_type not in self.monitor_events:
+            return
+        fingerprint = self._fingerprint(event_type, hashlib.sha256(
+            json.dumps(raw, sort_keys=True, ensure_ascii=False).encode()).hexdigest())
+        if fingerprint in self._dedup_seen:
+            return
+        now = time.time()
+        pending = state.setdefault("media_pending", {})
+        if not pending:
+            pending.update(batch_id=uuid.uuid4().hex, first_activity_ts=now, resources={})
+        pending["last_activity_ts"] = now
+        guid = data.get("guid") or data.get("item_guid")
+        path = str(data.get("path") or "")
+        key = "item:" + str(guid) if guid else "path:" + (path or str(data.get("media_guid") or fingerprint))
+        resources = pending["resources"]
+        # 媒体文件先于条目可见时，按路径归并先前的临时记录。
+        old = resources.pop("path:" + path, {}) if guid and path else {}
+        info = resources.setdefault(key, old)
+        stages = set(info.get("stages", []))
+        stages.add(event_type)
+        info.update(resource_key=key, stages=sorted(stages))
+        for field in ("title", "item_type", "season_number", "episode_number"):
+            if data.get(field) is not None and data.get(field) != "":
+                info[field] = data[field]
+        if path:
+            info["filename"] = path.rsplit("/", 1)[-1][:240]
+        parent = data.get("parent_guid")
+        visited = set()
+        for _ in range(4):
+            if not parent or parent in visited:
+                break
+            visited.add(parent)
+            if parent not in self._parent_cache:
+                row = conn.execute("SELECT guid,type,title,parent_guid,season_number FROM item WHERE guid=?", (parent,)).fetchone()
+                self._parent_cache[parent] = dict(row) if row else {}
+            ancestor = self._parent_cache[parent]
+            if ancestor.get("type") == "TV":
+                info.update(series_guid=str(ancestor["guid"]), series_title=ancestor.get("title") or "")
+                break
+            if info.get("season_number") is None and ancestor.get("season_number") is not None:
+                info["season_number"] = ancestor["season_number"]
+            parent = ancestor.get("parent_guid")
+        self._dedup_seen[fingerprint] = int(now)
+
+    def _flush_media_pending(self, state: Dict[str, Any]) -> None:
+        pending = state.get("media_pending") or {}
+        if not pending.get("resources"):
+            return
+        # 保存过程中取消勾选的阶段不能在稍后误推；剩余阶段沿用同一批次。
+        for key, row in list(pending["resources"].items()):
+            row["stages"] = [stage for stage in row.get("stages", []) if stage in self.monitor_events]
+            if not row["stages"]:
+                del pending["resources"][key]
+        if not pending["resources"]:
+            state["media_pending"] = {}
+            self._save_state(state)
+            return
+        if time.time() - pending["last_activity_ts"] < MEDIA_DEBOUNCE_SEC:
+            return
+        if pending.get("last_attempt_ts") and time.time() - pending["last_attempt_ts"] < MEDIA_DEBOUNCE_SEC:
+            return
+        data = build_media_summary(pending)
+        pending["last_attempt_ts"] = time.time()
+        if self._emit(MEDIA_SUMMARY_EVENT, data, data, None):
+            # 先保存已投递批次的去重记录，再清除持久化缓冲。
+            self._save_dedup()
+            state["media_pending"] = {}
+            self._save_state(state)
+            self.logger.info("影视本轮汇总已处理：入库 %s 项，刮削完成 %s 项", data["by_type"].get(TRIM_RESOURCE_ADDED, 0),
+                             data["by_type"].get(TRIM_SCRAPE_SUCCESS, 0))
+        else:
+            self.logger.warning("影视汇总尚未投递，保留批次 %s，至少 %s 秒后重试", pending["batch_id"], MEDIA_DEBOUNCE_SEC)
 
     def _baseline(self, conn: sqlite3.Connection, state: Dict[str, Any]) -> None:
         row = conn.execute(
@@ -263,6 +379,7 @@ class MediaDBPoller:
         )
 
     def _poll_once(self, state: Dict[str, Any]) -> None:
+        self._active_state = state
         if not self.db_path or not os.path.exists(self.db_path):
             return
         try:
@@ -284,9 +401,16 @@ class MediaDBPoller:
             return
 
         try:
+            db_identity = os.path.realpath(self.db_path)
+            if state.get("db_path") and state["db_path"] != db_identity:
+                state.update(initialized=False, media_pending={})
+                self._dedup_seen.clear()
+            state["db_path"] = db_identity
+            self._parent_cache = {}
             if not state.get("initialized"):
                 self._baseline(conn, state)
-                self._save_state(state)
+                if self._save_state(state):
+                    self._flush_media_pending(state)
                 return
 
             lic = int(state.get("last_item_create_ms") or 0)
@@ -311,10 +435,10 @@ class MediaDBPoller:
             for r in conn.execute(q_add, (lic,)):
                 d = dict(r)
                 itype = (d.get("type") or "").strip()
-                if itype not in _ADD_TYPES:
-                    continue
                 ct = int(d.get("create_time") or 0)
                 max_ic = max(max_ic, ct)
+                if itype not in _ADD_TYPES:
+                    continue
                 ev = {
                     "title": (d.get("title") or "").strip(),
                     "item_type": itype,
@@ -329,12 +453,17 @@ class MediaDBPoller:
                 }
                 g = d.get("guid")
                 if g:
+                    newly_scraped = str(g) not in fb and int(d.get("fetch_status") or 0) == 1 and itype in _SCRAPE_TYPES
                     fb[str(g)] = int(d.get("fetch_status") or 0)
-                self._emit(TRIM_RESOURCE_ADDED, ev, d, ct)
+                else:
+                    newly_scraped = False
+                self._accumulate(conn, state, TRIM_RESOURCE_ADDED, ev, d)
+                if newly_scraped:
+                    self._accumulate(conn, state, TRIM_SCRAPE_SUCCESS, ev, d)
 
             # 2) fetch_status 0 -> 1（刮削成功）
             q_up = """
-            SELECT guid, type, title, path, season_number, episode_number, tmdb_id,
+            SELECT guid, type, title, path, parent_guid, season_number, episode_number, tmdb_id,
                    fetch_status, create_time, update_time, release_date, first_air_date, air_date, runtime, overview
             FROM item
             WHERE update_time > ?
@@ -367,6 +496,7 @@ class MediaDBPoller:
                         "title": (d.get("title") or "").strip(),
                         "item_type": itype,
                         "guid": g,
+                        "parent_guid": d.get("parent_guid"),
                         "season_number": d.get("season_number"),
                         "episode_number": d.get("episode_number"),
                         "tmdb_id": d.get("tmdb_id"),
@@ -375,17 +505,16 @@ class MediaDBPoller:
                         "overview": (d.get("overview") or "").strip(),
                         "message": f"刮削完成: {itype}「{(d.get('title') or '').strip() or g}」",
                     }
-                    self._emit(TRIM_SCRAPE_SUCCESS, ev, d, ut)
+                    self._accumulate(conn, state, TRIM_SCRAPE_SUCCESS, ev, d)
 
             # 3) 媒体文件关联（入库）
             q_media = """
             SELECT m.guid AS media_guid, m.item_guid, m.path, m.size, m.create_time, m.update_time,
-                   i.type AS item_type, i.title AS item_title, i.season_number, i.episode_number
+                   i.type AS item_type, i.title AS item_title, i.season_number, i.episode_number, i.parent_guid
             FROM item_media m
             LEFT JOIN item i ON i.guid = m.item_guid
             WHERE COALESCE(m.update_time, m.create_time, 0) > ?
             ORDER BY COALESCE(m.update_time, m.create_time) ASC
-            LIMIT 500
             """
             max_mt = lmt
             for r in conn.execute(q_media, (lmt,)):
@@ -399,18 +528,21 @@ class MediaDBPoller:
                     "path": path,
                     "media_guid": d.get("media_guid"),
                     "item_guid": d.get("item_guid"),
+                    "parent_guid": d.get("parent_guid"),
                     "size": d.get("size"),
                     "season_number": d.get("season_number"),
                     "episode_number": d.get("episode_number"),
                     "message": f"媒体文件入库: {path or d.get('media_guid')}",
                 }
-                self._emit(TRIM_RESOURCE_ADDED, ev, d, ts)
+                self._accumulate(conn, state, TRIM_RESOURCE_ADDED, ev, d)
 
             state["last_item_create_ms"] = max_ic
             state["last_item_update_ms"] = max_iu
             state["last_media_ts_ms"] = max_mt
             state["last_media_delete_ms"] = lmd
             state["fetch_by_guid"] = fb
+            if self._save_state(state):
+                self._flush_media_pending(state)
         finally:
             try:
                 conn.close()
@@ -427,7 +559,6 @@ class MediaDBPoller:
             try:
                 if self.db_path and _TRIM_EVENTS & self.monitor_events:
                     self._poll_once(state)
-                    self._save_state(state)
                     self._prune_dedup()
                     self._save_dedup()
             except Exception as e:

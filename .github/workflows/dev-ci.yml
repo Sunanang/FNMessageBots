@@ -30,3 +30,15 @@ jobs:
       - run: python -m pytest tests
         env:
           PYTHONDONTWRITEBYTECODE: '1'
+
+  docker-timezone:
+    name: Docker timezone checks
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: docker build --tag fnmb-timezone-check .
+      - run: bash scripts/check-container-timezone.sh fnmb-timezone-check

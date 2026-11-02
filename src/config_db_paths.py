@@ -18,6 +18,7 @@ _DB_PATH_CANDIDATES: Dict[str, Tuple[str, ...]] = {
         "/usr/local/apps/@appdata/trim.media/database/trimactivity.db",
     ),
     "photo_db_path": ("/usr/local/apps/@appdata/trim.photos/db/photo.db",),
+    "music_db_path": ("/usr/local/apps/@appdata/trim.music/db/music.db",),
     "scheduler_db_path": (
         "/var/apps/fn-scheduler/var/scheduler.db",
         "/usr/local/apps/@appdata/fn-scheduler/database/scheduler.db",
@@ -36,6 +37,7 @@ _DB_PATH_ENV_VARS: Dict[str, str] = {
     "trim_media_db_path": "TRIM_MEDIA_DB_PATH",
     "trim_activity_db_path": "TRIM_ACTIVITY_DB_PATH",
     "photo_db_path": "PHOTO_DB_PATH",
+    "music_db_path": "MUSIC_DB_PATH",
     "scheduler_db_path": "SCHEDULER_DB_PATH",
 }
 
@@ -78,13 +80,42 @@ def discover_db_path(key: str) -> str:
     return ""
 
 
+def diagnostic_db_path(key: str, configured: str = "") -> str:
+    """
+    诊断用路径：优先已配置值；为空时回退到已知候选。
+
+    与 discover_db_path 不同：不要求当前进程可读。音乐库等 0700 目录下，
+    文件「看起来不存在/配置为空」时仍要用标准路径生成 ACL 命令。
+    """
+    cur = (configured or "").strip()
+    if cur:
+        return cur
+    k = (key or "").strip()
+    cands = _DB_PATH_CANDIDATES.get(k, ())
+    if not cands:
+        return ""
+    for cand in cands:
+        try:
+            # 可读或至少能看到文件/父目录时优先用该候选
+            if os.path.isfile(cand) or os.path.isdir(os.path.dirname(cand)):
+                return cand
+        except OSError:
+            continue
+    return cands[0]
+
+
 def apply_discovered_db_paths(
     cfg: Mapping[str, Any],
 ) -> Tuple[Dict[str, Any], List[str]]:
     """
     为 cfg 中空白的库路径键填入探测结果。
     返回 (新 dict, 人类可读说明列表，供日志或提示)。
+
+    宿主（FPK）上：可读探测失败时仍回退到标准路径（如 music.db），
+    以便空配置也按默认路径访问/做 ACL 诊断；Docker 内不填宿主路径。
     """
+    from utils.access_guidance import in_container
+
     out: Dict[str, Any] = dict(cfg)
     notes: List[str] = []
     for key in _DB_PATH_CANDIDATES:
@@ -98,6 +129,12 @@ def apply_discovered_db_paths(
             notes.append(f"已根据环境变量 {env_name} 设置 {key}={env_value}")
             continue
         found = discover_db_path(key)
+        if not found and not in_container():
+            found = diagnostic_db_path(key, "")
+            if found:
+                out[key] = found
+                notes.append(f"已使用标准默认路径 {key}={found}")
+                continue
         if not found:
             continue
         out[key] = found

@@ -50,6 +50,8 @@ const data = fixture ? fixture.data : {title: 'FnMessageBot', selected_events: [
           warnings, warning_details: details};
       } else if (url.pathname.endsWith('/api/nas-patrol/run')) {
         response = {ok: true, message: '巡检推送已发送', warnings, warning_details: details};
+      } else if (url.pathname.endsWith('/api/test')) {
+        response = {ok: true, partial: true, message: '测试消息部分发送成功，部分目标失败。'};
       } else if (url.pathname.endsWith('/api/push-stats')) response = {ok: true, data: {}};
       else if (url.pathname.endsWith('/')) {
         await route.fulfill({contentType: 'text/html', body: html});
@@ -97,6 +99,10 @@ const data = fixture ? fixture.data : {title: 'FnMessageBot', selected_events: [
     await page.locator('#nas-patrol-run-btn').click();
     await page.locator('#warning-panel.show').waitFor();
     assert.equal(await page.locator('#warning-panel pre').textContent(), warningCommands);
+    await page.locator('#test-content').fill('test');
+    await page.locator('#test-btn').click();
+    const partialToast = page.locator('.toast-error').filter({hasText: '测试消息部分发送成功'});
+    await partialToast.waitFor({state: 'visible'});
     assert.deepEqual(errors, []);
     console.log('Warning UI passed: save/load, command copy, HTML escaping, gateway links, mobile layout, clear/legacy warnings.');
   } finally {

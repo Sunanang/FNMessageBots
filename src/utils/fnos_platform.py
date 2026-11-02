@@ -43,11 +43,28 @@ def _app_name() -> str:
     return (os.getenv("TRIM_APPNAME") or DEFAULT_APP_NAME).strip() or DEFAULT_APP_NAME
 
 
-def fetch_platform_config(timeout: float = 3.0) -> Optional[Dict[str, Any]]:
+def _is_trimapp_success_code(code: Any) -> bool:
+    if code is None:
+        return False
+    try:
+        return int(float(str(code).strip())) == 0
+    except (TypeError, ValueError):
+        return False
+
+
+def call_trimapp(
+    req: str,
+    data: Optional[Dict[str, Any]] = None,
+    timeout: float = 3.0,
+) -> Optional[Any]:
     """
-    调用 trim.system.getPlatformConfig。
-    成功返回 data 字典（含 systemVersion / systemLanguage）；失败返回 None。
+    调用开放 API 网关 ``/api/v1/trimapp``。
+    成功返回响应中的 ``data`` 字段（类型随接口而定）；失败返回 None。
     """
+    req = (req or "").strip()
+    if not req:
+        return None
+
     token = (os.getenv("TRIM_API_TOKEN") or "").strip()
     if not token:
         return None
@@ -58,9 +75,9 @@ def fetch_platform_config(timeout: float = 3.0) -> Optional[Dict[str, Any]]:
 
     body = {
         "reqId": str(uuid.uuid4()),
-        "req": PLATFORM_CONFIG_REQ,
+        "req": req,
         "appName": _app_name(),
-        "data": {},
+        "data": data if isinstance(data, dict) else {},
     }
     payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
     headers = {
@@ -77,7 +94,8 @@ def fetch_platform_config(timeout: float = 3.0) -> Optional[Dict[str, Any]]:
         raw = resp.read().decode("utf-8", errors="replace")
         if resp.status != 200:
             logger.debug(
-                "getPlatformConfig HTTP %s: %s",
+                "trimapp %s HTTP %s: %s",
+                req,
                 resp.status,
                 (raw or "")[:200],
             )
@@ -85,18 +103,18 @@ def fetch_platform_config(timeout: float = 3.0) -> Optional[Dict[str, Any]]:
         obj = json.loads(raw) if raw else {}
         if not isinstance(obj, dict):
             return None
-        # 数字 0 是成功码，不能通过 `or -1` 把它替换成失败码。
-        if str(obj.get("code")).strip() != "0":
+        # 数字 0 / "0" / 0.0 均视为成功，不能用 `or -1` 把 0 当成失败。
+        if not _is_trimapp_success_code(obj.get("code")):
             logger.debug(
-                "getPlatformConfig business code=%s msg=%s",
+                "trimapp %s business code=%s msg=%s",
+                req,
                 obj.get("code"),
                 obj.get("msg"),
             )
             return None
-        data = obj.get("data")
-        return data if isinstance(data, dict) else None
+        return obj.get("data")
     except Exception as e:
-        logger.debug("getPlatformConfig failed: %s", e)
+        logger.debug("trimapp %s failed: %s", req, e)
         return None
     finally:
         if conn is not None:
@@ -104,6 +122,15 @@ def fetch_platform_config(timeout: float = 3.0) -> Optional[Dict[str, Any]]:
                 conn.close()
             except Exception:
                 pass
+
+
+def fetch_platform_config(timeout: float = 3.0) -> Optional[Dict[str, Any]]:
+    """
+    调用 trim.system.getPlatformConfig。
+    成功返回 data 字典（含 systemVersion / systemLanguage）；失败返回 None。
+    """
+    data = call_trimapp(PLATFORM_CONFIG_REQ, data={}, timeout=timeout)
+    return data if isinstance(data, dict) else None
 
 
 def format_fnos_version_display(raw: str) -> str:

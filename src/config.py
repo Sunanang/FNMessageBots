@@ -39,6 +39,12 @@ class Config:
     minimal_push_enabled: bool = False
     # 忽略本机回环（127.0.0.1 / ::1）的 SSH 登录成功与断开；SSH 经内网穿透接入时来源同为回环，勿开启
     ssh_ignore_loopback: bool = False
+    # 忽略局域网（私网）来源的 SSH 登录成功 / 断开；失败与无效用户仍推送
+    ssh_ignore_lan: bool = False
+    # SSH 开启超时提醒阈值（分钟）；开关由 monitor_events 中的 SSH_OPEN_TIMEOUT 控制。默认 30
+    ssh_open_remind_minutes: int = 30
+    # 已迁移为「事件勾选 + 分钟数」；旧版用分钟>0 表示开启
+    ssh_open_timeout_by_event: bool = False
 
     # 监控配置
     monitor_events: List[str] = field(default_factory=lambda: [
@@ -53,6 +59,7 @@ class Config:
         "DiskWakeup", "DiskSpindown",
         "SSH_INVALID_USER", "SSH_AUTH_FAILED",
         "SSH_LOGIN_SUCCESS", "SSH_DISCONNECTED",
+        "SSH_ENABLED", "SSH_DISABLED", "SSH_OPEN_TIMEOUT",
         "DISK_IO_ERR",
         "BACKUP_TASK_SUCCESS", "BACKUP_TASK_FAILED", "BACKUP_TASK_PARTIAL_SUCCESS",
     ])
@@ -79,6 +86,7 @@ class Config:
     trim_media_db_path: str = ""
     trim_activity_db_path: str = ""
     photo_db_path: str = ""  # 相册 photo.db，空则不轮询相册事件
+    music_db_path: str = ""  # 音乐库 music.db；空则回退标准路径 trim.music/db/music.db
     scheduler_db_path: str = ""  # fn-scheduler scheduler.db，空则不轮询任务计划事件
     docker_socket_path: str = "/var/run/docker.sock"  # Docker Engine Unix socket；勾选 Docker 容器事件且文件可访问时监听
     logger_poll_interval: int = 5  # 秒，轮询间隔
@@ -159,14 +167,17 @@ class Config:
                 print(f"警告: 配置文件读取失败 - {e}")
 
     def _apply_discovered_db_paths(self) -> None:
-        """配置项为空时，按 compose 常见挂载路径自动探测可读的数据库文件。"""
-        from config_db_paths import DB_PATH_CONFIG_KEYS, discover_db_path
+        """配置项为空时，按 compose 常见挂载路径自动探测；宿主上空配置回退标准路径。"""
+        from config_db_paths import DB_PATH_CONFIG_KEYS, diagnostic_db_path, discover_db_path
+        from utils.access_guidance import in_container
 
         for key in DB_PATH_CONFIG_KEYS:
             if key in self._env_set_keys:
                 continue
             if not str(getattr(self, key, "") or "").strip():
                 found = discover_db_path(key)
+                if not found and not in_container():
+                    found = diagnostic_db_path(key, "")
                 if found:
                     setattr(self, key, found)
 
@@ -178,6 +189,9 @@ class Config:
             with open(config_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except Exception:
+            return False
+
+        if not isinstance(data, dict):
             return False
 
         # 先备份全部 dataclass 字段，校验失败时回滚，避免热加载后处于未调用 _validate 的不一致状态
@@ -202,6 +216,15 @@ class Config:
             self.minimal_push_enabled = as_bool(data["minimal_push_enabled"], False)
         if not env_skip("ssh_ignore_loopback") and "ssh_ignore_loopback" in data:
             self.ssh_ignore_loopback = as_bool(data["ssh_ignore_loopback"], False)
+        if not env_skip("ssh_ignore_lan") and "ssh_ignore_lan" in data:
+            self.ssh_ignore_lan = as_bool(data["ssh_ignore_lan"], False)
+        if not env_skip("ssh_open_remind_minutes") and "ssh_open_remind_minutes" in data:
+            try:
+                self.ssh_open_remind_minutes = max(0, min(int(data["ssh_open_remind_minutes"]), 10080))
+            except (TypeError, ValueError):
+                self.ssh_open_remind_minutes = 30
+        if "ssh_open_timeout_by_event" in data:
+            self.ssh_open_timeout_by_event = as_bool(data["ssh_open_timeout_by_event"], False)
         if not env_skip("smtp_params") and "smtp_params" in data and isinstance(data["smtp_params"], str):
             self.smtp_params = data["smtp_params"]
         if "pushplus_params" in data and isinstance(data["pushplus_params"], str):
@@ -256,6 +279,8 @@ class Config:
             self.trim_activity_db_path = data["trim_activity_db_path"].strip()
         if not env_skip("photo_db_path") and "photo_db_path" in data and isinstance(data["photo_db_path"], str):
             self.photo_db_path = data["photo_db_path"].strip()
+        if not env_skip("music_db_path") and "music_db_path" in data and isinstance(data["music_db_path"], str):
+            self.music_db_path = data["music_db_path"].strip()
         if not env_skip("scheduler_db_path") and "scheduler_db_path" in data and isinstance(data["scheduler_db_path"], str):
             self.scheduler_db_path = data["scheduler_db_path"].strip()
         if not env_skip("docker_socket_path") and "docker_socket_path" in data and isinstance(data["docker_socket_path"], str):
@@ -304,6 +329,15 @@ class Config:
         if ssh_ignore_loopback := os.getenv('SSH_IGNORE_LOOPBACK'):
             self.ssh_ignore_loopback = ssh_ignore_loopback.lower() in ['1', 'true', 'yes', 'on']
             self._env_set_keys.add('ssh_ignore_loopback')
+        if ssh_ignore_lan := os.getenv('SSH_IGNORE_LAN'):
+            self.ssh_ignore_lan = ssh_ignore_lan.lower() in ['1', 'true', 'yes', 'on']
+            self._env_set_keys.add('ssh_ignore_lan')
+        if ssh_open_remind := os.getenv('SSH_OPEN_REMIND_MINUTES'):
+            try:
+                self.ssh_open_remind_minutes = max(0, min(int(ssh_open_remind.strip()), 10080))
+                self._env_set_keys.add('ssh_open_remind_minutes')
+            except ValueError:
+                pass
         if smtp_params := os.getenv('SMTP_PARAMS'):
             self.smtp_params = smtp_params
             self._env_set_keys.add('smtp_params')
@@ -382,6 +416,9 @@ class Config:
         if photo_p := os.getenv('PHOTO_DB_PATH'):
             self.photo_db_path = photo_p.strip()
             self._env_set_keys.add('photo_db_path')
+        if music_p := os.getenv('MUSIC_DB_PATH'):
+            self.music_db_path = music_p.strip()
+            self._env_set_keys.add('music_db_path')
         if scheduler_p := os.getenv('SCHEDULER_DB_PATH'):
             self.scheduler_db_path = scheduler_p.strip()
             self._env_set_keys.add('scheduler_db_path')
@@ -431,8 +468,42 @@ class Config:
                 print(f"警告: NOTIFY_RESTART_COOLDOWN 不是整数，已忽略: {notify_restart_cooldown}")
 
     
+    def ssh_open_timeout_enabled(self) -> bool:
+        """SSH 开启超时提醒是否启用：需勾选 SSH_OPEN_TIMEOUT 且分钟数 ≥ 1。"""
+        if "SSH_OPEN_TIMEOUT" not in (self.monitor_events or []):
+            return False
+        try:
+            return int(self.ssh_open_remind_minutes or 0) >= 1
+        except (TypeError, ValueError):
+            return False
+
+    def _migrate_ssh_open_timeout_event(self) -> None:
+        """旧版用分钟>0 开关；迁到事件勾选。仅在尚未标记迁移时执行一次（内存）。"""
+        try:
+            minutes = max(0, min(int(self.ssh_open_remind_minutes), 10080))
+        except (TypeError, ValueError):
+            minutes = 30
+
+        if self.ssh_open_timeout_by_event:
+            self.ssh_open_remind_minutes = minutes if minutes >= 1 else 30
+            return
+
+        events = list(self.monitor_events or [])
+        if minutes > 0:
+            if "SSH_OPEN_TIMEOUT" not in events:
+                events.append("SSH_OPEN_TIMEOUT")
+                self.monitor_events = events
+            self.ssh_open_remind_minutes = minutes
+        else:
+            self.monitor_events = [e for e in events if e != "SSH_OPEN_TIMEOUT"]
+            self.ssh_open_remind_minutes = 30
+        # 避免同进程内重复按旧规则加回；落盘由 Web 保存写入
+        self.ssh_open_timeout_by_event = True
+
     def _validate(self):
         """验证配置（部署时不强制 Webhook，可在 UI 中配置）"""
+        self._migrate_ssh_open_timeout_event()
+
         if self.wechat_webhook_url and not self.wechat_webhook_url.startswith('http'):
             raise ValueError("WECHAT_WEBHOOK_URL 必须是有效的URL")
         

@@ -32,7 +32,8 @@ class WebAccessIntegrationTests(unittest.TestCase):
             conn.execute("CREATE TABLE log(id INTEGER)")
         from web.auth_service import apply_new_password
         self.config.write_text(json.dumps(apply_new_password(
-            {"monitor_events": ["LoginSucc"], "logger_db_path": str(self.db)}, "integration-password")))
+            {"monitor_events": ["LoginSucc"], "logger_db_path": str(self.db),
+             "ssh_open_timeout_by_event": True}, "integration-password")))
         for manager in (
             patch.dict(os.environ, {"FNMB_GATEWAY_SOCKET": "/mock/app.sock"}, clear=True),
             patch.object(ui_app, "CONFIG_FILE", self.config),
@@ -169,6 +170,18 @@ class WebAccessIntegrationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.get_json()["ok"])
         self.assertEqual(response.get_json()["warning_details"], [])
+
+    def test_legacy_zero_ssh_minutes_remains_disabled_when_opening_settings(self):
+        raw = json.loads(self.config.read_text())
+        raw.update(ssh_open_timeout_by_event=False, ssh_open_remind_minutes=0)
+        self.config.write_text(json.dumps(raw))
+        before = self.config.read_bytes()
+        response = self.client.get("/api/config?check_access=0")
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()["data"]
+        self.assertNotIn("SSH_OPEN_TIMEOUT", data["selected_events"])
+        self.assertEqual(data["ssh_open_remind_minutes"], 30)
+        self.assertEqual(self.config.read_bytes(), before)
 
     def test_incompatible_scheduler_schema_returns_no_permission_commands(self):
         raw = json.loads(self.config.read_text())

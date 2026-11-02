@@ -5,7 +5,8 @@ FROM ${BASE_IMAGE}
 # 设置环境变量
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    TZ=Asia/Shanghai
 
 # 设置PYTHONPATH以包含app目录
 ENV PYTHONPATH=/app
@@ -17,7 +18,7 @@ WORKDIR /app
 # systemd：提供 journalctl，用于采集宿主机 SSH 登录 journal（需挂载 /var/log/journal）
 RUN set -ex && \
     apt-get -o Acquire::Retries=5 update && \
-    apt-get install -y --no-install-recommends procps nut-client smartmontools systemd \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends procps nut-client smartmontools systemd tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 # 复制依赖文件

@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import Config
 from utils.logger import setup_logging
 from utils.push_stats import init as init_push_stats
+from utils.notification_outbox import NotificationOutbox, OutboxWriteError
 from monitor.db_log_poller import DBLogPoller
 from monitor.backup_db_poller import (
     BackupDBPoller,
@@ -26,8 +27,11 @@ from monitor.backup_db_poller import (
     BACKUP_SUCCESS_EVENT,
 )
 from monitor.media_db_poller import MediaDBPoller
+from monitor.media_summary import MEDIA_SUMMARY_EVENT
 from monitor.trim_activity_poller import TrimActivityPoller
 from monitor.photo_db_poller import PHOTO_POLL_EVENTS, PhotoDBPoller
+from monitor.music_db_poller import MUSIC_POLL_EVENTS, MusicDBPoller
+from monitor.music_summary import MUSIC_SUMMARY_EVENT
 from monitor.scheduler_db_poller import (
     SchedulerDBPoller,
     SCHEDULER_POLL_EVENTS,
@@ -40,7 +44,14 @@ from monitor.docker_socket_access import check_docker_socket_access
 from monitor.event_processor import EventProcessor
 from monitor.nas_patrol import start_nas_patrol_thread
 from monitor.wan_ip_monitor import start_wan_ip_monitor_thread
-from monitor.ssh_journal_poller import SSH_JOURNAL_EVENTS, SshJournalPoller
+from monitor.ssh_journal_poller import (
+    SSH_DISABLED,
+    SSH_ENABLED,
+    SSH_JOURNAL_EVENTS,
+    SSH_SERVICE_SWITCH_EVENTS,
+    SshJournalPoller,
+)
+from monitor.ssh_open_watch import SSH_OPEN_TIMEOUT, SshOpenWatch
 from monitor.sqlite_uri import probe_readonly_sqlite
 from notifier.unified_notifier import UnifiedNotifier
 from web.ui_app import start_ui_server_in_background
@@ -66,9 +77,11 @@ class Application:
         self.media_db_poller = None
         self.trim_activity_poller = None
         self.photo_db_poller = None
+        self.music_db_poller = None
         self.scheduler_db_poller = None
         self.docker_events_poller = None
         self.ssh_journal_poller = None
+        self.ssh_open_watch = None
         self.logger = None
         self.running = False
         self.notification_health_thread = None
@@ -78,6 +91,8 @@ class Application:
         self._exit_code = 0
         self._unified_batch_buf: List[Dict[str, Any]] = []
         self._unified_batch_lock = threading.Lock()
+        self._unified_delivery_lock = threading.Lock()
+        self._batch_outbox: Optional[NotificationOutbox] = None
         self._unified_flush_stop = threading.Event()
         self._unified_flush_thread: Optional[threading.Thread] = None
 
@@ -85,6 +100,7 @@ class Application:
         """打印启动横幅"""
         banner = f"""
         启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+        运行时区: {datetime.now().astimezone().strftime('%Z (%z)')}，TZ={os.environ.get('TZ') or '系统默认'}
         监控模式: 数据库轮询 (logger_data.db3 log 表)
         通知方式: 企业微信/企业微信应用/钉钉/飞书机器人/Bark/PushPlus/魔法推送/SMTP邮件/通用Webhook/MeoW
 
@@ -100,6 +116,14 @@ class Application:
             self._unified_batch_buf = []
             return taken
 
+    def _poll_outbox(self) -> Optional[NotificationOutbox]:
+        cursor_dir = str(getattr(self.config, "cursor_dir", "") or "").strip()
+        if not cursor_dir:
+            return None
+        if self._batch_outbox is None:
+            self._batch_outbox = NotificationOutbox(cursor_dir)
+        return self._batch_outbox
+
     def _enqueue_unified_batch_items(self, items: List[Dict[str, Any]]) -> None:
         """影视/相册/Docker/备份/任务计划 等先入队，在主日志下一轮汇总时或定时刷盘时合并推送。"""
         if not items:
@@ -110,6 +134,17 @@ class Application:
         if not merged:
             return
         with self._unified_batch_lock:
+            try:
+                outbox = self._poll_outbox()
+            except Exception as exc:
+                raise OutboxWriteError("轮询待发数据库不可用") from exc
+            if outbox is not None:
+                # 必须先提交入队事务，调用方才可推进各数据源游标。
+                try:
+                    outbox.enqueue_poll(merged)
+                except Exception as exc:
+                    raise OutboxWriteError("轮询事件未能持久化入队") from exc
+                return
             self._unified_batch_buf.extend(merged)
             self._unified_batch_buf = dedupe_poll_batch_items(self._unified_batch_buf)
 
@@ -120,23 +155,42 @@ class Application:
         for it in batch_events:
             if isinstance(it, dict) and "source" not in it:
                 it["source"] = "db"
-        pending = self._take_unified_batch_buf()
-        pending.extend(batch_events)
-        if pending:
-            self.event_processor.process_batch_events(pending)
+        self._enqueue_unified_batch_items(batch_events)
+        self._flush_unified_batch_pending_only()
 
     def _flush_unified_batch_pending_only(self) -> None:
         """仅刷出队列中外部库事件（无主日志本轮时由定时线程调用）。"""
         if not self.event_processor:
             return
-        buf = self._take_unified_batch_buf()
-        if not buf:
+        if not self._unified_delivery_lock.acquire(blocking=False):
             return
         try:
-            self.event_processor.process_batch_events(buf)
+            outbox = self._poll_outbox()
+            if outbox is not None:
+                job = outbox.claim_poll(time.time())
+                if job is None:
+                    return
+                selected = set(getattr(self.config, "monitor_events", []) or [])
+                buf = [item for item in job["items"] if item.get("event_type") in selected]
+                result = self.event_processor.process_batch_events(buf) if buf else True
+                if result is not False and getattr(result, "success", None) is not False:
+                    outbox.ack_poll(job["ids"])
+                return
+            buf = self._take_unified_batch_buf()
+            if not buf:
+                return
+            try:
+                result = self.event_processor.process_batch_events(buf)
+                if result is False or getattr(result, "success", None) is False:
+                    self._enqueue_unified_batch_items(buf)
+            except Exception:
+                self._enqueue_unified_batch_items(buf)
+                raise
         except Exception as e:
             if self.logger:
                 self.logger.error("轮询汇总（外部库队列）推送失败: %s", e, exc_info=True)
+        finally:
+            self._unified_delivery_lock.release()
 
     def _unified_batch_flush_loop(self) -> None:
         while True:
@@ -150,9 +204,12 @@ class Application:
     def _start_unified_batch_flush_thread(self) -> None:
         if self._unified_flush_thread and self._unified_flush_thread.is_alive():
             return
-        if not getattr(self.config, "poll_batch_summary_enabled", False):
-            return
         if not self.event_processor:
+            return
+        outbox = self._poll_outbox()
+        if not getattr(self.config, "poll_batch_summary_enabled", False) and not (
+            outbox is not None and outbox.poll_items()
+        ):
             return
         self._unified_flush_stop.clear()
         t = threading.Thread(target=self._unified_batch_flush_loop, name="UnifiedPollBatchFlush", daemon=True)
@@ -177,6 +234,7 @@ class Application:
         else:
             self._stop_unified_batch_flush_thread()
             self._flush_unified_batch_pending_only()
+            self._start_unified_batch_flush_thread()
 
 
     def _probe_db_readable(
@@ -230,6 +288,13 @@ class Application:
             )
         if me & PHOTO_POLL_EVENTS:
             self._probe_db_readable("相册库 photo.db", getattr(self.config, "photo_db_path", "") or "")
+        if me & MUSIC_POLL_EVENTS:
+            from config_db_paths import diagnostic_db_path
+            self._probe_db_readable(
+                "音乐库 music.db",
+                diagnostic_db_path("music_db_path", getattr(self.config, "music_db_path", "") or ""),
+                table_probe_sql="SELECT 1 FROM track LIMIT 1",
+            )
         if me & SCHEDULER_POLL_EVENTS:
             self._probe_db_readable("任务计划库 scheduler.db", getattr(self.config, "scheduler_db_path", "") or "")
 
@@ -310,6 +375,8 @@ class Application:
                 enabled_sources.append("trimactivity")
             if self.photo_db_poller:
                 enabled_sources.append("相册")
+            if self.music_db_poller:
+                enabled_sources.append("音乐库")
             if self.scheduler_db_poller:
                 enabled_sources.append("任务计划")
             if self.docker_events_poller:
@@ -327,11 +394,19 @@ class Application:
                     print(f"已勾选 Docker 容器事件，但未启动监听：{sock_issue}")
                 else:
                     print("Docker 容器事件：依赖未就绪或 docker SDK 不可用，未启动监听")
-            if not (self.ssh_journal_poller and self.ssh_journal_poller.is_available()) and (
-                set(self.config.monitor_events or []) & set(SSH_JOURNAL_EVENTS)
-            ):
+            journal_ok = bool(
+                self.ssh_journal_poller is not None and self.ssh_journal_poller.is_available()
+            )
+            ssh_events_wanted = bool(set(self.config.monitor_events or []) & set(SSH_JOURNAL_EVENTS))
+            ssh_remind_on = bool(self.config.ssh_open_timeout_enabled())
+            if not journal_ok and ssh_events_wanted:
                 print(
                     "已勾选 SSH 事件，但 journal 不可用：将回退 logger_data 中的 Sshd*；"
+                    + journal_permission_action()
+                )
+            if not journal_ok and ssh_remind_on:
+                print(
+                    "已开启 SSH 超时提醒，但 journal 不可用：无法检测 SSH 启停，超时提醒不会生效；"
                     + journal_permission_action()
                 )
 
@@ -344,7 +419,7 @@ class Application:
             return False
 
     def _sync_optional_pollers(self) -> None:
-        """按 monitor_events 创建或停止备份库 / trimmedia / trimactivity / photo.db 轮询器。"""
+        """按 monitor_events 创建或停止备份库 / trimmedia / trimactivity / photo / music 轮询器。"""
         if not self.config:
             return
         me = set(self.config.monitor_events or [])
@@ -398,6 +473,8 @@ class Application:
                 )
         else:
             if self.media_db_poller is not None:
+                if not (me & TRIMMEDIA_POLL_EVENTS):
+                    self.media_db_poller.update_config(monitor_events=[])
                 self.media_db_poller.stop()
                 self.media_db_poller = None
 
@@ -453,6 +530,40 @@ class Application:
                 self.photo_db_poller.stop()
                 self.photo_db_poller = None
 
+        from config_db_paths import diagnostic_db_path
+        music_path = diagnostic_db_path(
+            "music_db_path", getattr(self.config, "music_db_path", "") or ""
+        )
+        music_ok = (
+            self._probe_db_readable(
+                "音乐库 music.db",
+                music_path,
+                table_probe_sql="SELECT 1 FROM track LIMIT 1",
+            )
+            if (me & MUSIC_POLL_EVENTS)
+            else False
+        )
+        if (me & MUSIC_POLL_EVENTS) and music_ok:
+            if self.music_db_poller is None:
+                self.music_db_poller = MusicDBPoller(
+                    db_path=music_path,
+                    cursor_dir=cdir,
+                    poll_interval=interval,
+                    monitor_events=self.config.monitor_events,
+                )
+            else:
+                self.music_db_poller.update_config(
+                    monitor_events=self.config.monitor_events,
+                    poll_interval=interval,
+                    db_path=music_path,
+                )
+        else:
+            if self.music_db_poller is not None:
+                if not (me & MUSIC_POLL_EVENTS):
+                    self.music_db_poller.update_config(monitor_events=[])
+                self.music_db_poller.stop()
+                self.music_db_poller = None
+
         scheduler_path = getattr(self.config, "scheduler_db_path", "") or ""
         scheduler_ok = self._probe_db_readable("任务计划库 scheduler.db", scheduler_path) if (me & SCHEDULER_POLL_EVENTS) else False
         if (me & SCHEDULER_POLL_EVENTS) and scheduler_ok:
@@ -497,8 +608,10 @@ class Application:
                 self.docker_events_poller.stop()
                 self.docker_events_poller = None
 
-        ssh_wanted = bool(me & SSH_JOURNAL_EVENTS)
+        ssh_remind_on = bool(self.config.ssh_open_timeout_enabled())
+        ssh_wanted = bool(me & SSH_JOURNAL_EVENTS) or ssh_remind_on
         ssh_ignore_loopback = bool(getattr(self.config, "ssh_ignore_loopback", False))
+        ssh_ignore_lan = bool(getattr(self.config, "ssh_ignore_lan", False))
         if ssh_wanted:
             if self.ssh_journal_poller is None:
                 self.ssh_journal_poller = SshJournalPoller(
@@ -506,17 +619,25 @@ class Application:
                     poll_interval=interval,
                     monitor_events=self.config.monitor_events,
                     ignore_loopback=ssh_ignore_loopback,
+                    ignore_lan=ssh_ignore_lan,
                 )
             else:
                 self.ssh_journal_poller.update_config(
                     monitor_events=self.config.monitor_events,
                     poll_interval=interval,
                     ignore_loopback=ssh_ignore_loopback,
+                    ignore_lan=ssh_ignore_lan,
                 )
         else:
             if self.ssh_journal_poller is not None:
                 self.ssh_journal_poller.stop()
                 self.ssh_journal_poller = None
+
+        self._sync_ssh_open_watch(cursor_dir=cdir, remind_on=ssh_remind_on)
+        if self.ssh_journal_poller is not None:
+            self.ssh_journal_poller.clear_service_hooks()
+            if self.ssh_open_watch is not None:
+                self.ssh_journal_poller.add_service_hook(self.ssh_open_watch.on_service_event)
 
         # journal 可用时跳过 logger_data 中的 Sshd*，避免双推；不可用则回退库表
         if self.log_poller is not None:
@@ -525,6 +646,7 @@ class Application:
             )
             self.log_poller.skip_ssh_events = journal_ok
             self.log_poller.ignore_ssh_loopback = ssh_ignore_loopback
+            self.log_poller.ignore_ssh_lan = ssh_ignore_lan
 
         pbs = bool(getattr(self.config, "poll_batch_summary_enabled", False)) and self.event_processor is not None
         batch_enq = self._enqueue_unified_batch_items if pbs else None
@@ -534,6 +656,8 @@ class Application:
             self.trim_activity_poller.set_poll_batch_summary(pbs, batch_enq)
         if self.photo_db_poller:
             self.photo_db_poller.set_poll_batch_summary(pbs, batch_enq)
+        if self.music_db_poller:
+            self.music_db_poller.set_poll_batch_summary(pbs, batch_enq)
         if self.docker_events_poller:
             self.docker_events_poller.set_poll_batch_summary(pbs, batch_enq)
         if self.backup_poller:
@@ -542,6 +666,40 @@ class Application:
             self.scheduler_db_poller.set_poll_batch_summary(pbs, batch_enq)
         if self.ssh_journal_poller:
             self.ssh_journal_poller.set_poll_batch_summary(pbs, batch_enq)
+
+    def _on_ssh_open_timeout(self, event_data: Dict[str, Any], entry) -> None:
+        """SSH 开启超时：需勾选 SSH_OPEN_TIMEOUT，分钟数由配置自定义。"""
+        if not self.event_processor or not self.config:
+            return
+        if self.ssh_open_watch is None:
+            return
+        if not self.config.ssh_open_timeout_enabled():
+            return
+        handler = self.event_processor.get_handler(SSH_OPEN_TIMEOUT)
+        if handler:
+            handler(event_data, entry)
+
+    def _sync_ssh_open_watch(self, *, cursor_dir: str, remind_on: bool) -> None:
+        """按配置启停 SSH 开启超时提醒。"""
+        if remind_on:
+            if self.ssh_open_watch is None:
+                self.ssh_open_watch = SshOpenWatch(
+                    cursor_dir,
+                    get_remind_minutes=lambda: (
+                        int(getattr(self.config, "ssh_open_remind_minutes", 30) or 30)
+                        if self.config.ssh_open_timeout_enabled()
+                        else 0
+                    ),
+                    on_timeout=self._on_ssh_open_timeout,
+                )
+                self.ssh_open_watch.start()
+            else:
+                self.ssh_open_watch.update_config()
+        else:
+            if self.ssh_open_watch is not None:
+                self.ssh_open_watch.stop()
+                self.ssh_open_watch.on_disabled()
+                self.ssh_open_watch = None
 
     def _register_db_event_handlers(self) -> None:
         """为 logger / 备份 / 影视库 / 相册 SQLite 轮询器注册 monitor_events 中的处理器。"""
@@ -557,6 +715,8 @@ class Application:
             self.trim_activity_poller.clear_handlers()
         if self.photo_db_poller:
             self.photo_db_poller.clear_handlers()
+        if self.music_db_poller:
+            self.music_db_poller.clear_handlers()
         if self.scheduler_db_poller:
             self.scheduler_db_poller.clear_handlers()
         if self.docker_events_poller:
@@ -566,6 +726,8 @@ class Application:
         trim_ev = {"TRIM_RESOURCE_ADDED", "TRIM_SCRAPE_SUCCESS"}
         act_ev = {"MEDIA_LOGIN_SUCC", "MEDIA_LOGOUT"}
         photo_ev = set(PHOTO_POLL_EVENTS)
+        music_ev = set(MUSIC_POLL_EVENTS)
+        music_lib_ev = {"MUSIC_TRACK_ADDED", "MUSIC_TRACK_REMOVED"}
         scheduler_ev = set(SCHEDULER_POLL_EVENTS)
         docker_ev = set(DOCKER_POLL_EVENTS)
         ssh_ev = set(SSH_JOURNAL_EVENTS)
@@ -586,6 +748,8 @@ class Application:
                 self.trim_activity_poller.add_handler(event_type, handler)
             if self.photo_db_poller and event_type in photo_ev:
                 self.photo_db_poller.add_handler(event_type, handler)
+            if self.music_db_poller and event_type in music_ev:
+                self.music_db_poller.add_handler(event_type, handler)
             if self.scheduler_db_poller and event_type in scheduler_ev:
                 self.scheduler_db_poller.add_handler(event_type, handler)
             if self.docker_events_poller and event_type in docker_ev:
@@ -593,6 +757,20 @@ class Application:
             if self.ssh_journal_poller and event_type in ssh_ev:
                 self.ssh_journal_poller.add_handler(event_type, handler)
             registered += 1
+        # SSH 启/停成对：勾选任一则两侧 handler 都挂上，避免只勾关闭/开启时漏推
+        if self.ssh_journal_poller and (SSH_SERVICE_SWITCH_EVENTS & set(self.config.monitor_events or [])):
+            for et in (SSH_ENABLED, SSH_DISABLED):
+                handler = self.event_processor.get_handler(et)
+                if handler:
+                    self.ssh_journal_poller.add_handler(et, handler)
+        if self.media_db_poller and trim_ev & set(self.config.monitor_events):
+            handler = self.event_processor.get_handler(MEDIA_SUMMARY_EVENT)
+            if handler:
+                self.media_db_poller.add_handler(MEDIA_SUMMARY_EVENT, handler)
+        if self.music_db_poller and music_lib_ev & set(self.config.monitor_events):
+            handler = self.event_processor.get_handler(MUSIC_SUMMARY_EVENT)
+            if handler:
+                self.music_db_poller.add_handler(MUSIC_SUMMARY_EVENT, handler)
         print(f"已注册 {registered} 个事件处理器")
 
     def reload_config(self) -> None:
@@ -606,7 +784,7 @@ class Application:
             return
         ok = self.config.reload_from_file(CONFIG_FILE)
         if not ok:
-            return
+            raise ValueError("配置未通过运行时校验，监控仍使用之前的配置")
         has_webhook = any([
             self.config.wechat_webhook_url,
             self.config.dingtalk_webhook_url,
@@ -636,6 +814,8 @@ class Application:
                 self.trim_activity_poller.start()
             if self.photo_db_poller:
                 self.photo_db_poller.start()
+            if self.music_db_poller:
+                self.music_db_poller.start()
             if self.scheduler_db_poller:
                 self.scheduler_db_poller.start()
             if self.docker_events_poller:
@@ -682,6 +862,8 @@ class Application:
                 self.trim_activity_poller.start()
             if self.photo_db_poller:
                 self.photo_db_poller.start()
+            if self.music_db_poller:
+                self.music_db_poller.start()
             if self.scheduler_db_poller:
                 self.scheduler_db_poller.start()
             if self.docker_events_poller:
@@ -715,7 +897,7 @@ class Application:
                     self.notifier.send_system_notification(
                         'APP_ERROR',
                         '应用初始化失败: 未知错误',
-                        {'hostname': socket.gethostname(), 'version': '2.6.0'}
+                        {'hostname': socket.gethostname(), 'version': '2.7.4'}
                     )
                 sys.exit(1)
             
@@ -752,7 +934,7 @@ class Application:
                     self.notifier.send_system_notification(
                         'APP_START',
                         '飞牛NAS日志监控系统已启动，开始监控系统事件',
-                        {'hostname': socket.gethostname(), 'version': '2.6.0'}
+                        {'hostname': socket.gethostname(), 'version': '2.7.4'}
                     )
                 else:
                     print("距上次启动通知不足 10 分钟，跳过本次启动通知（避免频繁重启刷屏）")
@@ -762,6 +944,7 @@ class Application:
                     self.media_db_poller,
                     self.trim_activity_poller,
                     self.photo_db_poller,
+                    self.music_db_poller,
                     self.scheduler_db_poller,
                     self.docker_events_poller,
                     self.ssh_journal_poller,
@@ -908,7 +1091,7 @@ class Application:
                 self.notifier.send_system_notification(
                     'APP_ERROR',
                     f'触发自动重启: {reason}',
-                    {'hostname': socket.gethostname(), 'version': '2.6.0'}
+                    {'hostname': socket.gethostname(), 'version': '2.7.4'}
                 )
         except Exception:
             pass
@@ -932,7 +1115,7 @@ class Application:
             self.notifier.send_system_notification(
                 'APP_STOP',
                 '飞牛NAS日志监控系统已停止，监控服务暂停',
-                {'hostname': socket.gethostname(), 'version': '2.6.0'}
+                {'hostname': socket.gethostname(), 'version': '2.7.4'}
             )
 
         # 停止数据库轮询器
@@ -946,12 +1129,17 @@ class Application:
             self.trim_activity_poller.stop()
         if self.photo_db_poller:
             self.photo_db_poller.stop()
+        if self.music_db_poller:
+            self.music_db_poller.stop()
         if self.scheduler_db_poller:
             self.scheduler_db_poller.stop()
         if self.docker_events_poller:
             self.docker_events_poller.stop()
         if self.ssh_journal_poller:
             self.ssh_journal_poller.stop()
+        if self.ssh_open_watch:
+            self.ssh_open_watch.stop()
+            self.ssh_open_watch = None
 
         # 停止运行日志清理线程
         cleanup_flag = getattr(self.logger, 'cleanup_stop_flag', None) if self.logger else None

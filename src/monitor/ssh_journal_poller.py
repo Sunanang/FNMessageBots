@@ -21,39 +21,89 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from .models import JournalEntry
+from utils.notification_outbox import OutboxWriteError
 from utils.access_guidance import journal_permission_action
 
 SSH_LOGIN_SUCCESS = "SSH_LOGIN_SUCCESS"
 SSH_AUTH_FAILED = "SSH_AUTH_FAILED"
 SSH_INVALID_USER = "SSH_INVALID_USER"
 SSH_DISCONNECTED = "SSH_DISCONNECTED"
+# systemd 启停 ssh/sshd.service（飞牛控制台开关 SSH 服务）
+SSH_ENABLED = "SSH_ENABLED"
+SSH_DISABLED = "SSH_DISABLED"
+# 启/停成对：勾选任一即同时推送开启与关闭
+SSH_SERVICE_SWITCH_EVENTS: Set[str] = {SSH_ENABLED, SSH_DISABLED}
 
 SSH_JOURNAL_EVENTS: Set[str] = {
     SSH_LOGIN_SUCCESS,
     SSH_AUTH_FAILED,
     SSH_INVALID_USER,
     SSH_DISCONNECTED,
+    SSH_ENABLED,
+    SSH_DISABLED,
 }
+
+# systemd catalog MESSAGE_ID（与文案语言无关）
+_SYSTEMD_UNIT_STARTED_MSG_ID = "39f53479d3a045ac8e11786248231fbf"
+_SYSTEMD_UNIT_STOPPED_MSG_ID = "9d1aaa27d60140bd96365438aad20286"
 
 _STATE_FILENAME = "ssh_journal_poller_state.json"
 
-# 开启「忽略本机回环」时只静默这两类；失败 / 无效用户仍推送，避免内网穿透场景下漏掉暴力破解
-SSH_LOOPBACK_QUIET_EVENTS = frozenset({SSH_LOGIN_SUCCESS, SSH_DISCONNECTED})
+# 「忽略本机回环 / 忽略局域网」只静默这两类；失败 / 无效用户仍推送
+SSH_SOURCE_QUIET_EVENTS = frozenset({SSH_LOGIN_SUCCESS, SSH_DISCONNECTED})
+# 兼容旧名
+SSH_LOOPBACK_QUIET_EVENTS = SSH_SOURCE_QUIET_EVENTS
 
 
-def is_loopback_ip(ip: str) -> bool:
+def _parse_ip(ip: str):
     try:
         addr = ipaddress.ip_address((ip or "").strip())
     except ValueError:
-        return False
+        return None
     mapped = getattr(addr, "ipv4_mapped", None)
-    return bool(addr.is_loopback or (mapped is not None and mapped.is_loopback))
+    return mapped if mapped is not None else addr
+
+
+def is_loopback_ip(ip: str) -> bool:
+    addr = _parse_ip(ip)
+    return bool(addr is not None and addr.is_loopback)
+
+
+def is_lan_ip(ip: str) -> bool:
+    """
+    局域网/私网地址（不含回环）。
+    覆盖 10/8、172.16/12、192.168/16 及 IPv6 ULA 等；回环仍由 ignore_loopback 单独控制。
+    """
+    addr = _parse_ip(ip)
+    if addr is None or addr.is_loopback:
+        return False
+    return bool(addr.is_private)
 
 
 def should_ignore_loopback_ssh(event_type: str, event_data: Dict[str, Any]) -> bool:
-    if event_type not in SSH_LOOPBACK_QUIET_EVENTS:
+    if event_type not in SSH_SOURCE_QUIET_EVENTS:
         return False
     return is_loopback_ip(str(event_data.get("IP") or event_data.get("ip") or ""))
+
+
+def should_ignore_lan_ssh(event_type: str, event_data: Dict[str, Any]) -> bool:
+    if event_type not in SSH_SOURCE_QUIET_EVENTS:
+        return False
+    return is_lan_ip(str(event_data.get("IP") or event_data.get("ip") or ""))
+
+
+def should_ignore_ssh_by_source(
+    event_type: str,
+    event_data: Dict[str, Any],
+    *,
+    ignore_loopback: bool = False,
+    ignore_lan: bool = False,
+) -> bool:
+    if ignore_loopback and should_ignore_loopback_ssh(event_type, event_data):
+        return True
+    if ignore_lan and should_ignore_lan_ssh(event_type, event_data):
+        return True
+    return False
 
 # Accepted publickey/password/keyboard-interactive for user from ip port N ssh2
 _RE_ACCEPTED = re.compile(
@@ -83,11 +133,69 @@ def journalctl_available() -> bool:
     return bool(shutil.which("journalctl"))
 
 
+# systemd：匹配 Started/Stopped（忽略 Starting/Stopping 过渡态）
+# 兼容：unit 名形式、Description 形式、中文「已启动/已停止」
+_RE_SSH_UNIT_STARTED = re.compile(
+    r"(?:^|\b)(?:Started|已启动)\s+ssh(?:d)?\.service\b",
+    re.IGNORECASE,
+)
+_RE_SSH_UNIT_STOPPED = re.compile(
+    r"(?:^|\b)(?:Stopped|已停止)\s+ssh(?:d)?\.service\b",
+    re.IGNORECASE,
+)
+_RE_SSH_DESC_STARTED = re.compile(
+    r"(?:^|\b)(?:Started|已启动)\s+OpenBSD\s+Secure\s+Shell\s+server\b",
+    re.IGNORECASE,
+)
+_RE_SSH_DESC_STOPPED = re.compile(
+    r"(?:^|\b)(?:Stopped|已停止)\s+OpenBSD\s+Secure\s+Shell\s+server\b",
+    re.IGNORECASE,
+)
+# 过渡态 Stopping：部分环境只见到 Stopping / signal 15，没有最终 Stopped 行
+_RE_SSH_UNIT_STOPPING = re.compile(
+    r"(?:^|\b)(?:Stopping|正在停止)\s+ssh(?:d)?\.service\b",
+    re.IGNORECASE,
+)
+_RE_SSH_DESC_STOPPING = re.compile(
+    r"(?:^|\b)(?:Stopping|正在停止)\s+OpenBSD\s+Secure\s+Shell\s+server\b",
+    re.IGNORECASE,
+)
+_RE_SSH_SIGNAL_TERM = re.compile(
+    r"Received\s+signal\s+15;\s*terminating",
+    re.IGNORECASE,
+)
+# systemd Stopping 作业开始
+_SYSTEMD_UNIT_STOPPING_MSG_ID = "de2e677fb0254e519c4d6fbfb0c6b8bd"
+
+
+def _ssh_unit_from_text(*parts: str) -> str:
+    blob = " ".join(p for p in parts if p).lower()
+    return "sshd" if "sshd" in blob else "ssh"
+
+
+def _coerce_journal_message(message: Any) -> str:
+    """journalctl JSON 的 MESSAGE 可能是 str，或字节数组 list[int]。"""
+    if message is None:
+        return ""
+    if isinstance(message, str):
+        return message.strip()
+    if isinstance(message, list):
+        if not message:
+            return ""
+        if all(isinstance(x, int) for x in message):
+            try:
+                return bytes(message).decode("utf-8", errors="replace").strip()
+            except Exception:
+                return "".join(chr(x) for x in message if isinstance(x, int) and 0 <= x < 256).strip()
+        return "".join(str(x) for x in message).strip()
+    return str(message).strip()
+
+
 def parse_ssh_journal_message(message: str) -> Optional[Tuple[str, Dict[str, Any]]]:
     """
-    解析单行 sshd MESSAGE，返回 (event_type, event_data) 或 None（忽略噪声/无关行）。
+    解析单行 sshd/ssh.service MESSAGE，返回 (event_type, event_data) 或 None（忽略噪声/无关行）。
     """
-    msg = (message or "").strip()
+    msg = _coerce_journal_message(message)
     if not msg:
         return None
     # 扫端口 / 非 SSH 协议探测，不推送
@@ -101,6 +209,18 @@ def parse_ssh_journal_message(message: str) -> Optional[Tuple[str, Dict[str, Any
         return None
     if "pam_unix(sshd:session): session opened" in low:
         return None
+
+    # SSH 服务开关（控制台启停 / systemctl start|stop ssh）
+    if _RE_SSH_UNIT_STARTED.search(msg) or _RE_SSH_DESC_STARTED.search(msg):
+        return SSH_ENABLED, {"from": "systemd", "unit": _ssh_unit_from_text(msg)}
+    if (
+        _RE_SSH_UNIT_STOPPED.search(msg)
+        or _RE_SSH_DESC_STOPPED.search(msg)
+        or _RE_SSH_UNIT_STOPPING.search(msg)
+        or _RE_SSH_DESC_STOPPING.search(msg)
+        or _RE_SSH_SIGNAL_TERM.search(msg)
+    ):
+        return SSH_DISABLED, {"from": "systemd", "unit": _ssh_unit_from_text(msg)}
 
     m = _RE_ACCEPTED.search(msg)
     if m:
@@ -127,6 +247,26 @@ def parse_ssh_journal_message(message: str) -> Optional[Tuple[str, Dict[str, Any
     return None
 
 
+def parse_ssh_journal_entry(obj: Dict[str, Any]) -> Optional[Tuple[str, Dict[str, Any]]]:
+    """解析 journal JSON 条目：先 MESSAGE，再回退 systemd MESSAGE_ID（与语言无关）。"""
+    msg = _coerce_journal_message(obj.get("MESSAGE"))
+    parsed = parse_ssh_journal_message(msg)
+    if parsed:
+        return parsed
+
+    mid = str(obj.get("MESSAGE_ID") or "").strip().lower()
+    unit_field = str(obj.get("UNIT") or obj.get("_SYSTEMD_UNIT") or "").strip()
+    # 本 poller 仅查 -u ssh/sshd；若带 UNIT 则再确认，避免误伤
+    if unit_field and "ssh" not in unit_field.lower():
+        return None
+    unit = _ssh_unit_from_text(unit_field, msg)
+    if mid == _SYSTEMD_UNIT_STARTED_MSG_ID:
+        return SSH_ENABLED, {"from": "systemd", "unit": unit, "via": "message_id"}
+    if mid in (_SYSTEMD_UNIT_STOPPED_MSG_ID, _SYSTEMD_UNIT_STOPPING_MSG_ID):
+        return SSH_DISABLED, {"from": "systemd", "unit": unit, "via": "message_id"}
+    return None
+
+
 class SshJournalPoller:
     """轮询 journalctl 增量，推送 SSH_* 事件。"""
 
@@ -137,13 +277,17 @@ class SshJournalPoller:
         monitor_events: Optional[List[str]] = None,
         journal_units: Optional[List[str]] = None,
         ignore_loopback: bool = False,
+        ignore_lan: bool = False,
     ):
         self.cursor_dir = Path(cursor_dir)
         self.ignore_loopback = bool(ignore_loopback)
+        self.ignore_lan = bool(ignore_lan)
         self.poll_interval = max(1, int(poll_interval or 5))
         self.monitor_events = set(monitor_events or [])
         self.journal_units = list(journal_units or ["ssh", "sshd"])
         self.event_handlers: Dict[str, Callable] = {}
+        # SSH 服务启停钩子：不论是否勾选 SSH_ENABLED/DISABLED 都会回调（供开启超时提醒等）
+        self._service_hooks: List[Callable[[str, Dict[str, Any]], None]] = []
         self.poll_batch_summary_enabled = False
         self.summary_batch_enqueue: Optional[Callable[[List[Dict[str, Any]]], None]] = None
         self.running = False
@@ -152,6 +296,9 @@ class SshJournalPoller:
         self.logger = logging.getLogger(__name__)
         self.cursor_dir.mkdir(parents=True, exist_ok=True)
         self._available: Optional[bool] = None
+        # Stopping + signal15 + Stopped 常在同一秒内连发，合并为一次关闭推送
+        self._last_disabled_push_at = 0.0
+        self._disabled_coalesce_seconds = 5.0
 
     def add_handler(self, event_type: str, handler: Callable) -> None:
         self.event_handlers[event_type] = handler
@@ -159,11 +306,19 @@ class SshJournalPoller:
     def clear_handlers(self) -> None:
         self.event_handlers.clear()
 
+    def add_service_hook(self, hook: Callable[[str, Dict[str, Any]], None]) -> None:
+        if hook and hook not in self._service_hooks:
+            self._service_hooks.append(hook)
+
+    def clear_service_hooks(self) -> None:
+        self._service_hooks.clear()
+
     def update_config(
         self,
         monitor_events: Optional[List[str]] = None,
         poll_interval: Optional[int] = None,
         ignore_loopback: Optional[bool] = None,
+        ignore_lan: Optional[bool] = None,
     ) -> None:
         if monitor_events is not None:
             self.monitor_events = set(monitor_events)
@@ -171,6 +326,8 @@ class SshJournalPoller:
             self.poll_interval = max(1, int(poll_interval))
         if ignore_loopback is not None:
             self.ignore_loopback = bool(ignore_loopback)
+        if ignore_lan is not None:
+            self.ignore_lan = bool(ignore_lan)
 
     def set_poll_batch_summary(
         self,
@@ -294,7 +451,8 @@ class SshJournalPoller:
         extra = [
             "-o",
             "json",
-            "--output-fields=MESSAGE,__CURSOR,__REALTIME_TIMESTAMP",
+            # MESSAGE_ID/UNIT：关闭文案不含 ssh.service 时仍可识别启停
+            "--output-fields=MESSAGE,__CURSOR,__REALTIME_TIMESTAMP,MESSAGE_ID,UNIT,_SYSTEMD_UNIT",
             "--show-cursor",
         ]
         extra.extend(["--after-cursor", cursor] if cursor else ["--since", since])
@@ -351,16 +509,40 @@ class SshJournalPoller:
             return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     def _emit(self, event_type: str, event_data: Dict[str, Any], raw_msg: str, ts: str) -> None:
-        if self.monitor_events and event_type not in self.monitor_events:
+        event_data = dict(event_data)
+        event_data.setdefault("_source", "ssh_journal")
+        event_data.setdefault("_source_event_id", event_type)
+
+        if event_type in SSH_SERVICE_SWITCH_EVENTS and self._service_hooks:
+            for hook in list(self._service_hooks):
+                try:
+                    hook(event_type, event_data)
+                except Exception as e:
+                    self.logger.error("SSH 服务钩子失败 %s: %s", event_type, e, exc_info=True)
+
+        # 启/停成对：勾选「SSH已启用」或「SSH已关闭」任一，两者都推
+        if event_type in SSH_SERVICE_SWITCH_EVENTS:
+            if self.monitor_events and not (self.monitor_events & SSH_SERVICE_SWITCH_EVENTS):
+                return
+        elif self.monitor_events and event_type not in self.monitor_events:
             return
-        if self.ignore_loopback and should_ignore_loopback_ssh(event_type, event_data):
+        if should_ignore_ssh_by_source(
+            event_type,
+            event_data,
+            ignore_loopback=self.ignore_loopback,
+            ignore_lan=self.ignore_lan,
+        ):
             return
         handler = self.event_handlers.get(event_type)
         if not handler:
             return
-        event_data = dict(event_data)
-        event_data.setdefault("_source", "ssh_journal")
-        event_data.setdefault("_source_event_id", event_type)
+        # Stopping / signal15 / Stopped 常连发：钩子已触发，推送只留一次
+        if event_type == SSH_DISABLED:
+            now = time.time()
+            if (now - float(self._last_disabled_push_at or 0.0)) < float(self._disabled_coalesce_seconds):
+                self.logger.debug("合并短时间内重复的 SSH 关闭事件")
+                return
+            self._last_disabled_push_at = now
         entry = JournalEntry(
             cursor=f"ssh-journal-{event_type}-{int(time.time())}",
             timestamp=ts,
@@ -390,6 +572,8 @@ class SshJournalPoller:
                 )
             else:
                 handler(event_data, entry)
+        except OutboxWriteError:
+            raise
         except Exception as e:
             self.logger.error("处理 SSH journal 事件失败 %s: %s", event_type, e, exc_info=True)
 
@@ -404,14 +588,18 @@ class SshJournalPoller:
             self._save_state(state)
         entries, new_cursor = self._fetch_entries(cursor, str(state.get("since") or ""))
         for obj in entries:
-            msg = obj.get("MESSAGE")
-            if isinstance(msg, list):
-                msg = "".join(str(x) for x in msg)
-            msg = str(msg or "")
-            parsed = parse_ssh_journal_message(msg)
+            parsed = parse_ssh_journal_entry(obj)
             if not parsed:
                 continue
             event_type, event_data = parsed
+            event_data = dict(event_data)
+            msg = _coerce_journal_message(obj.get("MESSAGE")) or event_type
+            # 每条 journal 记录唯一游标，避免 SSH 启停被「同分钟去重」吞掉
+            jcursor = str(obj.get("__CURSOR") or "").strip()
+            if jcursor:
+                event_data["_source_cursor"] = jcursor
+            else:
+                event_data["_source_cursor"] = f"{event_type}-{time.time_ns()}"
             self._emit(event_type, event_data, msg, self._ts_from_entry(obj))
         if new_cursor and new_cursor != cursor:
             state["cursor"] = new_cursor
@@ -427,7 +615,7 @@ class SshJournalPoller:
         )
         while self.running:
             try:
-                if SSH_JOURNAL_EVENTS & self.monitor_events:
+                if (SSH_JOURNAL_EVENTS & self.monitor_events) or self._service_hooks:
                     if not state.get("aligned"):
                         self._align_cursor(state)
                     if state.get("aligned"):
@@ -442,8 +630,8 @@ class SshJournalPoller:
     def start(self) -> None:
         if self.running:
             return
-        if not (SSH_JOURNAL_EVENTS & self.monitor_events):
-            self.logger.info("monitor_events 未包含 SSH 事件，跳过 SshJournalPoller")
+        if not (SSH_JOURNAL_EVENTS & self.monitor_events) and not self._service_hooks:
+            self.logger.info("monitor_events 未包含 SSH 事件且无服务钩子，跳过 SshJournalPoller")
             return
         if not self.is_available():
             self.logger.warning("SSH journal 不可用，跳过 SshJournalPoller（将回退 logger_data 中的 Sshd*）")

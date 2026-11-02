@@ -46,18 +46,27 @@ def config_load_error(config_file: Path) -> str:
         return ""
     try:
         with open(config_file, "r", encoding="utf-8") as f:
-            json.load(f)
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return "config.json 顶层必须为 JSON 对象。"
+        for key in ("web_password_salt", "web_password_hash"):
+            if key in data and not isinstance(data[key], str):
+                return f"config.json 的 {key} 必须为字符串。"
     except json.JSONDecodeError as e:
         return f"config.json 不是合法 JSON：{e}"
     except OSError as e:
         return f"无法读取配置文件：{e}"
+    except UnicodeError:
+        return "config.json 必须使用 UTF-8 编码。"
+    return ""
 
 
 def load_raw_config(config_file: Path) -> dict:
     if config_file.exists():
         try:
             with open(config_file, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+                return data if isinstance(data, dict) else {}
         except Exception:
             # 配置损坏时回退空配置，避免 UI 崩溃
             return {}

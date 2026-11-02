@@ -7,16 +7,25 @@
 - **数据库轮询**：定时轮询 eventlogger 的 SQLite 数据库，仅处理启动后的新记录
 - **多平台通知**：企业微信、钉钉、飞书、Bark、PushPlus
 - **Web 配置页**：内置配置 UI（默认端口 `18080`），支持 Webhook、事件类型、勿扰、标题前缀、PushPlus 等；保存后热加载，一般无需重启
-- **Web 访问控制**：所有配置接口均需登录；首次设置密码需填写启动日志中的初始化码（或用 `FNMB_WEB_PASSWORD` 预置），`config.json` 内仅保存盐值与哈希；配置页中的 Webhook key、Token、SMTP 密码会打码显示
+- **Web 访问控制**：默认启用访问密码，可在系统设置关闭；首次设置密码需填写启动日志中的初始化码（或用 `FNMB_WEB_PASSWORD` 预置），`config.json` 内仅保存盐值与哈希；配置页中的 Webhook key、Token、SMTP 密码会打码显示
 - **智能去重**：时间窗口去重（默认 300 秒）
 - **磁盘事件合并**：同类型磁盘唤醒/休眠在时间窗口内合并推送
 - **HTTP 连接池**：统一 HTTP 管理与重试
 - **勿扰模式**：可设置时段内不推送，结束后汇总为一条消息
+- **待发通知持久化**：全局轮询汇总队列和勿扰外部事件计数落盘，重启后继续处理；全部渠道失败时保留批次，至少间隔 60 秒重试，详见 [通知投递与恢复](docs/notification-delivery.md)。
+- **影视静默汇总**：入库、刮削完成记录连续 60 秒无新增后合成一条“影视处理本轮汇总”，同一资源去重，电视剧按作品和季展示单集；继续沿用原有两项事件勾选，无需另开轮询汇总模式。
+- **音乐库通知**：曲目入库、移出库连续 60 秒静默后汇总，收藏和加入歌单即时通知（开启全局轮询汇总后随轮询批次发送）。
 - **通知失败自愈**：连续失败达到阈值时可触发进程内重启通知链路（可通过环境变量关闭或调参）
 - **Docker 部署**：支持 Docker Compose 一键部署，带健康检查
 - **配置热加载**：通过 Web 保存 `config.json` 后自动生效；环境变量仍优先生效且不会被文件覆盖
 
 ### 支持的事件类型
+
+影视入库/刮削通知只累计已勾选的阶段，同一批次中的条目和媒体文件关联按资源标识去重。数量以去重后的数据库条目为准，会区分电影、剧集、季与单集，不等同于新增视频文件数；同一资源既入库又完成刮削时，会分别计入两个阶段。汇总仅展示有限作品预览，其余显示省略数量，不影响完整计数。连续静默并不能证明整个导入或刮削任务完成。
+
+缓冲使用本地状态文件保存，正常重启后继续处理已观察到的批次；停机期间的新记录仍按启动基线规则跳过，不补发历史。全部渠道失败时保留批次，最多每 60 秒重试一次；部分渠道成功时不整批重推，避免重复通知。汇总准备发送时若处于勿扰时段，其入库/刮削计数会纳入勿扰汇总。影视批次已经完成专门汇总，因此不会再投入短周期的全局轮询队列，避免套两层汇总或拆成多条。
+
+音乐入库/移出汇总同样持久化已观察到的待发批次，重启后恢复，全部渠道失败时至少间隔 60 秒重试；停机期间新变化不补发。两项事件可独立勾选，仅开启移出监控也会跟踪后来新增的曲目。同一静默批次内先入库再移出的曲目按净变化抵消。音乐汇总不再套入全局轮询汇总，勿扰期间按原始入库/移出数量计入勿扰汇总。
 
 以下为 `monitor_events` 中允许配置的 `eventId`（与数据库一致；旧配置里已移除的类型会在启动时被过滤）：
 
@@ -25,9 +34,9 @@
 - **应用**：`APP_CRASH`, `APP_UPDATE_FAILED`, `APP_START_FAILED_LOCAL_APP_RUN_EXCEPTION`, `APP_AUTO_START_FAILED_DOCKER_NOT_AVAILABLE`, `APP_STARTED`, `APP_STOPPED`, `APP_UPDATED`, `APP_INSTALLED`, `APP_AUTO_STARTED`, `APP_UNINSTALLED`
 - **系统**：`CPU_USAGE_ALARM`, `CPU_USAGE_RESTORED`, `CPU_TEMPERATURE_ALARM`
 - **UPS**：`UPS_ONBATT`, `UPS_ONBATT_LOWBATT`, `UPS_ONLINE`, `UPS_ENABLE`, `UPS_DISABLE`
-- **SSH**：`SSH_INVALID_USER`, `SSH_AUTH_FAILED`, `SSH_LOGIN_SUCCESS`, `SSH_DISCONNECTED`（优先从宿主机 `journalctl -u ssh/sshd` 采集；需挂载 `/var/log/journal` 与 `/etc/machine-id`）
+- **SSH**：`SSH_INVALID_USER`, `SSH_AUTH_FAILED`, `SSH_LOGIN_SUCCESS`, `SSH_DISCONNECTED`, `SSH_ENABLED`, `SSH_DISABLED`, `SSH_OPEN_TIMEOUT`（journal 采集登录/断开与服务启停；开启超时提醒在 SSH 模块勾选 `SSH_OPEN_TIMEOUT`，按 `ssh_open_remind_minutes` 间隔反复提醒直至关闭，默认 30 分钟；需 journal 可读）
 - **文件与共享**：`ARCHIVING_SUCCESS`, `DeleteFile`, `MovetoTrashbin`, `SHARE_EVENTID_DEL`, `SHARE_EVENTID_PUT`
-- **服务开关**：`WEBDAV_ENABLED` / `WEBDAV_DISABLED`, `SAMBA_ENABLED` / `SAMBA_DISABLED`, `DLNA_ENABLED` / `DLNA_DISABLED`, `FTP_ENABLED` / `FTP_DISABLED`, `NFS_ENABLED` / `NFS_DISABLED`
+- **服务开关**：`WEBDAV_ENABLED` / `WEBDAV_DISABLED`, `SAMBA_ENABLED` / `SAMBA_DISABLED`, `DLNA_ENABLED` / `DLNA_DISABLED`, `FTP_ENABLED` / `FTP_DISABLED`, `NFS_ENABLED` / `NFS_DISABLED`；SSH 服务开关见上 `SSH_ENABLED` / `SSH_DISABLED`
 - **防火墙与安全**：`FW_ENABLE`, `FW_DISABLE`, `SECURITY_PORTCHANGED`
 - **虚拟机**：`SHUTDOWN_VM`, `STATUS_RUNNING_VM`, `DESTROY_VM`
 
@@ -75,9 +84,11 @@ python tools/log_manager.py cleanup 30
 | `dedup_window` | 去重时间窗口（秒） |
 | `log_retention_days` | 原始推送日志保留天数 |
 | `max_log_age` | 应用运行日志 `monitor_*.log` 保留天数 |
-| `dnd_enabled` / `dnd_start_time` / `dnd_end_time` | 勿扰开关与时段（HH:MM，可跨日，与巡检 Cron 一样使用系统本地时区） |
+| `dnd_enabled` / `dnd_start_time` / `dnd_end_time` | 勿扰开关与时段（HH:MM，可跨日，与巡检 Cron 使用同一运行时区；Docker 默认北京时间，FPK 使用 NAS 系统时区） |
 | `ssh_ignore_loopback` | 忽略来源为 127.0.0.1 / ::1 的 SSH 登录成功与断开（默认关闭；失败告警不受影响；SSH 经 frp 等内网穿透接入时勿开启）。环境变量 `SSH_IGNORE_LOOPBACK` |
-首次在 Web 中设置密码后，会在同文件写入 `web_password_salt`、`web_password_hash`（请勿手工泄露）。旧版的 `web_password_enabled` 和 `FNMB_DISABLE_AUTH` 已废弃，不再能关闭鉴权。FPK 和 Docker 首次访问或连续 15 分钟无操作后需输入应用密码，未过期时重新打开或刷新配置页可直接进入；飞牛管理员身份不能代替应用密码。连续 15 分钟无操作后自动返回登录页，后台统计刷新不会续期，未保存的配置不会自动提交。
+首次在 Web 中设置密码后，会在同文件写入 `web_password_salt`、`web_password_hash`（请勿手工泄露）。在配置页「系统设置」中取消勾选「启用访问密码」并保存，即可免输密码（对应 `web_password_enabled: false`）；开关默认开启，兼容旧配置中的显式关闭值。关闭后刷新页面、重新打开、应用重启或空闲超过 15 分钟均无需登录；原密码哈希保留，再次勾选并保存后恢复密码登录，旧会话作废。仅建议在可信网络关闭密码验证。`FNMB_DISABLE_AUTH` 仍不生效。
+
+启用密码时，FPK 和 Docker 首次访问或连续 15 分钟无操作后需输入应用密码，未过期时重新打开或刷新配置页可直接进入；飞牛管理员身份不能代替应用密码。连续 15 分钟无操作后自动返回登录页，后台统计刷新不会续期，未保存的配置不会自动提交。
 
 **首次设置密码**：为防止局域网内他人抢先设密，首次设置需填写初始化码。初始化码在启动时打印到日志（`docker logs 容器名`），同时写入配置目录的 `.setup_code`（权限 600），设置密码后自动失效。也可用环境变量 `FNMB_WEB_PASSWORD` 预置初始密码（至少 8 位）。
 
@@ -93,6 +104,7 @@ python tools/log_manager.py cleanup 30
 - `LOG_RETENTION_DAYS`、`MAX_LOG_AGE`
 - `UI_PORT`：Web 端口（默认 `18080`）；`UI_HOST`：监听地址（默认 `0.0.0.0`，仅本机访问可设 `127.0.0.1`）
 - `FNMB_WEB_PASSWORD`：未设密码时作为初始 Web 密码（至少 8 位）
+- `TZ`：Docker 镜像默认 `Asia/Shanghai`（北京时间），勿扰判断、汇总消息时间与巡检 Cron 均使用此时区；可按 NAS 所在时区覆盖，如 `Europe/Berlin`。FPK 默认沿用 NAS 系统时区。
 - `LOGTIME_DISPLAY_OFFSET_SECONDS`：修正日志时间显示（默认 `28800`，即 +8 小时；若显示不准可调整）
 - `NOTIFY_RESTART_ENABLED`、`NOTIFY_RESTART_CONSECUTIVE`、`NOTIFY_RESTART_WINDOW`、`NOTIFY_RESTART_COOLDOWN`：通知链路失败重启策略（默认关闭；推送限流/额度用尽时重启无法恢复，反而会重复推送）
 - `APP_HOME`：自定义应用根目录（影响 `config.json` 解析路径，一般 Docker 内为 `/app`）
@@ -130,6 +142,8 @@ services:
 ```
 
 安装前可在 Compose 同目录的 `.env` 文件中填写 `UI_PORT=19080`（示例端口，可自行选择）；不填则使用 `18080`。浏览器访问 `http://<本机IP>:所选端口` 打开 Web 配置页。`./data/logs`、`./data/cursor`、`./config` 为相对 compose 文件所在目录的路径，可按需调整左侧宿主机路径。
+
+Docker 不会自动继承 NAS 时区。直接从镜像创建容器时，镜像也默认使用北京时间；若容器配置中已显式设置 `TZ=UTC` 或其他时区，仍以该配置为准。出现「07:00 的勿扰汇总在北京时间 15:00 才送达」时，请将容器环境变量设为 `TZ=Asia/Shanghai` 并重建容器（仅重启不会应用修改后的容器环境）。启动日志会显示实际时区和 UTC 偏移。`LOGTIME_DISPLAY_OFFSET_SECONDS` 用于日志库字段的时间偏差，不用于调整勿扰或 Cron 时区。
 
 巡检默认使用 host 网络，避免把容器的 `172.x` 地址当作 NAS 内网 IP；host 模式不配置 `ports`，修改监听端口请设置 `UI_PORT`。若保留自定义桥接网络及端口映射，请设置 `NAS_LAN_IP=<NAS 的内网 IPv4>`。原有容器需按更新后的 Compose 重建，才能使用新增挂载及网络配置。
 
@@ -184,7 +198,7 @@ PYTHONPATH=. LOGGER_DB_PATH=./logger_data.db3 WECHAT_WEBHOOK_URL=xxx python3 src
 ```bash
 ./scripts/build-fpk.sh            # 需 fnpack（PATH 或 ~/.local/bin），或 FNPACK=/path/to/fnpack
 # 产物: dist/FnMessageBot-<manifest version>.fpk 及 .fpk.sha256
-python3 scripts/verify-fpk.py dist/FnMessageBot-2.6.0.fpk  # 示例：核对包内文件与当前源码
+python3 scripts/verify-fpk.py dist/FnMessageBot-2.7.0.fpk  # 示例：核对包内文件与当前源码
 ```
 
 构建在独立临时目录进行，使用顶层 `src/`、`requirements.txt` 和 `assets/`，保留 `fpk/` 中的安装向导、权限与网关配置，不修改或删除工作区中的临时源码。
