@@ -33,25 +33,29 @@ class SshOpenWatchTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_timeout_fires_after_deadline(self):
+        import monitor.ssh_open_watch as sow
+
         self.minutes["v"] = 30
-        self.watch.on_enabled()
-        with self.watch._lock:
-            opened = time.time() - 31 * 60
-            self.watch._opened_at = opened
-            self.watch._next_due_at = opened + 30 * 60
-            self.watch._save_state_locked()
-            self.watch._reschedule_locked(reason="test")
-        deadline = time.time() + 2.0
-        while time.time() < deadline and not self.calls:
-            time.sleep(0.05)
-        self.assertEqual(len(self.calls), 1)
-        ed, entry = self.calls[0]
-        self.assertEqual(ed.get("remind_minutes"), 30)
-        self.assertGreaterEqual(int(ed.get("elapsed_minutes") or 0), 30)
-        self.assertTrue(entry.message)
-        with self.watch._lock:
-            self.assertIsNotNone(self.watch._next_due_at)
-            self.assertGreater(float(self.watch._next_due_at), time.time() - 1)
+        # CI/Linux 上 systemctl 常报告 ssh 未激活，会跳过推送；与重复提醒用例一致做 mock。
+        with patch.object(sow, "_ssh_service_active", return_value=True):
+            self.watch.on_enabled()
+            with self.watch._lock:
+                opened = time.time() - 31 * 60
+                self.watch._opened_at = opened
+                self.watch._next_due_at = opened + 30 * 60
+                self.watch._save_state_locked()
+                self.watch._reschedule_locked(reason="test")
+            deadline = time.time() + 2.0
+            while time.time() < deadline and not self.calls:
+                time.sleep(0.05)
+            self.assertEqual(len(self.calls), 1)
+            ed, entry = self.calls[0]
+            self.assertEqual(ed.get("remind_minutes"), 30)
+            self.assertGreaterEqual(int(ed.get("elapsed_minutes") or 0), 30)
+            self.assertTrue(entry.message)
+            with self.watch._lock:
+                self.assertIsNotNone(self.watch._next_due_at)
+                self.assertGreater(float(self.watch._next_due_at), time.time() - 1)
 
     def test_repeats_until_disabled(self):
         """同一开启会话应按间隔再次提醒。"""
