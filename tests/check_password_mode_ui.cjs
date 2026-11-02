@@ -21,6 +21,11 @@ const html = fs.readFileSync(path.join(root, 'src/web/templates/index.html'), 'u
       await page.route('**/*', async route => {
         const url = new URL(route.request().url());
         let response = {ok: true};
+        if (url.pathname.endsWith('/theme.js')) {
+          await route.fulfill({contentType: 'application/javascript',
+            body: fs.readFileSync(path.join(root, 'src/web/static/theme.js'), 'utf8')});
+          return;
+        }
         if (url.pathname.endsWith('/session-guard.js')) {
           await route.fulfill({contentType: 'application/javascript',
             body: fs.readFileSync(path.join(root, 'src/web/static/session-guard.js'), 'utf8')});

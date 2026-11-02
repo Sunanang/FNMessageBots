@@ -2,6 +2,7 @@
 """核对 fnpack 产物、校验和及包内实际文件，不解压到工作目录。"""
 import hashlib
 import io
+import json
 import sys
 import tarfile
 from pathlib import Path, PurePosixPath
@@ -43,20 +44,43 @@ def compare_files(actual, expected):
             raise ValueError(f"Package does not match checkout: {name}")
 
 
+def variant_files(root, variant):
+    if variant not in ("package", "root"):
+        raise ValueError(f"Unknown FPK variant: {variant}")
+    root = Path(root)
+    files = {name: (root / "fpk" / name).read_bytes()
+             for name in ("manifest", "config/privilege", "cmd/fpk-variant")}
+    if variant == "root":
+        metadata = manifest_values(files["manifest"].decode())
+        display_name = metadata.get("display_name", metadata["appname"]) + "（root）"
+        lines = files["manifest"].decode().splitlines()
+        lines = [line for line in lines if line.partition("=")[0].strip() != "display_name"]
+        lines.append(f"display_name = {display_name}")
+        files["manifest"] = ("\n".join(lines) + "\n").encode()
+        files["config/privilege"] = (json.dumps({"defaults": {"run-as": "root"}}, indent=4) + "\n").encode()
+        files["cmd/fpk-variant"] = b"root\n"
+    return files
+
+
 def verify_package(package, root):
     package, root = Path(package), Path(root)
+    variant = "root" if package.stem.endswith("-root") else "package"
+    overrides = variant_files(root, variant)
     checksum = Path(str(package) + ".sha256").read_text().split()
     if checksum != [hashlib.sha256(package.read_bytes()).hexdigest(), package.name]:
         raise ValueError("FPK SHA-256 does not match")
     with tarfile.open(package, "r:*") as archive:
         files = archive_files(archive)
     metadata = manifest_values(files["manifest"].decode())
-    expected_metadata = manifest_values((root / "fpk/manifest").read_text())
-    for key in ("appname", "version", "platform"):
+    expected_metadata = manifest_values(overrides["manifest"].decode())
+    for key in ("appname", "version", "platform", "display_name"):
         if metadata.get(key) != expected_metadata.get(key):
             raise ValueError(f"Wrong manifest {key}")
     if metadata.get("platform") != "all":
         raise ValueError("Expected a platform=all FPK")
+    privilege = json.loads(files["config/privilege"])
+    if privilege.get("defaults", {}).get("run-as") != variant:
+        raise ValueError(f"Wrong FPK runtime identity: expected {variant}")
     expected = {}
     for source, target in (("src", "cmd/fnmessagebots/src"), ("assets", "cmd/fnmessagebots/assets")):
         for path in release_files(root / source):
@@ -68,7 +92,7 @@ def verify_package(package, root):
             continue
         if name == "cmd/fnmessagebots/requirements.txt" or name == "manifest" or path.name == ".gitignore" or path.suffix == ".fpk":
             continue
-        expected[name] = path.read_bytes()
+        expected[name] = overrides.get(name, path.read_bytes())
     compare_files(files, expected)
     for name in files:
         if "__pycache__" in PurePosixPath(name).parts or name.endswith((".pyc", ".pyo", ".pyd", ".DS_Store")):
@@ -83,7 +107,15 @@ def verify_package(package, root):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        raise SystemExit("Usage: python scripts/verify-fpk.py package.fpk")
-    metadata = verify_package(sys.argv[1], Path(__file__).resolve().parents[1])
-    print(f"Verified {metadata['appname']} {metadata['version']}: checksum, source, dependencies, assets and UI match checkout")
+    root = Path(__file__).resolve().parents[1]
+    if len(sys.argv) == 4 and sys.argv[1] == "--prepare-variant":
+        for name, contents in variant_files(root, sys.argv[2]).items():
+            destination = Path(sys.argv[3]) / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(contents)
+    else:
+        if len(sys.argv) < 2:
+            raise SystemExit("Usage: python scripts/verify-fpk.py package.fpk [package-root.fpk ...]")
+        for package in sys.argv[1:]:
+            metadata = verify_package(package, root)
+            print(f"Verified {Path(package).name}: checksum, runtime identity, source, dependencies, assets and UI match checkout")

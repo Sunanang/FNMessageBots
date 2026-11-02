@@ -31,6 +31,8 @@ class FpkBuildTests(unittest.TestCase):
             "assets/icons/app-icon.png": "current icon",
             "fpk/manifest": "appname = FnMessageBot\nversion = 2.6.0\nplatform = all\n",
             "fpk/cmd/main": "#!/bin/sh\nexit 0\n",
+            "fpk/config/privilege": '{"defaults":{"run-as":"package"},"username":"FnMessageBot","groupname":"FnMessageBot"}',
+            "fpk/cmd/fpk-variant": "package\n",
             "fpk/cmd/fnmessagebots/config/config.json": "{}",
             "fpk/cmd/fnmessagebots/requirements.txt": "obsolete requirements",
             "fpk/cmd/fnmessagebots/assets/icons/app-icon.png": "obsolete icon",
@@ -43,6 +45,7 @@ class FpkBuildTests(unittest.TestCase):
             target.write_text(text)
         (self.repo / "scripts").mkdir()
         shutil.copy2(ROOT / "scripts/build-fpk.sh", self.repo / "scripts/build-fpk.sh")
+        shutil.copy2(ROOT / "scripts/verify-fpk.py", self.repo / "scripts/verify-fpk.py")
         self.tool = self.base / "fnpack"
         self.tool.write_text(f"#!{sys.executable}\n" + '''
 import io, os, sys, tarfile
@@ -67,8 +70,11 @@ with tarfile.open('FnMessageBot.fpk', mode='w:gz') as archive:
         self.capture = self.base / "payload-path"
         self.env = {**os.environ, "FNPACK": str(self.tool), "CAPTURE": str(self.capture)}
 
-    def build(self, **env):
-        return subprocess.run(["bash", str(self.repo / "scripts/build-fpk.sh")], env={**self.env, **env},
+    def build(self, variant=None, **env):
+        command = ["bash", str(self.repo / "scripts/build-fpk.sh")]
+        if variant:
+            command.append(variant)
+        return subprocess.run(command, env={**self.env, **env},
                               capture_output=True, text=True, timeout=10)
 
     def test_build_uses_current_source_assets_and_dependencies_without_touching_checkout(self):
@@ -98,6 +104,44 @@ with tarfile.open('FnMessageBot.fpk', mode='w:gz') as archive:
         Path(str(package) + ".sha256").write_text("0" * 64 + "  " + package.name)
         with self.assertRaisesRegex(ValueError, "SHA-256"):
             verify_fpk.verify_package(package, self.repo)
+
+    def test_both_variants_use_same_app_data_identity_and_only_intended_differences(self):
+        before = {str(p.relative_to(self.repo)): p.read_bytes() for p in self.repo.rglob('*') if p.is_file()}
+        result = self.build("all")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        normal = self.repo / "dist/FnMessageBot-2.6.0.fpk"
+        elevated = self.repo / "dist/FnMessageBot-2.6.0-root.fpk"
+        contents = []
+        app_contents = []
+        for package, identity in ((normal, "package"), (elevated, "root")):
+            metadata = verify_fpk.verify_package(package, self.repo)
+            self.assertEqual(metadata["appname"], "FnMessageBot")
+            with tarfile.open(package) as archive:
+                data = verify_fpk.archive_files(archive)
+            self.assertEqual(json.loads(data["config/privilege"])["defaults"]["run-as"], identity)
+            self.assertEqual(data["cmd/fpk-variant"].decode().strip(), identity)
+            with tarfile.open(fileobj=io.BytesIO(data.pop("app.tgz")), mode="r:*") as archive:
+                app_contents.append(verify_fpk.archive_files(archive))
+            contents.append(data)
+        self.assertEqual(app_contents[0], app_contents[1])
+        differences = {key for key in contents[0] if contents[0][key] != contents[1][key]}
+        self.assertEqual(differences, {"manifest", "config/privilege", "cmd/fpk-variant"})
+        for name, data in before.items():
+            self.assertEqual((self.repo / name).read_bytes(), data)
+
+    def test_root_package_cannot_be_mislabeled_as_normal(self):
+        self.assertEqual(self.build("root").returncode, 0)
+        root_package = self.repo / "dist/FnMessageBot-2.6.0-root.fpk"
+        normal_package = self.repo / "dist/FnMessageBot-2.6.0.fpk"
+        shutil.copy2(root_package, normal_package)
+        Path(str(normal_package) + ".sha256").write_text(
+            hashlib.sha256(normal_package.read_bytes()).hexdigest() + "  " + normal_package.name)
+        with self.assertRaises(ValueError):
+            verify_fpk.verify_package(normal_package, self.repo)
+
+    def test_unknown_variant_fails_before_building(self):
+        self.assertNotEqual(self.build("typo").returncode, 0)
+        self.assertFalse(self.capture.exists())
 
 
 @unittest.skipUnless(shutil.which("jq"), "Docker tag publication requires jq")
@@ -175,6 +219,10 @@ class FpkPublishTests(unittest.TestCase):
         self.package = self.base / "dist/FnMessageBot-2.6.0.fpk"
         self.package.write_bytes(b"verified FPK")
         Path(str(self.package) + ".sha256").write_text(hashlib.sha256(self.package.read_bytes()).hexdigest() + "  " + self.package.name + "\n")
+        self.root_package = self.base / "dist/FnMessageBot-2.6.0-root.fpk"
+        self.root_package.write_bytes(b"verified root FPK")
+        Path(str(self.root_package) + ".sha256").write_text(
+            hashlib.sha256(self.root_package.read_bytes()).hexdigest() + "  " + self.root_package.name + "\n")
         self.log = self.base / "gh.jsonl"
         gh = self.base / "gh"
         gh.write_text(f"#!{sys.executable}\n" + '''
@@ -214,11 +262,13 @@ if sys.argv[1:3] == ["release", "view"] and not os.environ.get("EXISTING_RELEASE
         self.assertEqual(len(uploads), 1)
         self.assertEqual([arg for arg in uploads[0] if not arg.startswith("-")], [
             "release", "upload", "v2.6.0", "dist/FnMessageBot-2.6.0.fpk", "dist/FnMessageBot-2.6.0.fpk.sha256",
+            "dist/FnMessageBot-2.6.0-root.fpk", "dist/FnMessageBot-2.6.0-root.fpk.sha256",
         ])
         notes = [entry["notes"] for entry in entries if "notes" in entry]
         self.assertTrue(notes)
         for text in notes:
             self.assertIn("FnMessageBot-2.6.0.fpk", text)
+            self.assertIn("FnMessageBot-2.6.0-root.fpk", text)
             self.assertIn("`v2.6.0`", text)
             self.assertIn("两套命名", text)
             self.assertNotIn("FnMessageBot-latest.fpk", text)
@@ -258,6 +308,14 @@ if sys.argv[1:3] == ["release", "view"] and not os.environ.get("EXISTING_RELEASE
 
     def test_invalid_checksum_never_calls_github(self):
         self.package.write_bytes(b"corrupted FPK")
+        self.assertNotEqual(self.publish().returncode, 0)
+        self.assertFalse(self.log.exists())
+
+    def test_missing_or_corrupt_root_variant_never_calls_github(self):
+        self.root_package.write_bytes(b"corrupted root FPK")
+        self.assertNotEqual(self.publish().returncode, 0)
+        self.assertFalse(self.log.exists())
+        self.root_package.unlink()
         self.assertNotEqual(self.publish().returncode, 0)
         self.assertFalse(self.log.exists())
 

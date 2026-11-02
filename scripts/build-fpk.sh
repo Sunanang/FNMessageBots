@@ -5,6 +5,13 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FPK_DIR="${ROOT}/fpk"
 DIST="${ROOT}/dist"
+[ "$#" -le 1 ] || { echo "Usage: $0 [package|root|all]" >&2; exit 1; }
+case "${1:-package}" in
+    package) VARIANTS=(package) ;;
+    root) VARIANTS=(root) ;;
+    all) VARIANTS=(package root) ;;
+    *) echo "Usage: $0 [package|root|all]" >&2; exit 1 ;;
+esac
 
 FNPACK="${FNPACK:-$(command -v fnpack || true)}"
 [ -z "${FNPACK}" ] && [ -x "${HOME}/.local/bin/fnpack" ] && FNPACK="${HOME}/.local/bin/fnpack"
@@ -17,10 +24,13 @@ VERSION="$(sed -n 's/^version[[:space:]]*=[[:space:]]*//p' "${FPK_DIR}/manifest"
 [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || { echo "错误: fpk/manifest 版本无效" >&2; exit 1; }
 
 BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fnmb-fpk.XXXXXX")"
-PAYLOAD="${BUILD_DIR}/payload"
 cleanup() { rm -rf -- "${BUILD_DIR}"; }
 trap cleanup EXIT
 
+for VARIANT in "${VARIANTS[@]}"; do
+STAGE_DIR="${BUILD_DIR}/${VARIANT}"
+PAYLOAD="${STAGE_DIR}/payload"
+mkdir -p "${PAYLOAD}"
 rsync -a --exclude '__pycache__/' --exclude '*.py[cod]' --exclude '.DS_Store' \
     --exclude '.gitignore' --exclude '*.fpk' --exclude 'data/' \
     --exclude 'cmd/fnmessagebots/src/' "${FPK_DIR}/" "${PAYLOAD}/"
@@ -30,14 +40,17 @@ rsync -a --delete --exclude '__pycache__/' --exclude '*.py[cod]' --exclude '.DS_
     "${ROOT}/src/" "${CODE_DIR}/src/"
 cp "${ROOT}/requirements.txt" "${CODE_DIR}/requirements.txt"
 rsync -a --delete --exclude '.DS_Store' "${ROOT}/assets/" "${CODE_DIR}/assets/"
+python3 "${ROOT}/scripts/verify-fpk.py" --prepare-variant "${VARIANT}" "${PAYLOAD}"
 
 # fnpack 将产物写到当前目录；不在源仓库中生成、删除或覆盖临时源码。
-(cd "${BUILD_DIR}" && "${FNPACK}" build --directory "${PAYLOAD}")
+(cd "${STAGE_DIR}" && "${FNPACK}" build --directory "${PAYLOAD}")
 
-PKG="${BUILD_DIR}/FnMessageBot.fpk"
+PKG="${STAGE_DIR}/FnMessageBot.fpk"
 [ -s "${PKG}" ] || { echo "错误: fnpack 未生成非空的 FnMessageBot.fpk" >&2; exit 1; }
 mkdir -p "${DIST}"
-OUT="${DIST}/FnMessageBot-${VERSION}.fpk"
+SUFFIX=""
+[ "${VARIANT}" != root ] || SUFFIX="-root"
+OUT="${DIST}/FnMessageBot-${VERSION}${SUFFIX}.fpk"
 mv -f "${PKG}" "${OUT}"
 python3 - "${OUT}" <<'PY'
 import hashlib
@@ -49,3 +62,4 @@ digest = hashlib.sha256(package.read_bytes()).hexdigest()
 Path(str(package) + '.sha256').write_text(f'{digest}  {package.name}\n', encoding='utf-8')
 PY
 echo "已生成: ${OUT} ($(du -h "${OUT}" | cut -f1))"
+done

@@ -1,6 +1,7 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-saved-theme="{{ saved_theme }}">
 <head>
+  <script src="theme.js"></script>
   <meta charset="UTF-8" />
   <meta name="robots" content="noindex, nofollow" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
@@ -8,13 +9,6 @@
   <link rel="icon" href="{{ favicon_url }}" />
   {% endif %}
   <title>支持作者 - FnMessageBot</title>
-  <script>
-    (function() {
-      var mode = localStorage.getItem("fnmb_theme");
-      var resolved = (mode === "dark") ? "dark" : "light";
-      document.documentElement.setAttribute("data-theme", resolved);
-    })();
-  </script>
   <style>
     :root {
       color-scheme: light;
