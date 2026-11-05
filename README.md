@@ -30,6 +30,7 @@
 
 以下为 `monitor_events` 中允许配置的 `eventId`（与数据库一致；旧配置里已移除的类型会在启动时被过滤）：
 
+- **用户管理**：`AddUser`（创建系统用户）、`DelUser`（删除系统用户），默认不勾选；在 Web「用户管理」中分别开启后生效。通知展示操作用户、目标用户及各自 UID，支持极简推送、轮询汇总和勿扰汇总；与影视库创建用户事件独立。仅处理启动对齐之后的新日志，不补发历史。
 - **登录**：`LoginSucc`, `LoginSucc2FA1`, `LoginFail`, `Logout`
 - **硬盘**：`FoundDisk`, `DiskWakeup`, `DiskSpindown`, `DISK_IO_ERR`
 - **应用**：`APP_CRASH`, `APP_UPDATE_FAILED`, `APP_START_FAILED_LOCAL_APP_RUN_EXCEPTION`, `APP_AUTO_START_FAILED_DOCKER_NOT_AVAILABLE`, `APP_STARTED`, `APP_STOPPED`, `APP_UPDATED`, `APP_INSTALLED`, `APP_AUTO_STARTED`, `APP_UNINSTALLED`
@@ -106,7 +107,7 @@ python tools/log_manager.py cleanup 30
 - `UI_PORT`：Web 端口（默认 `18080`）；`UI_HOST`：监听地址（默认 `0.0.0.0`，仅本机访问可设 `127.0.0.1`）
 - `FNMB_WEB_PASSWORD`：未设密码时作为初始 Web 密码（至少 8 位）
 - `TZ`：Docker 镜像默认 `Asia/Shanghai`（北京时间），勿扰判断、汇总消息时间与巡检 Cron 均使用此时区；可按 NAS 所在时区覆盖，如 `Europe/Berlin`。FPK 默认沿用 NAS 系统时区。
-- `LOGTIME_DISPLAY_OFFSET_SECONDS`：修正日志时间显示（默认 `28800`，即 +8 小时；若显示不准可调整）
+- `LOGTIME_DISPLAY_OFFSET_SECONDS`：修正日志库时间偏差（默认 `0`，标准 Unix 时间戳无需补偿；显示时已转换为北京时间）。仅旧系统存库时间确有偏差时手动设置，如 `28800` 表示额外补偿 +8 小时。已有显式配置仍生效，此补偿也用于勿扰日志查询。
 - `NOTIFY_RESTART_ENABLED`、`NOTIFY_RESTART_CONSECUTIVE`、`NOTIFY_RESTART_WINDOW`、`NOTIFY_RESTART_COOLDOWN`：通知链路失败重启策略（默认关闭；推送限流/额度用尽时重启无法恢复，反而会重复推送）
 - `APP_HOME`：自定义应用根目录（影响 `config.json` 解析路径，一般 Docker 内为 `/app`）
 
@@ -201,7 +202,7 @@ PYTHONPATH=. LOGGER_DB_PATH=./logger_data.db3 WECHAT_WEBHOOK_URL=xxx python3 src
 ./scripts/build-fpk.sh root       # 单独构建 root 版
 ./scripts/build-fpk.sh all        # 同时构建普通用户版和 root 版（发布工作流使用）
 # 产物: dist/FnMessageBot-<version>.fpk、FnMessageBot-<version>-root.fpk 及各自 .sha256
-python3 scripts/verify-fpk.py dist/FnMessageBot-2.7.5.fpk dist/FnMessageBot-2.7.5-root.fpk
+python3 scripts/verify-fpk.py dist/FnMessageBot-2.8.0.fpk dist/FnMessageBot-2.8.0-root.fpk
 ```
 
 构建在独立临时目录进行，使用顶层 `src/`、`requirements.txt` 和 `assets/`，保留 `fpk/` 中的安装向导、权限与网关配置，不修改或删除工作区中的临时源码。
@@ -244,11 +245,11 @@ gh api --method PUT repos/Sunanang/FNMessageBots/rulesets/18157912 \
 | amd64 Docker 镜像 | `sunanang/fn-message-bots:latest-amd64` |
 | arm64 Docker 镜像 | `sunanang/fn-message-bots:latest-arm64` |
 | 自动选择架构的 Docker 镜像 | `sunanang/fn-message-bots:latest`（同时包含 amd64、arm64） |
-| FPK 普通用户版 | `FnMessageBot-{version}.fpk`，GitHub Release 标签 `v{version}`（例如 `v2.7.5`） |
+| FPK 普通用户版 | `FnMessageBot-{version}.fpk`，GitHub Release 标签 `v{version}`（例如 `v2.8.0`） |
 | FPK root 版 | 同标签下的 `FnMessageBot-{version}-root.fpk` |
 | FPK 校验文件 | 两个安装包各自对应的 `.fpk.sha256` |
 
-FPK 按 `fpk/manifest` 的 `version` 发布到标签 `v{version}`（例如 `v2.7.5`），同时上传普通用户版、root 版及各自校验和；任一包缺失或校验失败都不会执行 FPK 发布。同一版本再次合入 `main` 时覆盖该版本 Release。Docker 镜像仍使用浮动标签 `latest` / `latest-amd64` / `latest-arm64`，与 FPK 的版本标签是两套命名。包内版本以 `fpk/manifest` 为准，正式升级时需同步维护 `pyproject.toml` 与 manifest 版本。两个 FPK 也会保存为同一个 Actions Artifact。仓库里旧的固定标签 `latest` Release 不会被这次发布自动删除。
+FPK 按 `fpk/manifest` 的 `version` 发布到标签 `v{version}`（例如 `v2.8.0`），同时上传普通用户版、root 版及各自校验和；任一包缺失或校验失败都不会执行 FPK 发布。同一版本再次合入 `main` 时覆盖该版本 Release。Docker 镜像仍使用浮动标签 `latest` / `latest-amd64` / `latest-arm64`，与 FPK 的版本标签是两套命名。包内版本以 `fpk/manifest` 为准，正式升级时需同步维护 `pyproject.toml` 与 manifest 版本。两个 FPK 也会保存为同一个 Actions Artifact。仓库里旧的固定标签 `latest` Release 不会被这次发布自动删除。
 
 仓库的 **Settings → Secrets and variables → Actions** 需配置 `DOCKERHUB_USERNAME` 和 `DOCKERHUB_TOKEN`，与原有手动合并工作流使用的名称一致。Token 使用可推送 `sunanang/fn-message-bots` 的 Docker Hub Personal Access Token；FPK 发布使用工作流自带的 `GITHUB_TOKEN`，无需 NAS 凭据。发布前会核对镜像的提交与平台，再用 digest 合并，防止不同提交混入 `latest`；旧提交重跑时若 `main` 已前进，会保留构建产物并跳过覆盖最新构建。
 
@@ -261,7 +262,7 @@ FPK 按 `fpk/manifest` 的 `version` 发布到标签 `v{version}`（例如 `v2.7
 回归测试：安装项目运行依赖后，在项目根目录运行 `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v`。测试覆盖 IP、版本、多硬盘温度、权限诊断与配置保存接口，只读写临时配置和数据库，不请求公网接口、不发送通知。页面交互测试可在已有 Playwright 运行时执行 `node tests/check_warning_ui.cjs`，也可用 `FNMB_PLAYWRIGHT_MODULE` 和 `FNMB_BROWSER_EXECUTABLE` 指定已有运行时。
 
 - **收不到通知**：检查 Webhook / PushPlus、网络与 `docker compose logs`。
-- **时间不对**：调整 `LOGTIME_DISPLAY_OFFSET_SECONDS`（默认已为 +8 小时）。
+- **时间不对**：先检查运行时区。日志时间默认按标准 Unix 时间戳显示为北京时间；`2.8.0` 起不再默认额外加 8 小时。若曾显式设置 `LOGTIME_DISPLAY_OFFSET_SECONDS=28800` 且日志时间提前 8 小时，请移除该配置或改为 `0`；只有数据库存库时间确有偏差时才设置补偿。
 - **重复通知**：调大 `dedup_window`（秒）。
 - **Web 配置页打不开**：直接使用 `http://NAS内网IP:所选端口` 验证（默认 `18080`，本服务不直接提供 HTTPS），再检查桌面快捷入口、反向代理和防火墙。host 模式通过 `UI_PORT` 设置端口；桥接模式需核对端口映射。监听失败或 Web 服务线程退出后，程序每 5 秒尝试恢复入口，并将监听地址、失败和恢复信息写入 `monitor_*.log`。Docker 健康检查同时验证 Python 进程及 `/healthz` HTTP 响应；不验证 NAS 外部的代理或端口映射。
 - **忘记 Web 密码**：在可信环境下编辑 `config.json`，删除 `web_password_salt` 与 `web_password_hash` 后重启，再用日志或 `config/.setup_code` 中的初始化码重新设置密码。

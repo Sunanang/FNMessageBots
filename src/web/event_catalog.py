@@ -13,6 +13,7 @@ from valid_event_ids import MONITOR_EVENT_IDS
 # 事件分类（顺序即展示顺序）；不在此处的事件不会在 UI 中展示
 EVENT_CATEGORIES = [
     ("login", "登录与认证", ["LoginSucc", "LoginSucc2FA1", "LoginFail", "Logout"]),
+    ("user_manage", "用户管理", ["AddUser", "DelUser"]),
     ("ssh", "SSH", [
         "SSH_INVALID_USER", "SSH_AUTH_FAILED", "SSH_LOGIN_SUCCESS", "SSH_DISCONNECTED",
         "SSH_ENABLED", "SSH_DISABLED", "SSH_OPEN_TIMEOUT",

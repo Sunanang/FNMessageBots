@@ -97,6 +97,8 @@ class EventProcessor:
             'DOCKER_CONTAINER_RESTART': lambda ed, e: self._handle_docker_notification('DOCKER_CONTAINER_RESTART', ed, e),
             'DOCKER_CONTAINER_DESTROY': lambda ed, e: self._handle_docker_notification('DOCKER_CONTAINER_DESTROY', ed, e),
             # 可选事件（默认不推送，需用户勾选）
+            'AddUser': lambda ed, e: self._handle_simple_notification('AddUser', ed, e),
+            'DelUser': lambda ed, e: self._handle_simple_notification('DelUser', ed, e),
             'ARCHIVING_SUCCESS': lambda ed, e: self._handle_simple_notification('ARCHIVING_SUCCESS', ed, e),
             'DeleteFile': lambda ed, e: self._handle_simple_notification('DeleteFile', ed, e),
             'MovetoTrashbin': lambda ed, e: self._handle_simple_notification('MovetoTrashbin', ed, e),
@@ -160,6 +162,11 @@ class EventProcessor:
         """为批量汇总生成单条简述。"""
         data = event_data.get('data') if isinstance(event_data.get('data'), dict) else {}
         parts = []
+        if event_type in ('AddUser', 'DelUser'):
+            if event_data.get('target_user'):
+                parts.append(f"目标用户: {event_data['target_user']}")
+            if event_data.get('target_uid') not in (None, ''):
+                parts.append(f"目标用户 UID: {event_data['target_uid']}")
         if event_data.get('user') or event_data.get('IP'):
             parts.append(f"{event_data.get('user', '')}@{event_data.get('IP', '')}".strip("@"))
         if data.get('DISPLAY_NAME') or data.get('APP_NAME'):

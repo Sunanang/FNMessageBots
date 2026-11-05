@@ -167,6 +167,8 @@ class MultiPlatformNotifier:
         'LoginSucc2FA1': '🔐 飞牛NAS-二次验证登录',
         'LoginFail': '❌ 飞牛NAS-登录失败告警',
         'Logout': '👋 飞牛NAS-退出登录通知',
+        'AddUser': '👤 飞牛NAS-创建用户',
+        'DelUser': '🗑️ 飞牛NAS-删除用户',
         'FoundDisk': '💾 飞牛NAS-发现新硬盘',
         'InsertDisk': '💾 飞牛NAS-插入硬盘',
         'EjectDisk': '🧷 飞牛NAS-弹出硬盘',
@@ -398,6 +400,8 @@ class MultiPlatformNotifier:
         'LoginSucc2FA1': '用户已完成两步验证的第一步，等待二次验证。',
         'LoginFail': '系统检测到登录失败，请检查是否有异常尝试。',
         'Logout': '用户已安全退出系统。',
+        'AddUser': '系统用户已创建，请确认是否为预期操作。',
+        'DelUser': '系统用户已删除，请确认是否为预期操作。',
         'FoundDisk': '检测到新存储设备接入系统。',
         'InsertDisk': '检测到存储设备插入。',
         'EjectDisk': '检测到存储设备弹出。',
@@ -1736,6 +1740,13 @@ class MultiPlatformNotifier:
 
     def _build_minimal_one_line(self, event_type: str, event_data: Dict[str, Any]) -> str:
         """极简推送：仅一行核心信息。"""
+        if event_type in ('AddUser', 'DelUser'):
+            action = '创建用户' if event_type == 'AddUser' else '删除用户'
+            details = self._build_user_management_content(event_data).replace('\n', ' · ')
+            body = f"{action} · {details}" if details else action
+            prefix = (self.title_prefix or '').strip()
+            return f"{prefix}-{body}" if prefix else body
+
         if event_type in ("DiskWakeup", "DiskSpindown"):
             body = self._minimal_disk_body(event_type, event_data)
             prefix = (self.title_prefix or "").strip()
@@ -1868,6 +1879,8 @@ class MultiPlatformNotifier:
         detail = ""
         if event_type in ['LoginSucc', 'LoginSucc2FA1', 'LoginFail', 'Logout']:
             detail = self._build_login_content(event_data)
+        elif event_type in ('AddUser', 'DelUser'):
+            detail = self._build_user_management_content(event_data)
         elif event_type in ['SSH_INVALID_USER', 'SSH_AUTH_FAILED', 'SSH_LOGIN_SUCCESS', 'SSH_DISCONNECTED']:
             detail = self._build_ssh_content(event_type, event_data)
         elif event_type in ('FoundDisk', 'InsertDisk', 'EjectDisk'):
@@ -2122,6 +2135,21 @@ class MultiPlatformNotifier:
             content += f"🔑 认证方式: {via}\n"
         
         return content
+
+    def _build_user_management_content(self, event_data: Dict[str, Any]) -> str:
+        """系统账号管理：日志 uname/user 为操作者，target_* 为目标账号。"""
+        lines: List[str] = []
+        for key, label in (
+            ('user', '操作用户'), ('uid', '操作用户 UID'),
+            ('target_user', '目标用户'), ('target_uid', '目标用户 UID'),
+        ):
+            value = event_data.get(key)
+            if value not in (None, ''):
+                # 系统日志已包含真实账号名，不用影视库 GUID 映射覆盖它。
+                display = str(value).strip()
+                if display:
+                    lines.append(f"{label}: {display}")
+        return '\n'.join(lines)
 
     def _build_media_login_content(self, event_data: Dict[str, Any]) -> str:
         """影视库登录/退出内容（简洁版，减少图标）。"""
@@ -2703,6 +2731,10 @@ class MultiPlatformNotifier:
         data_raw = ed.get("data")
         data: Dict[str, Any] = data_raw if isinstance(data_raw, dict) else {}
         et = str(event_type)
+
+        if et in ('AddUser', 'DelUser'):
+            details = self._build_user_management_content(ed).splitlines()
+            return [' · '.join(details)] if details else [self.EVENT_TITLES[et]]
 
         if et in ("LoginSucc", "LoginSucc2FA1", "LoginFail", "Logout"):
             login_bits: List[str] = []

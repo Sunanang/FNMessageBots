@@ -64,6 +64,11 @@ def _event_summary(event_type: str, event_data: Dict[str, Any]) -> str:
     """从 event_data 生成一条简短摘要，用于推送记录列表展示。"""
     data = event_data.get("data") if isinstance(event_data.get("data"), dict) else {}
     parts = []
+    if event_type in ('AddUser', 'DelUser'):
+        if event_data.get('target_user'):
+            parts.append(f"目标用户: {event_data['target_user']}")
+        if event_data.get('target_uid') not in (None, ''):
+            parts.append(f"目标用户 UID: {event_data['target_uid']}")
     if event_data.get("user") or event_data.get("IP"):
         parts.append(f"{event_data.get('user', '')}@{event_data.get('IP', '')}".strip("@"))
     if data.get("DISPLAY_NAME") or data.get("APP_NAME"):
