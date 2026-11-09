@@ -28,11 +28,11 @@
   --code-bg:#F2EFE6;
   --ink:#191A17;
   --ink-2:#54574F;
-  --ink-3:#83867C;
+  --ink-3:#6E7168;
   --rule:rgba(25,26,23,.13);
   --rule-2:rgba(25,26,23,.24);
   --accent:#B8451F;
-  --ok:#2C8A5C;
+  --ok:#28805A;
   --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Noto Sans","PingFang SC",sans-serif;
   --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
   --ease:cubic-bezier(.22,.61,.36,1);
@@ -62,7 +62,7 @@ main{min-width:0;border-left:1px solid var(--rule);padding:0 0 0 56px}
 .rail .state{display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:11px;color:var(--ink-3)}
 .toc{display:flex;flex-direction:column;gap:1px;margin-top:-4px}
 .toc a{display:grid;grid-template-columns:26px minmax(0,1fr);gap:8px;align-items:baseline;padding:6px 0;font-size:13.5px;color:var(--ink-2);border-left:2px solid transparent;padding-left:10px;margin-left:-12px;transition:color .16s var(--ease),border-color .16s var(--ease)}
-.toc a .n{font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
+.toc a .n{font-family:var(--mono);font-size:11px;color:var(--ink-3)}
 .toc a:hover{color:var(--ink)}
 .toc a[aria-current="true"]{color:var(--ink);border-left-color:var(--accent)}
 .toc a[aria-current="true"] .n{color:var(--accent)}
@@ -80,7 +80,9 @@ main{min-width:0;border-left:1px solid var(--rule);padding:0 0 0 56px}
   .rail{height:auto;min-width:0;position:sticky;top:0;z-index:20;padding:12px 0 10px;gap:10px;background:var(--paper);border-bottom:1px solid var(--rule)}
   .rail .state,.rail .foot{display:none}
   .rail .brand{font-size:14px}
-  .toc{flex-direction:row;gap:6px;min-width:0;overflow-x:auto;margin:0;padding-bottom:2px;scrollbar-width:none}
+  .toc{flex-direction:row;gap:6px;min-width:0;overflow-x:auto;margin:0;padding-bottom:2px;scrollbar-width:none;
+    -webkit-mask-image:linear-gradient(90deg,#000 0,#000 calc(100% - 26px),transparent 100%);
+    mask-image:linear-gradient(90deg,#000 0,#000 calc(100% - 26px),transparent 100%)}
   .toc::-webkit-scrollbar{display:none}
   .toc a{grid-template-columns:auto auto;gap:5px;border:1px solid var(--rule);border-radius:4px;padding:5px 9px;margin:0;white-space:nowrap;font-size:12.5px}
   .toc a[aria-current="true"]{border-color:var(--rule-2);background:var(--card)}
@@ -95,7 +97,7 @@ main{min-width:0;border-left:1px solid var(--rule);padding:0 0 0 56px}
 .spec{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));margin-top:28px;border-top:1px solid var(--rule)}
 .spec div{padding:14px 10px 2px;border-right:1px solid var(--rule);text-align:center}
 .spec div:last-child{border-right:0}
-.spec dt{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);margin-bottom:5px}
+.spec dt{font-family:var(--mono);font-size:11px;color:var(--ink-3);margin-bottom:5px}
 .spec dd{margin:0;font-size:14px}
 .spec dd .mono{font-size:12.5px}
 
@@ -116,7 +118,7 @@ main{min-width:0;border-left:1px solid var(--rule);padding:0 0 0 56px}
 .stream{list-style:none;margin:0;padding:8px 6px;display:flex;flex-direction:column;gap:1px;min-height:150px}
 .line{display:grid;grid-template-columns:56px 62px minmax(0,1fr);gap:10px;align-items:baseline;padding:5px 8px;border-radius:3px;font-family:var(--mono);font-size:12px;color:var(--ink-2);opacity:0;transform:translateY(-3px);animation:enter .3s var(--ease) forwards;transition:opacity .45s var(--ease),color .45s var(--ease)}
 .line .t{color:var(--ink-3)}
-.line .svc{font-size:10.5px;padding:1.5px 6px;border:1px solid var(--rule-2);border-radius:3px;color:var(--ink-2);text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.line .svc{font-size:11px;padding:1.5px 6px;border:1px solid var(--rule-2);border-radius:3px;color:var(--ink-2);text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .line .msg{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .stream.stowed .line{opacity:.4;color:var(--ink-3)}
 @keyframes enter{to{opacity:1;transform:none}}
@@ -152,9 +154,9 @@ main{min-width:0;border-left:1px solid var(--rule);padding:0 0 0 56px}
 .pair .k{font-size:13.5px;font-weight:600}
 .pair .bad{font-size:13.5px;color:var(--ink-3)}
 .pair .good{font-size:13.5px;color:var(--ink)}
-.pair .good .tag{font-family:var(--mono);font-size:10.5px;color:var(--ok);margin-right:6px}
-.pair .bad .tag{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);margin-right:6px}
-.pairs-head{display:grid;grid-template-columns:112px minmax(0,1fr) minmax(0,1fr);gap:0 20px;padding:0 0 9px;font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
+.pair .good .tag{font-family:var(--mono);font-size:11px;color:var(--ok);margin-right:6px}
+.pair .bad .tag{font-family:var(--mono);font-size:11px;color:var(--ink-3);margin-right:6px}
+.pairs-head{display:grid;grid-template-columns:112px minmax(0,1fr) minmax(0,1fr);gap:0 20px;padding:0 0 9px;font-family:var(--mono);font-size:11px;color:var(--ink-3)}
 
 /* ── 03 怎么工作：一条带刻度的尺 ────────────────────────────────────── */
 .ruler{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:0;border-top:2px solid var(--ink);position:relative;margin-top:4px}
@@ -164,7 +166,7 @@ main{min-width:0;border-left:1px solid var(--rule);padding:0 0 0 56px}
 .step:last-child{border-right:0;padding-right:18px}
 .step .tick{width:1px;height:11px;background:var(--rule-2);margin:0 auto 12px;transition:background .5s var(--ease)}
 .ruler.in .step .tick{background:var(--ink)}
-.step .idx{font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
+.step .idx{font-family:var(--mono);font-size:11px;color:var(--ink-3)}
 .step h3{font-size:14.5px;margin:4px 0 6px}
 .step p{font-size:13px;color:var(--ink-2)}
 
@@ -173,11 +175,11 @@ main{min-width:0;border-left:1px solid var(--rule);padding:0 0 0 56px}
 .chsplit > *{min-width:0}
 .chlist{list-style:none;margin:0;padding:0;border-top:1px solid var(--rule-2)}
 .chlist li{display:grid;grid-template-columns:24px minmax(0,1fr) auto;gap:10px;align-items:baseline;padding:8px 0;border-bottom:1px solid var(--rule);font-size:13.5px}
-.chlist .i{font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
-.chlist .t{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);white-space:nowrap}
+.chlist .i{font-family:var(--mono);font-size:11px;color:var(--ink-3)}
+.chlist .t{font-family:var(--mono);font-size:11px;color:var(--ink-3);white-space:nowrap}
 .previews{display:flex;flex-direction:column;gap:10px}
 .pv{border:1px solid var(--rule-2);border-radius:4px;background:var(--card);padding:11px 13px}
-.pv .ph{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:10.5px;color:var(--ink-3);margin-bottom:7px;padding-bottom:7px;border-bottom:1px dashed var(--rule)}
+.pv .ph{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:11px;color:var(--ink-3);margin-bottom:7px;padding-bottom:7px;border-bottom:1px dashed var(--rule)}
 .pv .ph .ok{margin-left:auto;color:var(--ok);white-space:nowrap}
 .pv .ti{font-size:13px;font-weight:600;margin-bottom:5px}
 .pv .bd{font-family:var(--mono);font-size:11.5px;color:var(--ink-2);line-height:1.7}
@@ -192,7 +194,7 @@ main{min-width:0;border-left:1px solid var(--rule);padding:0 0 0 56px}
 .cfg-body{padding:4px 13px}
 .row{display:grid;grid-template-columns:92px minmax(0,1fr) 26px;gap:10px;align-items:center;padding:8px 0;border-bottom:1px solid var(--rule);font-size:12.5px}
 .row:last-child{border-bottom:0}
-.row .k{font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
+.row .k{font-family:var(--mono);font-size:11px;color:var(--ink-3)}
 .row .v{font-family:var(--mono);font-size:11.5px;color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sw{width:22px;height:13px;border-radius:2px;border:1px solid var(--ink);background:var(--ink);justify-self:end;position:relative}
 .sw::after{content:"";position:absolute;top:1px;right:1px;width:9px;height:9px;background:var(--card)}
@@ -207,7 +209,7 @@ main{min-width:0;border-left:1px solid var(--rule);padding:0 0 0 56px}
 .inst{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px}
 .inst > *{min-width:0}
 .code{border:1px solid var(--rule-2);border-radius:5px;background:var(--code-bg);overflow:hidden}
-.code .ch{display:flex;align-items:center;gap:8px;padding:7px 12px;border-bottom:1px solid var(--rule);font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
+.code .ch{display:flex;align-items:center;gap:8px;padding:7px 12px;border-bottom:1px solid var(--rule);font-family:var(--mono);font-size:11px;color:var(--ink-3)}
 .code pre{margin:0;padding:12px;overflow-x:auto;font-family:var(--mono);font-size:11.5px;line-height:1.75;color:var(--ink-2)}
 .code .c{color:var(--ink-3)}
 .code .a{color:var(--accent)}
@@ -219,7 +221,7 @@ main{min-width:0;border-left:1px solid var(--rule);padding:0 0 0 56px}
 .faq details{border-bottom:1px solid var(--rule)}
 .faq summary{display:grid;grid-template-columns:30px minmax(0,1fr) 16px;gap:10px;align-items:center;padding:12px 0;cursor:pointer;font-size:14px;list-style:none}
 .faq summary::-webkit-details-marker{display:none}
-.faq summary .n{font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
+.faq summary .n{font-family:var(--mono);font-size:11px;color:var(--ink-3)}
 .faq summary svg{width:14px;height:14px;color:var(--ink-3);transition:transform .22s var(--ease)}
 .faq details[open] summary svg{transform:rotate(180deg)}
 .faq details[open] summary .n{color:var(--accent)}
@@ -255,6 +257,21 @@ section[id]{scroll-margin-top:24px}
   .demo-foot .rest{flex:1 1 60px}
   .colophon .links{margin-left:0}
 }
+/* 手册就该能打印：去掉侧栏与底色，章节不跨页，外链补出地址，示例停在终态 */
+@media print{
+  :root{--paper:#FFF;--card:#FFF;--code-bg:#F4F4F2;--ink-3:#555}
+  .shell{display:block;max-width:none;padding:0}
+  .rail,.toc,.demo-foot .rest{display:none}
+  main{border-left:0;padding:0}
+  .sec,.demo,.pair,.step,.code{break-inside:avoid;page-break-inside:avoid}
+  .masthead h1{font-size:21pt}
+  .sec-head h2{font-size:13pt}
+  body{font-size:10.5pt}
+  a[href^="http"]::after{content:" (" attr(href) ")";font-family:var(--mono);font-size:8pt;color:#555}
+  .stream .line,.summary .content,.summary .pending{opacity:1!important;transform:none!important}
+  .summary{border-style:solid}
+}
+
 @media (prefers-reduced-motion:reduce){
   html{scroll-behavior:auto}
   *{animation:none!important;transition:none!important}
@@ -644,6 +661,12 @@ services:
     } else {
       run();
     }
+
+    /* 切到别的标签页就停，回来自动接着跑 */
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) clearAll();
+      else if (!reduced) run();
+    });
   }
 
   /* ── 目录高亮：滚到哪章，左边就亮哪条 ─────────────────────── */
