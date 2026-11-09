@@ -9,6 +9,22 @@ cd website && python3 -m http.server 8081
 # http://127.0.0.1:8081
 ```
 
+## 下载区怎么更新
+
+官网的「下载」不跳 GitHub，走 **本站直连**（EdgeOne 国内节点）：安装包放在
+`website/downloads/`，页面从 `downloads/version.json` 读版本号、文件名、大小与 SHA256。
+
+每次发版后跑一次：
+
+```bash
+./scripts/sync-website-downloads.sh   # 拉最新 Release 的包 + 重建 version.json
+git add website/downloads && git commit -m "chore(website): 同步 vX.Y.Z 安装包"
+```
+
+页面里 `data-ver / data-date / data-name` 的默认值是兜底（脚本失效或 JS 被关时仍能下），
+有 `version.json` 时会被自动覆盖，所以平时**不用手改 HTML**。
+「历史版本」链接始终指向 GitHub Releases。
+
 ## 部署
 
 线上地址 `https://www.fnmb.lndo.top`（`fnmb.lndo.top` 用 DNSPod 显性 URL 301 到 www）。
@@ -30,3 +46,5 @@ EdgeOne Makers 新建项目指向本目录即可（纯静态，无需构建命�
   真实字段的配置面板、浅色代码块。
 - 两段内联脚本：循环演示 + 目录高亮/刻度填充的 IntersectionObserver。零第三方依赖。
 - 页脚必须有 `京ICP备2026075277号-1` 并链接 `https://beian.miit.gov.cn/`（只在正文页脚出现一次）。
+- 下载区只放 FPK（普通版 / root 版）与 Docker 镜像说明——本项目没有 Windows / macOS 客户端，
+  页面上也明写了这点，不要为了凑「多平台」编造产物。

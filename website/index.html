@@ -84,7 +84,7 @@ main{min-width:0;border-left:1px solid var(--rule);padding:0 0 0 56px}
   .shell{grid-template-columns:minmax(0,1fr);padding:0 20px}
   main{border-left:0;padding:0}
   .rail{height:auto;min-width:0;position:sticky;top:0;z-index:20;padding:12px 0 10px;gap:10px;background:var(--paper);border-bottom:1px solid var(--rule)}
-  .rail .state,.rail .foot,.pageinfo{display:none}
+  .rail .state,.rail .foot,.pageinfo,.rail-dl{display:none}
   .rail .brand{font-size:14px}
   .toc{flex-direction:row;gap:6px;min-width:0;overflow-x:auto;margin:0;padding-bottom:2px;scrollbar-width:none;
     -webkit-mask-image:linear-gradient(90deg,#000 0,#000 calc(100% - 26px),transparent 100%);
@@ -217,6 +217,31 @@ main{min-width:0;border-left:1px solid var(--rule);padding:0 0 0 56px}
 .notes p:last-child{border-bottom:0}
 .notes b{color:var(--ink);font-weight:600}
 
+/* ── 下载块（最新版直下 + 历史版本入口）────────────────────────────── */
+.dl{border:1px solid var(--rule-2);border-radius:6px;background:var(--card);overflow:hidden;margin-bottom:22px}
+.dl-head{display:flex;align-items:baseline;gap:12px;padding:11px 14px;border-bottom:1px solid var(--rule);background:var(--paper);font-family:var(--mono);font-size:11px;color:var(--ink-3)}
+.dl-head b{color:var(--ink);font-size:12.5px;font-weight:600}
+.dl-hist{margin-left:auto;color:var(--ink-2);transition:color .16s var(--ease)}
+.dl-hist:hover{color:var(--accent)}
+.dl-row{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:14px;align-items:center;padding:12px 14px;border-bottom:1px solid var(--rule)}
+.dl-row:last-of-type{border-bottom:0}
+.dl-name{display:flex;flex-direction:column;gap:2px;min-width:0}
+.dl-name b{font-size:13.5px;font-weight:600}
+.dl-name .mono{font-size:11px;color:var(--ink-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dl-size{font-size:11px;color:var(--ink-3);white-space:nowrap}
+.dl-btn{display:inline-flex;align-items:center;justify-content:center;height:32px;padding:0 15px;border:1px solid var(--accent);border-radius:4px;color:var(--accent);font-size:12.5px;font-weight:500;transition:background .16s var(--ease),color .16s var(--ease)}
+.dl-btn:hover{background:var(--accent);color:#fff}
+.dl-sha{border-top:1px solid var(--rule)}
+.dl-sha summary{padding:9px 14px;font-family:var(--mono);font-size:11px;color:var(--ink-3);cursor:pointer;list-style:none}
+.dl-sha summary::-webkit-details-marker{display:none}
+.dl-sha summary:hover{color:var(--ink-2)}
+.dl-sha pre{margin:0;padding:0 14px 12px;font-family:var(--mono);font-size:11px;line-height:1.9;color:var(--ink-2);overflow-x:auto;white-space:pre}
+.dl-note{padding:11px 14px;border-top:1px solid var(--rule);font-size:12.5px;color:var(--ink-2);background:var(--paper)}
+.dl-note a{color:var(--accent)}
+.rail-dl{display:flex;align-items:center;justify-content:center;gap:7px;height:34px;margin-top:2px;border:1px solid var(--accent);border-radius:4px;color:var(--accent);font-size:12.5px;font-weight:500;transition:background .16s var(--ease),color .16s var(--ease)}
+.rail-dl:hover{background:var(--accent);color:#fff}
+.rail-dl svg{width:13px;height:13px}
+
 /* ── 06 安装 ────────────────────────────────────────────────────────── */
 .inst{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:stretch}
 .inst > *{min-width:0}
@@ -269,6 +294,10 @@ section[id]{scroll-margin-top:24px}
   .step:nth-child(2n){border-right:0}
   .step:nth-child(1),.step:nth-child(2){border-bottom:1px solid var(--rule)}
   .chsplit,.panel,.inst{grid-template-columns:1fr;gap:22px}
+  .dl-row{grid-template-columns:minmax(0,1fr) auto;gap:8px 12px}
+  .dl-row .dl-btn{grid-column:1 / -1;width:100%}
+  .dl-head{flex-wrap:wrap;gap:6px 10px}
+  .dl-hist{margin-left:0}
   .line{grid-template-columns:48px 54px minmax(0,1fr);font-size:11.5px}
   .demo-foot{flex-wrap:wrap;gap:8px}
   .demo-foot .rest{flex:1 1 60px}
@@ -319,6 +348,10 @@ section[id]{scroll-margin-top:24px}
       <div><span>更新</span><b>2026-11-09</b></div>
     </div>
     <div class="foot">
+      <a class="rail-dl" href="downloads/FnMessageBot-2.7.5.fpk" download data-dl="plain">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11"/><path d="m7 11 5 5 5-5"/><path d="M5 20h14"/></svg>
+        下载 <span data-ver>v2.7.5</span>
+      </a>
       <a href="https://github.com/Sunanang/FnMessageBots">
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.4 7.4 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
         源码仓库
@@ -521,6 +554,36 @@ section[id]{scroll-margin-top:24px}
         <h2>安装<a class="anchor" href="#install" aria-label="复制本节链接">§</a></h2>
         <p>Docker 适合大多数情况；飞牛应用中心装 FPk 更省事，装完点开就能配置。</p>
       </div>
+      <div class="dl">
+        <div class="dl-head">
+          <b><span data-ver>v2.7.5</span> · <span data-date>2026-11-02</span></b>
+          <span>最新版本 · 本站直连下载</span>
+          <a class="dl-hist" href="https://github.com/Sunanang/FNMessageBots/releases">历史版本 →</a>
+        </div>
+        <div class="dl-row">
+          <div class="dl-name">
+            <b>飞牛应用中心包</b>
+            <span class="mono" data-name="plain">FnMessageBot-2.7.5.fpk</span>
+          </div>
+          <span class="dl-size mono" data-size="plain">712 KB</span>
+          <a class="dl-btn" href="downloads/FnMessageBot-2.7.5.fpk" download data-dl="plain">下载</a>
+        </div>
+        <div class="dl-row">
+          <div class="dl-name">
+            <b>root 版</b>
+            <span class="mono" data-name="root">FnMessageBot-2.7.5-root.fpk</span>
+          </div>
+          <span class="dl-size mono" data-size="root">712 KB</span>
+          <a class="dl-btn" href="downloads/FnMessageBot-2.7.5-root.fpk" download data-dl="root">下载</a>
+        </div>
+        <details class="dl-sha">
+          <summary>SHA256 校验值</summary>
+          <pre data-sha>af7514ef951fa5c4c46d65857efbb993a8f9aaad023784b2aca3c83319a82a2b  FnMessageBot-2.7.5.fpk
+5a485f309b0e04ca349ff4f728d706a29aba94f330acd9976122b7ef6393e6d3  FnMessageBot-2.7.5-root.fpk</pre>
+        </details>
+        <p class="dl-note">两个包只差安装权限：一般装普通版；需要写系统目录时才用 root 版。上面的文件就在这个站点上，走 EdgeOne 国内节点，不必翻 GitHub——想找更早的版本，去 <a href="https://github.com/Sunanang/FNMessageBots/releases">GitHub Releases</a>。没有 Windows / macOS 客户端，它是装在 NAS 上的应用。</p>
+      </div>
+
       <div class="inst">
         <div class="code">
           <div class="ch">docker compose<button class="copy" type="button">复制</button></div>
@@ -740,6 +803,41 @@ services:
       }).catch(function () { location.hash = a.getAttribute('href'); });
     });
   });
+
+  /* ── 下载块：从 downloads/version.json 补全版本号、大小、校验值与链接
+         HTML 里已写死当前版本，所以脚本失效时按钮照样能下（只是不显示新版信息）。 */
+  (function () {
+    var fmt = function (b) { return b >= 1048576 ? (b / 1048576).toFixed(1) + ' MB' : Math.round(b / 1024) + ' KB'; };
+    if (!window.fetch) return;
+    fetch('downloads/version.json', { cache: 'no-store' }).then(function (r) {
+      return r.ok ? r.json() : null;
+    }).then(function (v) {
+      if (!v || !v.assets || !v.assets.length) return;
+      var pick = function (kind) {
+        return v.assets.filter(function (a) {
+          return kind === 'root' ? /-root\./.test(a.name) : !/-root\./.test(a.name);
+        })[0];
+      };
+      Array.prototype.forEach.call(document.querySelectorAll('[data-ver]'), function (e) { e.textContent = v.tag; });
+      Array.prototype.forEach.call(document.querySelectorAll('[data-date]'), function (e) { e.textContent = v.publishedAt; });
+      ['plain', 'root'].forEach(function (kind) {
+        var a = pick(kind);
+        if (!a) return;
+        Array.prototype.forEach.call(document.querySelectorAll('[data-dl="' + kind + '"]'), function (el) {
+          el.setAttribute('href', 'downloads/' + a.name);
+          if (el.hasAttribute('download')) el.setAttribute('download', a.name);
+        });
+        var n = document.querySelector('[data-name="' + kind + '"]');
+        if (n) n.textContent = a.name;
+        var sz = document.querySelector('[data-size="' + kind + '"]');
+        if (sz) sz.textContent = fmt(a.size);
+      });
+      var sha = document.querySelector('[data-sha]');
+      if (sha) {
+        sha.textContent = v.assets.map(function (a) { return a.sha256 + '  ' + a.name; }).join('\n');
+      }
+    }).catch(function () { /* 拿不到就沿用 HTML 里的静态值 */ });
+  })();
 
   /* ── 代码块复制 ─────────────────────────────────────────── */
   Array.prototype.forEach.call(document.querySelectorAll('.code'), function (box) {
