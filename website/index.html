@@ -49,6 +49,7 @@ h1,h2,h3{margin:0;font-weight:600;letter-spacing:-.01em;line-height:1.28}
 a{color:inherit;text-decoration:none}
 code{font-family:var(--mono);font-size:.9em}
 :focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+::selection{background:var(--accent);color:#fff}
 .mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
 
 /* ── 外壳：左侧目录 + 右侧正文 ───────────────────────────────────────── */
@@ -56,7 +57,7 @@ code{font-family:var(--mono);font-size:.9em}
 main{min-width:0;border-left:1px solid var(--rule);padding:0 0 0 56px}
 
 /* ── 目录 ───────────────────────────────────────────────────────────── */
-.rail{position:sticky;top:0;align-self:start;height:100vh;padding:30px 28px 26px 0;display:flex;flex-direction:column;gap:26px}
+.rail{position:sticky;top:0;align-self:start;padding:30px 28px 26px 0;display:flex;flex-direction:column;gap:22px}
 .rail .brand{display:flex;align-items:center;gap:10px;font-size:14.5px;font-weight:600}
 .rail .brand img{width:24px;height:24px;border-radius:6px;flex:none}
 .rail .state{display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:11px;color:var(--ink-3)}
@@ -66,11 +67,16 @@ main{min-width:0;border-left:1px solid var(--rule);padding:0 0 0 56px}
 .toc a:hover{color:var(--ink)}
 .toc a[aria-current="true"]{color:var(--ink);border-left-color:var(--accent)}
 .toc a[aria-current="true"] .n{color:var(--accent)}
-.rail .foot{margin-top:auto;display:flex;flex-direction:column;gap:9px;font-size:12.5px;color:var(--ink-3)}
+.rail .foot{margin-top:8px;display:flex;flex-direction:column;gap:9px;font-size:12.5px;color:var(--ink-3)}
 .rail .foot a{display:inline-flex;align-items:center;gap:7px;color:var(--ink-2);transition:color .16s var(--ease)}
 .rail .foot a:hover{color:var(--accent)}
 .rail .foot svg{width:14px;height:14px;fill:currentColor}
 .rail .foot .icp{font-size:11px;line-height:1.6}
+/* 目录与页脚之间原来是一大片空白；改成一块「本页信息」，填真实事实，也把栏位撑匀 */
+.pageinfo{display:flex;flex-direction:column;border-top:1px solid var(--rule);padding-top:12px}
+.pageinfo div{display:flex;align-items:baseline;justify-content:space-between;gap:10px;padding:5px 0;border-bottom:1px solid var(--rule);font-family:var(--mono);font-size:11px;color:var(--ink-3)}
+.pageinfo div:last-child{border-bottom:0}
+.pageinfo b{font-weight:400;color:var(--ink-2);font-variant-numeric:tabular-nums}
 
 /* 手机：目录变成横向 chip 条 */
 @media (max-width:980px){
@@ -78,7 +84,7 @@ main{min-width:0;border-left:1px solid var(--rule);padding:0 0 0 56px}
   .shell{grid-template-columns:minmax(0,1fr);padding:0 20px}
   main{border-left:0;padding:0}
   .rail{height:auto;min-width:0;position:sticky;top:0;z-index:20;padding:12px 0 10px;gap:10px;background:var(--paper);border-bottom:1px solid var(--rule)}
-  .rail .state,.rail .foot{display:none}
+  .rail .state,.rail .foot,.pageinfo{display:none}
   .rail .brand{font-size:14px}
   .toc{flex-direction:row;gap:6px;min-width:0;overflow-x:auto;margin:0;padding-bottom:2px;scrollbar-width:none;
     -webkit-mask-image:linear-gradient(90deg,#000 0,#000 calc(100% - 26px),transparent 100%);
@@ -103,9 +109,15 @@ main{min-width:0;border-left:1px solid var(--rule);padding:0 0 0 56px}
 
 /* ── 章节骨架 ───────────────────────────────────────────────────────── */
 .sec{padding:44px 0;border-bottom:1px solid var(--rule)}
+/* 主章节留出更大的上边距，读者自然感到「这里是重点」 */
+.sec.major{padding-top:64px}
 .sec-head{display:grid;grid-template-columns:52px minmax(0,1fr);gap:0 8px;margin-bottom:22px}
 .sec-head .num{font-family:var(--mono);font-size:11px;color:var(--accent);padding-top:5px}
-.sec-head h2{font-size:20px;letter-spacing:-.015em}
+.sec-head h2{font-size:20px;letter-spacing:-.015em;display:flex;align-items:baseline;gap:9px}
+.anchor{color:var(--ink-3);font-weight:400;font-size:15px;opacity:0;transition:opacity .18s var(--ease),color .18s var(--ease)}
+.sec-head h2:hover .anchor,.anchor:focus-visible{opacity:1}
+.anchor:hover{color:var(--accent)}
+@media (hover:none){.anchor{opacity:.45}}
 .sec-head p{grid-column:2;margin-top:8px;font-size:14.5px;color:var(--ink-2);max-width:62ch}
 
 /* ── 01 运行示例：整页唯一的彩色与动效 ─────────────────────────────── */
@@ -150,7 +162,7 @@ main{min-width:0;border-left:1px solid var(--rule);padding:0 0 0 56px}
 
 /* ── 02 对照：手册式的两栏对照表 ────────────────────────────────────── */
 .pairs{border-top:1px solid var(--rule)}
-.pair{display:grid;grid-template-columns:112px minmax(0,1fr) minmax(0,1fr);gap:0 20px;padding:13px 0;border-bottom:1px solid var(--rule);align-items:start}
+.pair{transition:background .16s var(--ease)}.pair:hover{background:color-mix(in srgb,var(--ink) 3%,transparent)}.pair{display:grid;grid-template-columns:112px minmax(0,1fr) minmax(0,1fr);gap:0 20px;padding:13px 0;border-bottom:1px solid var(--rule);align-items:start}
 .pair .k{font-size:13.5px;font-weight:600}
 .pair .bad{font-size:13.5px;color:var(--ink-3)}
 .pair .good{font-size:13.5px;color:var(--ink)}
@@ -174,7 +186,7 @@ main{min-width:0;border-left:1px solid var(--rule);padding:0 0 0 56px}
 .chsplit{display:grid;grid-template-columns:minmax(0,.78fr) minmax(0,1.22fr);gap:36px;align-items:start}
 .chsplit > *{min-width:0}
 .chlist{list-style:none;margin:0;padding:0;border-top:1px solid var(--rule-2)}
-.chlist li{display:grid;grid-template-columns:24px minmax(0,1fr) auto;gap:10px;align-items:baseline;padding:8px 0;border-bottom:1px solid var(--rule);font-size:13.5px}
+.chlist li{transition:background .16s var(--ease)}.chlist li:hover{background:color-mix(in srgb,var(--ink) 3%,transparent)}.chlist li:hover .i{color:var(--accent)}.chlist li{display:grid;grid-template-columns:24px minmax(0,1fr) auto;gap:10px;align-items:baseline;padding:8px 0;border-bottom:1px solid var(--rule);font-size:13.5px}
 .chlist .i{font-family:var(--mono);font-size:11px;color:var(--ink-3)}
 .chlist .t{font-family:var(--mono);font-size:11px;color:var(--ink-3);white-space:nowrap}
 .previews{display:flex;flex-direction:column;gap:10px}
@@ -206,11 +218,14 @@ main{min-width:0;border-left:1px solid var(--rule);padding:0 0 0 56px}
 .notes b{color:var(--ink);font-weight:600}
 
 /* ── 06 安装 ────────────────────────────────────────────────────────── */
-.inst{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px}
+.inst{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:stretch}
 .inst > *{min-width:0}
-.code{border:1px solid var(--rule-2);border-radius:5px;background:var(--code-bg);overflow:hidden}
+.code{border:1px solid var(--rule-2);border-radius:5px;background:var(--code-bg);overflow:hidden;display:flex;flex-direction:column}
 .code .ch{display:flex;align-items:center;gap:8px;padding:7px 12px;border-bottom:1px solid var(--rule);font-family:var(--mono);font-size:11px;color:var(--ink-3)}
-.code pre{margin:0;padding:12px;overflow-x:auto;font-family:var(--mono);font-size:11.5px;line-height:1.75;color:var(--ink-2)}
+.copy{margin-left:auto;font:inherit;color:var(--ink-3);background:none;border:1px solid var(--rule-2);border-radius:3px;padding:2px 8px;cursor:pointer;transition:color .16s var(--ease),border-color .16s var(--ease)}
+.copy:hover{color:var(--accent);border-color:var(--accent)}
+.copy[data-done]{color:var(--ok);border-color:var(--ok)}
+.code pre{margin:0;padding:12px;overflow-x:auto;font-family:var(--mono);font-size:11.5px;line-height:1.75;color:var(--ink-2);flex:1}
 .code .c{color:var(--ink-3)}
 .code .a{color:var(--accent)}
 .hint{display:flex;gap:9px;margin-top:14px;padding:10px 12px;border:1px solid var(--rule);border-left:2px solid var(--accent);border-radius:4px;background:var(--card);font-size:12.5px;color:var(--ink-2)}
@@ -219,7 +234,7 @@ main{min-width:0;border-left:1px solid var(--rule);padding:0 0 0 56px}
 /* ── 07 常见问题 ────────────────────────────────────────────────────── */
 .faq{border-top:1px solid var(--rule-2)}
 .faq details{border-bottom:1px solid var(--rule)}
-.faq summary{display:grid;grid-template-columns:30px minmax(0,1fr) 16px;gap:10px;align-items:center;padding:12px 0;cursor:pointer;font-size:14px;list-style:none}
+.faq summary{transition:background .16s var(--ease)}.faq summary:hover{background:color-mix(in srgb,var(--ink) 3%,transparent)}.faq summary{display:grid;grid-template-columns:30px minmax(0,1fr) 16px;gap:10px;align-items:center;padding:12px 0;cursor:pointer;font-size:14px;list-style:none}
 .faq summary::-webkit-details-marker{display:none}
 .faq summary .n{font-family:var(--mono);font-size:11px;color:var(--ink-3)}
 .faq summary svg{width:14px;height:14px;color:var(--ink-3);transition:transform .22s var(--ease)}
@@ -238,7 +253,9 @@ section[id]{scroll-margin-top:24px}
   .masthead h1{font-size:26px}
   .masthead .lede{font-size:15px}
   .spec{grid-template-columns:1fr 1fr}
+  .spec div{padding:10px 8px 0}
   .spec div:nth-child(2){border-right:0}
+  .spec div:nth-child(3),.spec div:nth-child(4){padding-top:12px}
   .spec div{padding-bottom:10px}
   .sec{padding:34px 0}
   .sec-head{grid-template-columns:40px minmax(0,1fr)}
@@ -295,6 +312,12 @@ section[id]{scroll-margin-top:24px}
       <a href="#install"><span class="n">06</span>安装</a>
       <a href="#faq"><span class="n">07</span>常见问题</a>
     </nav>
+    <div class="pageinfo">
+      <div><span>章节</span><b>07</b></div>
+      <div><span>分发渠道</span><b>10</b></div>
+      <div><span>配置端口</span><b>18080</b></div>
+      <div><span>更新</span><b>2026-11-09</b></div>
+    </div>
     <div class="foot">
       <a href="https://github.com/Sunanang/FnMessageBots">
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.4 7.4 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
@@ -318,10 +341,10 @@ section[id]{scroll-margin-top:24px}
       </dl>
     </header>
 
-    <section class="sec" id="demo">
+    <section class="sec major" id="demo">
       <div class="sec-head">
         <span class="num">01</span>
-        <h2>一次轮询会发生什么</h2>
+        <h2>一次轮询会发生什么<a class="anchor" href="#demo" aria-label="复制本节链接">§</a></h2>
         <p>下面这段是真的在跑：几秒内它会把新日志读进来，合并成一条汇总，再分发到各个渠道。真实部署时一轮是 60 秒。</p>
       </div>
 
@@ -357,7 +380,7 @@ section[id]{scroll-margin-top:24px}
     <section class="sec" id="why">
       <div class="sec-head">
         <span class="num">02</span>
-        <h2>为什么装</h2>
+        <h2>为什么装<a class="anchor" href="#why" aria-label="复制本节链接">§</a></h2>
         <p>飞牛把每件事都记了，但它不会主动找你。于是你要么想起来去翻页面，要么自己写脚本推通知 —— 后者通常死在「一轮刷出几十条」和「半夜被磁盘唤醒吵醒」这两件事上。</p>
       </div>
       <div class="pairs">
@@ -385,10 +408,10 @@ section[id]{scroll-margin-top:24px}
       </div>
     </section>
 
-    <section class="sec" id="how">
+    <section class="sec major" id="how">
       <div class="sec-head">
         <span class="num">03</span>
-        <h2>怎么工作</h2>
+        <h2>怎么工作<a class="anchor" href="#how" aria-label="复制本节链接">§</a></h2>
         <p>四步都发生在你自己的机器上。数据库只读打开，配置和待发队列都存在本地。</p>
       </div>
       <div class="ruler" id="ruler">
@@ -423,7 +446,7 @@ section[id]{scroll-margin-top:24px}
     <section class="sec" id="channels">
       <div class="sec-head">
         <span class="num">04</span>
-        <h2>支持的渠道</h2>
+        <h2>支持的渠道<a class="anchor" href="#channels" aria-label="复制本节链接">§</a></h2>
         <p>同一条汇总按各家的格式发出去。每个渠道可单独开关、单独填 key。</p>
       </div>
       <div class="chsplit">
@@ -466,7 +489,7 @@ section[id]{scroll-margin-top:24px}
     <section class="sec" id="panel">
       <div class="sec-head">
         <span class="num">05</span>
-        <h2>配置页</h2>
+        <h2>配置页<a class="anchor" href="#panel" aria-label="复制本节链接">§</a></h2>
         <p>默认监听 18080，带访问密码（首次用启动日志里的初始化码设置）。key、token、SMTP 密码在页面上打码显示。</p>
       </div>
       <div class="panel">
@@ -492,15 +515,15 @@ section[id]{scroll-margin-top:24px}
       </div>
     </section>
 
-    <section class="sec" id="install">
+    <section class="sec major" id="install">
       <div class="sec-head">
         <span class="num">06</span>
-        <h2>安装</h2>
+        <h2>安装<a class="anchor" href="#install" aria-label="复制本节链接">§</a></h2>
         <p>Docker 适合大多数情况；飞牛应用中心装 FPk 更省事，装完点开就能配置。</p>
       </div>
       <div class="inst">
         <div class="code">
-          <div class="ch">docker compose</div>
+          <div class="ch">docker compose<button class="copy" type="button">复制</button></div>
 <pre><span class="c"># 挂载 fnOS 的事件库（只读即可）</span>
 services:
   fn-message-bots:
@@ -513,7 +536,7 @@ services:
       - /vol1/@appdata/trim.eventlogger:/db:ro</pre>
         </div>
         <div class="code">
-          <div class="ch">飞牛应用中心 · FPk</div>
+          <div class="ch">飞牛应用中心 · FPk<button class="copy" type="button">复制</button></div>
 <pre><span class="c"># 从源码打包（需要 fnpack）</span>
 ./scripts/build-fpk.sh
 
@@ -530,7 +553,7 @@ services:
     <section class="sec" id="faq">
       <div class="sec-head">
         <span class="num">07</span>
-        <h2>常见问题</h2>
+        <h2>常见问题<a class="anchor" href="#faq" aria-label="复制本节链接">§</a></h2>
       </div>
       <div class="faq">
         <details>
@@ -679,7 +702,11 @@ services:
         if (!e.isIntersecting) return;
         links.forEach(function (a) { a.removeAttribute('aria-current'); });
         var a = byId[e.target.id];
-        if (a) a.setAttribute('aria-current', 'true');
+        if (a) {
+          a.setAttribute('aria-current', 'true');
+          /* 手机目录是横向滚动条，当前章不在视野里时把它带进来 */
+          if (window.innerWidth <= 980) a.scrollIntoView({ inline: 'center', block: 'nearest' });
+        }
       });
     }, { rootMargin: '-15% 0px -70% 0px' });
     Object.keys(byId).forEach(function (id) {
@@ -698,6 +725,38 @@ services:
       rIO.observe(ruler);
     }
   }
+
+  /* ── § 锚点：点一下把本节链接复制走 ─────────────────────── */
+  Array.prototype.forEach.call(document.querySelectorAll('a.anchor'), function (a) {
+    a.addEventListener('click', function (e) {
+      var url = location.origin + location.pathname + a.getAttribute('href');
+      if (!navigator.clipboard) return; /* 不支持就让浏览器照常跳转 */
+      e.preventDefault();
+      navigator.clipboard.writeText(url).then(function () {
+        var old = a.textContent;
+        a.textContent = '已复制';
+        a.style.opacity = '1';
+        setTimeout(function () { a.textContent = old; a.style.removeProperty('opacity'); }, 1200);
+      }).catch(function () { location.hash = a.getAttribute('href'); });
+    });
+  });
+
+  /* ── 代码块复制 ─────────────────────────────────────────── */
+  Array.prototype.forEach.call(document.querySelectorAll('.code'), function (box) {
+    var btn = box.querySelector('.copy');
+    var pre = box.querySelector('pre');
+    if (!btn || !pre) return;
+    btn.addEventListener('click', function () {
+      var text = pre.innerText;
+      var done = function () {
+        btn.textContent = '已复制';
+        btn.setAttribute('data-done', '');
+        setTimeout(function () { btn.textContent = '复制'; btn.removeAttribute('data-done'); }, 1400);
+      };
+      if (navigator.clipboard) navigator.clipboard.writeText(text).then(done, done);
+      else done();
+    });
+  });
 })();
 </script>
 </body>
