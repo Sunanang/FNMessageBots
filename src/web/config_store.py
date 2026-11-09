@@ -162,6 +162,7 @@ def normalize_push_channels(channels: Any) -> List[Dict[str, Any]]:
 SECRET_MASK = "******"
 _URL_SECRET_QUERY_KEYS = frozenset({"key", "access_token", "token", "secret", "sign"})
 _URL_SECRET_SEGMENT = re.compile(r"^[A-Za-z0-9_\-]{16,}$")
+_TELEGRAM_BOT_SEGMENT = re.compile(r"^bot[0-9]+:[A-Za-z0-9_-]+$", re.I)
 _SECRET_HEADER_NAME = re.compile(r"auth|token|key|secret|sign|cookie|password", re.I)
 
 
@@ -189,7 +190,11 @@ def _mask_url(url: str) -> str:
         parts = urllib.parse.urlsplit(url)
     except ValueError:
         return mask_secret(url)
-    segments = [mask_secret(s) if _URL_SECRET_SEGMENT.match(s) else s for s in parts.path.split("/")]
+    segments = [
+        "bot" + SECRET_MASK if _TELEGRAM_BOT_SEGMENT.match(s) else
+        mask_secret(s) if _URL_SECRET_SEGMENT.match(s) else s
+        for s in parts.path.split("/")
+    ]
     query = [
         (k, mask_secret(v) if k.lower() in _URL_SECRET_QUERY_KEYS else v)
         for k, v in urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
