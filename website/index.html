@@ -3,12 +3,12 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<title>FnMessageBots · 让 NAS 主动给你发消息</title>
+<title>FnMessageBots · 飞牛 NAS 日志推送</title>
 <meta name="description" content="飞牛 NAS 的事件监控机器人：只读轮询 SQLite 事件库，一轮轮询合并成一条汇总后分发到企业微信、钉钉、飞书、Bark、PushPlus、魔法推送、MeoW、邮件和自建 Webhook。Python 单进程，Docker / FPk 双发行。" />
-<meta name="theme-color" content="#080B0A" />
+<meta name="theme-color" content="#FAF8F3" />
 <link rel="canonical" href="https://www.fnmb.lndo.top/" />
 <link rel="icon" href="assets/app-icon.png" />
-<meta property="og:title" content="FnMessageBots · 让 NAS 主动给你发消息" />
+<meta property="og:title" content="FnMessageBots · 飞牛 NAS 日志推送" />
 <meta property="og:description" content="只读轮询 SQLite 事件库，把一轮日志合并成一条汇总，分发到 10 种通知渠道。Python 单进程，零第三方依赖。" />
 <meta property="og:url" content="https://www.fnmb.lndo.top/" />
 <meta property="og:site_name" content="FnMessageBots" />
@@ -17,485 +17,434 @@
 <meta property="og:type" content="website" />
 <meta name="twitter:card" content="summary" />
 <style>
-/* ── tokens ───────────────────────────────────────────────────────────────
-   世界：机房夜间值班台。底色偏绿的墨黑，文字三级，一个琥珀主色，
-   绿色只表示「已送达」这一种含义。 */
+/* ─────────────────────────────────────────────────────────────────────────
+   形制：设备运行手册。暖白纸底、细黑规则线、编号章节、左侧常驻目录。
+   全站只有两处带颜色：首屏「运行示例」这条活的日志流，和正文里的语义标记。
+   ───────────────────────────────────────────────────────────────────────── */
 :root{
-  color-scheme: dark;
-  --bg:#080B0A;
-  --bg-2:#0B100E;
-  --surface:#101614;
-  --raised:#151C19;
-  --sunken:#060908;
-  --line:rgba(233,240,236,.08);
-  --line-2:rgba(233,240,236,.14);
-  --ink:#E9F0EC;
-  --ink-2:#9BA8A2;
-  --ink-3:#69746F;
-  --amber:#E0A33E;
-  --amber-dim:#8A6A2E;
-  --ok:#57C68A;
-  --err:#D9714F;
-  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  color-scheme: light;
+  --paper:#FAF8F3;
+  --card:#FFFFFF;
+  --code-bg:#F2EFE6;
+  --ink:#191A17;
+  --ink-2:#54574F;
+  --ink-3:#83867C;
+  --rule:rgba(25,26,23,.13);
+  --rule-2:rgba(25,26,23,.24);
+  --accent:#B8451F;
+  --ok:#2C8A5C;
   --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Noto Sans","PingFang SC",sans-serif;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
   --ease:cubic-bezier(.22,.61,.36,1);
-  --r-window:14px;
-  --r-card:12px;
-  --r-ctl:9px;
 }
 *{box-sizing:border-box}
 html{-webkit-text-size-adjust:100%;scroll-behavior:smooth}
 body{
-  margin:0;background:var(--bg);color:var(--ink);
-  font-family:var(--sans);font-size:16px;line-height:1.65;
+  margin:0;background:var(--paper);color:var(--ink);
+  font-family:var(--sans);font-size:15px;line-height:1.72;
   -webkit-font-smoothing:antialiased;
 }
-a{color:inherit;text-decoration:none}
 p{margin:0}
-h1,h2,h3{margin:0;font-weight:500;letter-spacing:-.02em;line-height:1.2}
-:focus-visible{outline:2px solid var(--amber);outline-offset:3px;border-radius:4px}
-.wrap{max-width:1160px;margin:0 auto;padding:0 32px}
+h1,h2,h3{margin:0;font-weight:600;letter-spacing:-.01em;line-height:1.28}
+a{color:inherit;text-decoration:none}
+code{font-family:var(--mono);font-size:.9em}
+:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 .mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
 
-/* ── nav ─────────────────────────────────────────────────────────────── */
-.nav{border-bottom:1px solid var(--line);position:sticky;top:0;z-index:30;background:color-mix(in srgb,var(--bg) 92%,transparent);backdrop-filter:blur(10px)}
-.nav .wrap{display:flex;align-items:center;gap:28px;height:64px}
-.brand{display:flex;align-items:center;gap:10px;font-size:15px;font-weight:500;letter-spacing:-.01em}
-.brand .mark{width:26px;height:26px;border-radius:7px;display:block;flex:none}
-.brand .kind{font-size:12px;color:var(--ink-3);font-weight:400;padding-left:10px;margin-left:2px;border-left:1px solid var(--line-2)}
-.nav nav{display:flex;gap:26px;margin-left:auto;font-size:14px;color:var(--ink-2)}
-.nav nav a{transition:color .18s var(--ease)}
-.nav nav a:hover{color:var(--ink)}
-.repo{display:inline-flex;align-items:center;gap:7px;font-size:13.5px;color:var(--ink-2);padding:7px 13px;border:1px solid var(--line-2);border-radius:var(--r-ctl);transition:color .18s var(--ease),border-color .18s var(--ease)}
-.repo:hover{color:var(--ink);border-color:rgba(233,240,236,.28)}
-.repo svg{width:15px;height:15px;fill:currentColor}
+/* ── 外壳：左侧目录 + 右侧正文 ───────────────────────────────────────── */
+.shell{max-width:1260px;margin:0 auto;padding:0 32px;display:grid;grid-template-columns:252px minmax(0,1fr);gap:0}
+main{min-width:0;border-left:1px solid var(--rule);padding:0 0 0 56px}
 
-/* 手机才出现的目录按钮 */
-.menu{display:none;margin-left:auto;position:relative}
-.menu summary{list-style:none;display:grid;place-items:center;width:38px;height:38px;border:1px solid var(--line-2);border-radius:var(--r-ctl);cursor:pointer;color:var(--ink-2)}
-.menu summary::-webkit-details-marker{display:none}
-.menu summary svg{width:17px;height:17px}
-.menu-list{position:absolute;right:0;top:44px;min-width:168px;display:flex;flex-direction:column;background:var(--raised);border:1px solid var(--line-2);border-radius:var(--r-card);padding:6px;box-shadow:0 18px 40px -20px rgba(0,0,0,.9);z-index:40}
-.menu-list a{padding:9px 11px;border-radius:7px;font-size:14px;color:var(--ink-2)}
-.menu-list a:hover{background:var(--surface);color:var(--ink)}
+/* ── 目录 ───────────────────────────────────────────────────────────── */
+.rail{position:sticky;top:0;align-self:start;height:100vh;padding:30px 28px 26px 0;display:flex;flex-direction:column;gap:26px}
+.rail .brand{display:flex;align-items:center;gap:10px;font-size:14.5px;font-weight:600}
+.rail .brand img{width:24px;height:24px;border-radius:6px;flex:none}
+.rail .state{display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:11px;color:var(--ink-3)}
+.toc{display:flex;flex-direction:column;gap:1px;margin-top:-4px}
+.toc a{display:grid;grid-template-columns:26px minmax(0,1fr);gap:8px;align-items:baseline;padding:6px 0;font-size:13.5px;color:var(--ink-2);border-left:2px solid transparent;padding-left:10px;margin-left:-12px;transition:color .16s var(--ease),border-color .16s var(--ease)}
+.toc a .n{font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
+.toc a:hover{color:var(--ink)}
+.toc a[aria-current="true"]{color:var(--ink);border-left-color:var(--accent)}
+.toc a[aria-current="true"] .n{color:var(--accent)}
+.rail .foot{margin-top:auto;display:flex;flex-direction:column;gap:9px;font-size:12.5px;color:var(--ink-3)}
+.rail .foot a{display:inline-flex;align-items:center;gap:7px;color:var(--ink-2);transition:color .16s var(--ease)}
+.rail .foot a:hover{color:var(--accent)}
+.rail .foot svg{width:14px;height:14px;fill:currentColor}
+.rail .foot .icp{font-size:11px;line-height:1.6}
 
-/* ── hero ────────────────────────────────────────────────────────────── */
-.hero{padding:76px 0 88px}
-.hero-split{display:grid;grid-template-columns:minmax(0,.86fr) minmax(0,1.14fr);gap:64px;align-items:center}
-.hero-split > *{min-width:0}
-.meta{display:inline-flex;align-items:center;gap:9px;font-size:12.5px;color:var(--ink-3)}
-.hero h1{font-size:clamp(30px,3.6vw,44px);margin:20px 0 18px;letter-spacing:-.03em}
-.hero .lede{font-size:16.5px;line-height:1.7;color:var(--ink-2);max-width:44ch}
-.actions{display:flex;gap:10px;margin:28px 0 0;flex-wrap:wrap}
-.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:44px;padding:0 20px;border-radius:var(--r-ctl);font-size:14.5px;font-weight:500;border:1px solid var(--line-2);color:var(--ink);transition:background .18s var(--ease),border-color .18s var(--ease),color .18s var(--ease)}
-.btn:hover{background:var(--raised);border-color:rgba(233,240,236,.3)}
-.btn.primary{background:var(--amber);border-color:var(--amber);color:#1A1206}
-.btn.primary:hover{background:#EDB155;border-color:#EDB155}
-.btn svg{width:15px;height:15px}
-.fine{margin-top:16px;font-size:13px;color:var(--ink-3)}
-
-/* 首屏的「亮面」：一个真的在跑的轮询控制台 */
-.console-wrap{display:flex;flex-direction:column;gap:12px;min-width:0}
-.console{background:var(--surface);border:1px solid var(--line-2);border-radius:var(--r-window);overflow:hidden;box-shadow:0 24px 60px -32px rgba(0,0,0,.9)}
-.cbar{display:flex;align-items:center;gap:10px;padding:11px 16px;border-bottom:1px solid var(--line);background:var(--bg-2);font-family:var(--mono);font-size:11.5px;color:var(--ink-3)}
-.cbar .path{color:var(--ink-2)}
-.cbar .right{margin-left:auto;display:flex;align-items:center;gap:7px;color:var(--ok)}
-.cbody{padding:16px;display:flex;flex-direction:column;gap:12px;min-height:300px}
-
-/* live 点：全站唯一的「活着」信号 */
-.dot{width:6px;height:6px;border-radius:50%;background:var(--ok);display:inline-block;flex:none}
-.dot.live{animation:breathe 2.6s var(--ease) infinite}
-@keyframes breathe{0%,100%{box-shadow:0 0 0 0 rgba(87,198,138,.5)}50%{box-shadow:0 0 0 5px rgba(87,198,138,0)}}
-.dot.idle{background:var(--ink-3)}
-
-.stream{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px}
-/* 合并后原始日志不消失，只是退到背景里：读者能看到「这些 → 变成了下面那一条」 */
-.stream.stowed .line{opacity:.34;filter:saturate(.4)}
-.stream .line{transition:opacity .5s var(--ease),filter .5s var(--ease)}
-.line{display:grid;grid-template-columns:52px 58px minmax(0,1fr);gap:10px;align-items:baseline;padding:6px 8px;border-radius:7px;font-family:var(--mono);font-size:12px;color:var(--ink-2);opacity:0;transform:translateY(-4px);animation:slide-in .34s var(--ease) forwards}
-.line .t{color:var(--ink-3);font-variant-numeric:tabular-nums}
-.line .svc{font-size:11px;padding:1px 6px;border-radius:5px;background:var(--raised);color:var(--ink-2);border:1px solid var(--line);text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.line .msg{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.line.is-merge{background:color-mix(in srgb,var(--amber) 7%,transparent);border:1px solid color-mix(in srgb,var(--amber) 22%,transparent)}
-@keyframes slide-in{to{opacity:1;transform:translateY(0)}}
-
-.merged{border:1px solid var(--line-2);border-radius:var(--r-card);background:var(--raised);padding:14px 15px;opacity:0;transform:translateY(6px) scale(.995);transition:opacity .4s var(--ease),transform .4s var(--ease)}
-.merged.show{opacity:1;transform:none}
-.merged .head{display:flex;align-items:baseline;gap:9px;margin-bottom:9px}
-.merged .title{font-size:13.5px;font-weight:500}
-.merged .count{font-family:var(--mono);font-size:12px;color:var(--amber);margin-left:auto}
-.merged ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:5px}
-.merged li{font-family:var(--mono);font-size:12px;color:var(--ink-2);display:flex;gap:8px}
-.merged li .k{color:var(--ink-3);flex:none;width:44px}
-
-.cfoot{display:flex;align-items:center;gap:12px;padding-top:12px;border-top:1px solid var(--line);font-family:var(--mono);font-size:11px;color:var(--ink-3)}
-.cfoot .pips{display:flex;gap:5px;flex-wrap:nowrap}
-.cfoot .pip{width:5px;height:5px;border-radius:50%;background:var(--line-2);transition:background .3s var(--ease)}
-.cfoot .pip.on{background:var(--ok)}
-.cfoot .cnt{margin-left:auto;font-variant-numeric:tabular-nums;color:var(--ink-2)}
-.cfoot .rest{flex:0 0 84px;height:2px;border-radius:2px;background:var(--line);overflow:hidden}
-.cfoot .rest i{display:block;height:100%;width:100%;background:var(--amber);transform:scaleX(0);transform-origin:left;transition:transform 3.2s linear}
-.cap{margin-top:0;font-family:var(--mono);font-size:11px;line-height:1.9;color:var(--ink-3)}
-
-/* ── section shell ───────────────────────────────────────────────────── */
-.sec{padding:84px 0;border-top:1px solid var(--line)}
-.sec-head{margin-bottom:36px;max-width:60ch}
-.sec-head .lab{display:block;font-family:var(--mono);font-size:11.5px;color:var(--ink-3);margin-bottom:14px}
-.sec-head h2{font-size:clamp(21px,2.3vw,27px);margin-bottom:12px}
-.sec-head p{color:var(--ink-2);font-size:15px}
-
-/* 为什么装：一张对照表，像仪表的读数 */
-.diff{width:100%;border-collapse:collapse;font-size:14px}
-.diff th{text-align:left;font-weight:500;font-size:12.5px;color:var(--ink-3);padding:0 16px 10px;border-bottom:1px solid var(--line-2);white-space:nowrap}
-.diff td{padding:13px 16px;border-bottom:1px solid var(--line);color:var(--ink-2);vertical-align:top}
-.diff td:first-child{color:var(--ink);white-space:nowrap;width:1%}
-.diff .old{color:var(--ink-3)}
-.diff .new{color:var(--ink)}
-.diff .new .dot{margin-right:8px;vertical-align:1px;position:relative;top:-1px}
-
-/* 怎么工作：一条管道，节点之间有细线相连 */
-.pipe{position:relative;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:0;margin-top:8px}
-.pipe::before{content:"";position:absolute;left:14px;right:14px;top:9px;height:1px;background:var(--line-2)}
-.pipe .fill{position:absolute;left:14px;top:9px;height:1px;width:0;background:var(--amber);transition:width 1.5s var(--ease)}
-.pipe.in .fill{width:calc(100% - 28px)}
-.node{padding:0 16px 0 0;position:relative}
-.node .pin{width:7px;height:7px;border-radius:50%;background:var(--bg);border:1px solid var(--line-2);position:relative;top:6px;left:11px;transition:border-color .5s var(--ease),background .5s var(--ease)}
-.pipe.in .node .pin{border-color:var(--amber);background:var(--amber)}
-.node .idx{display:block;font-family:var(--mono);font-size:11px;color:var(--ink-3);margin:22px 0 8px}
-.node h3{font-size:15px;margin-bottom:7px}
-.node p{font-size:13.5px;color:var(--ink-3);line-height:1.6;max-width:24ch}
-.node code{font-family:var(--mono);font-size:12.5px;color:var(--ink-2)}
-
-/* 渠道：左边清单，右边同一条消息在四个渠道的样子 */
-.chsplit{display:grid;grid-template-columns:minmax(0,.82fr) minmax(0,1.18fr);gap:56px;align-items:start}
-.chsplit > *{min-width:0}
-.chlist{list-style:none;margin:0;padding:0;border-top:1px solid var(--line)}
-.chlist li{display:grid;grid-template-columns:26px minmax(0,1fr) auto;gap:12px;align-items:center;padding:11px 4px;border-bottom:1px solid var(--line);font-size:14px}
-.chlist .i{font-family:var(--mono);font-size:11px;color:var(--ink-3);font-variant-numeric:tabular-nums}
-.chlist .n{display:flex;align-items:center;gap:9px;min-width:0}
-.chlist .n span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.chlist .t{font-family:var(--mono);font-size:11.5px;color:var(--ink-3);white-space:nowrap}
-.previews{display:flex;flex-direction:column;gap:12px}
-.pv{border:1px solid var(--line);border-radius:var(--r-card);background:var(--surface);padding:13px 15px}
-.pv .ph{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:11px;color:var(--ink-3);margin-bottom:9px}
-.pv .ph .ok{margin-left:auto;color:var(--ok);display:inline-flex;align-items:center;gap:5px}
-.pv .ti{font-size:13.5px;font-weight:500;margin-bottom:6px}
-.pv .bd{font-family:var(--mono);font-size:12px;color:var(--ink-2);line-height:1.7}
-.pv.mail .ti{font-weight:400;border-bottom:1px solid var(--line);padding-bottom:7px}
-.pv.mail .sub{font-family:var(--mono);font-size:11px;color:var(--ink-3);margin-bottom:7px}
-.pv.bark{border-left:2px solid color-mix(in srgb,var(--ok) 45%,transparent)}
-
-/* 界面：真实配置面板的样子 */
-.panel{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,.72fr);gap:40px;align-items:start}
-.panel > *{min-width:0}
-.cfg{border:1px solid var(--line-2);border-radius:var(--r-window);background:var(--surface);overflow:hidden}
-.cfg-bar{display:flex;align-items:center;gap:9px;padding:10px 15px;border-bottom:1px solid var(--line);background:var(--bg-2);font-family:var(--mono);font-size:11.5px;color:var(--ink-3)}
-.cfg-bar .url{color:var(--ink-2)}
-.cfg-body{padding:15px}
-.row{display:grid;grid-template-columns:96px minmax(0,1fr);gap:12px;align-items:center;padding:8px 0;border-bottom:1px solid var(--line);font-size:13px}
-.row:last-child{border-bottom:0}
-.row .k{color:var(--ink-3);font-family:var(--mono);font-size:11.5px}
-.row .v{color:var(--ink-2);font-family:var(--mono);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sw{width:30px;height:17px;border-radius:9px;background:var(--amber);position:relative;justify-self:end}
-.sw::after{content:"";position:absolute;top:2px;right:2px;width:13px;height:13px;border-radius:50%;background:#1A1206}
-.sw.off{background:var(--raised);border:1px solid var(--line-2)}
-.sw.off::after{right:auto;left:2px;background:var(--ink-3)}
-.panel .note{font-size:13.5px;color:var(--ink-2);line-height:1.75}
-.panel .note strong{font-weight:500;color:var(--ink)}
-.panel .note + .note{margin-top:14px}
-
-/* 安装 */
-.inst{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:20px}
-.inst > *{min-width:0}
-.code{border:1px solid var(--line-2);border-radius:var(--r-card);background:var(--sunken);overflow:hidden}
-.code .ch{display:flex;align-items:center;gap:8px;padding:9px 14px;border-bottom:1px solid var(--line);font-family:var(--mono);font-size:11.5px;color:var(--ink-3)}
-.code pre{margin:0;padding:14px 15px;overflow-x:auto;font-family:var(--mono);font-size:12.5px;line-height:1.75;color:var(--ink-2)}
-.code .c{color:var(--ink-3)}
-.code .a{color:var(--amber)}
-.hint{display:flex;gap:10px;font-size:13px;color:var(--ink-2);border:1px solid var(--line);border-radius:var(--r-card);background:var(--surface);padding:12px 14px;margin-top:16px}
-.hint svg{width:15px;height:15px;flex:none;color:var(--amber);margin-top:2px}
-.hint code{font-family:var(--mono);font-size:12.5px;color:var(--ink)}
-
-/* FAQ */
-.faq{display:flex;flex-direction:column;gap:0;border-top:1px solid var(--line)}
-.faq details{border-bottom:1px solid var(--line)}
-.faq summary{display:flex;align-items:center;gap:14px;padding:15px 2px;cursor:pointer;font-size:14.5px;list-style:none}
-.faq summary::-webkit-details-marker{display:none}
-.faq summary .q{color:var(--ink-3);font-family:var(--mono);font-size:11.5px;flex:none}
-.faq summary svg{width:15px;height:15px;margin-left:auto;color:var(--ink-3);flex:none;transition:transform .25s var(--ease)}
-.faq details[open] summary svg{transform:rotate(180deg)}
-.faq details p{padding:0 2px 18px 40px;font-size:13.5px;color:var(--ink-2);line-height:1.75;max-width:70ch}
-
-/* footer */
-footer{border-top:1px solid var(--line);padding:30px 0 40px;font-size:12.5px;color:var(--ink-3)}
-footer .wrap{display:flex;flex-wrap:wrap;gap:10px 24px;align-items:center}
-footer .links{margin-left:auto;display:flex;gap:20px;flex-wrap:wrap}
-footer a{transition:color .18s var(--ease)}
-footer a:hover{color:var(--ink-2)}
-
-section[id]{scroll-margin-top:76px}
-
-/* ── responsive ──────────────────────────────────────────────────────── */
+/* 手机：目录变成横向 chip 条 */
 @media (max-width:980px){
-  .wrap{padding:0 22px}
-  .hero{padding:52px 0 64px}
-  .hero-split{grid-template-columns:1fr;gap:36px}
-  .sec{padding:60px 0}
-  .chsplit,.panel,.inst{grid-template-columns:1fr;gap:28px}
-  .pipe{grid-template-columns:1fr 1fr;row-gap:30px}
-  .pipe::before,.pipe .fill{display:none}
-  .node{padding-right:20px}
-  .nav > .wrap > nav{display:none}
-  .menu{display:block}
-  .brand .kind{display:none}
+  /* minmax(0,1fr)：不加的话目录 chip 条的 min-content 会把整列撑宽，全页横向溢出 */
+  .shell{grid-template-columns:minmax(0,1fr);padding:0 20px}
+  main{border-left:0;padding:0}
+  .rail{height:auto;min-width:0;position:sticky;top:0;z-index:20;padding:12px 0 10px;gap:10px;background:var(--paper);border-bottom:1px solid var(--rule)}
+  .rail .state,.rail .foot{display:none}
+  .rail .brand{font-size:14px}
+  .toc{flex-direction:row;gap:6px;min-width:0;overflow-x:auto;margin:0;padding-bottom:2px;scrollbar-width:none}
+  .toc::-webkit-scrollbar{display:none}
+  .toc a{grid-template-columns:auto auto;gap:5px;border:1px solid var(--rule);border-radius:4px;padding:5px 9px;margin:0;white-space:nowrap;font-size:12.5px}
+  .toc a[aria-current="true"]{border-color:var(--rule-2);background:var(--card)}
 }
-@media (max-width:600px){
-  .wrap{padding:0 18px}
-  .hero h1{font-size:29px}
-  .hero .lede{font-size:15px}
-  .cbody{padding:12px;min-height:264px}
-  .cbar{font-size:10.5px;gap:8px}
-  .cbar .path{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .cbar .right{white-space:nowrap;flex:none}
-  .cfoot .rest{flex:0 0 56px}
-  .line{grid-template-columns:46px 50px minmax(0,1fr);font-size:11.5px}
-  /* 三列在 390px 下会挤成竖排单字，改为每个情形一块 */
-  .diff,.diff tbody,.diff tr{display:block}
-  .diff thead{display:none}
-  .diff tr{padding:15px 0;border-bottom:1px solid var(--line)}
-  .diff td{border:0;padding:0;display:block;font-size:13.5px}
-  /* 桌面给首列的是 width:1%，块级化后必须还原成 auto，否则内容撑出格子 */
-  .diff td:first-child{width:auto;font-size:14px;color:var(--ink);margin-bottom:7px;white-space:nowrap}
-  .diff td.old,.diff td.new{color:var(--ink-2);padding-left:0}
-  .diff td.old::before,.diff td.new::before{content:attr(data-l);font-family:var(--mono);font-size:11px;color:var(--ink-3);margin-right:8px}
-  .diff td.old{color:var(--ink-3);margin-bottom:4px}
-  .row{grid-template-columns:78px minmax(0,1fr)}
-  .faq details p{padding-left:2px}
-  footer .links{margin-left:0}
+
+/* ── 报头 ───────────────────────────────────────────────────────────── */
+.masthead{padding:44px 0 34px;border-bottom:1px solid var(--rule)}
+.eyebrow{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:11px;color:var(--ink-3);margin-bottom:16px}
+.eyebrow .dot{width:6px;height:6px;border-radius:1px;background:var(--ok)}
+.masthead h1{font-size:clamp(27px,3.2vw,38px);letter-spacing:-.025em;max-width:26ch}
+.masthead .lede{margin-top:14px;font-size:16px;color:var(--ink-2);max-width:52ch}
+.spec{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));margin-top:28px;border-top:1px solid var(--rule)}
+.spec div{padding:12px 14px 0 0;border-right:1px solid var(--rule)}
+.spec div:last-child{border-right:0}
+.spec dt{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);margin-bottom:3px}
+.spec dd{margin:0;font-size:13.5px}
+.spec dd .mono{font-size:12.5px}
+
+/* ── 章节骨架 ───────────────────────────────────────────────────────── */
+.sec{padding:44px 0;border-bottom:1px solid var(--rule)}
+.sec-head{display:grid;grid-template-columns:52px minmax(0,1fr);gap:0 8px;margin-bottom:22px}
+.sec-head .num{font-family:var(--mono);font-size:11px;color:var(--accent);padding-top:5px}
+.sec-head h2{font-size:20px;letter-spacing:-.015em}
+.sec-head p{grid-column:2;margin-top:8px;font-size:14.5px;color:var(--ink-2);max-width:62ch}
+
+/* ── 01 运行示例：整页唯一的彩色与动效 ─────────────────────────────── */
+.demo{border:1px solid var(--rule-2);border-radius:6px;background:var(--card);overflow:hidden}
+.demo-bar{display:flex;align-items:center;gap:10px;padding:9px 14px;border-bottom:1px solid var(--rule);font-family:var(--mono);font-size:11.5px;color:var(--ink-3);background:var(--paper)}
+.demo-bar .path{color:var(--ink-2);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.demo-bar .right{margin-left:auto;display:flex;align-items:center;gap:6px;white-space:nowrap;color:var(--ok)}
+.demo-bar .right .dot{width:6px;height:6px;border-radius:1px;background:var(--ok)}
+.demo-body{padding:0}
+.stream{list-style:none;margin:0;padding:8px 6px;display:flex;flex-direction:column;gap:1px;min-height:150px}
+.line{display:grid;grid-template-columns:56px 62px minmax(0,1fr);gap:10px;align-items:baseline;padding:5px 8px;border-radius:3px;font-family:var(--mono);font-size:12px;color:var(--ink-2);opacity:0;transform:translateY(-3px);animation:enter .3s var(--ease) forwards;transition:opacity .45s var(--ease),color .45s var(--ease)}
+.line .t{color:var(--ink-3)}
+.line .svc{font-size:10.5px;padding:1.5px 6px;border:1px solid var(--rule-2);border-radius:3px;color:var(--ink-2);text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.line .msg{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.stream.stowed .line{opacity:.4;color:var(--ink-3)}
+@keyframes enter{to{opacity:1;transform:none}}
+
+.summary{margin:0 14px 12px;border:1px solid var(--rule-2);border-left:2px solid var(--accent);border-radius:4px;padding:12px 14px;opacity:0;transform:translateY(4px);transition:opacity .38s var(--ease),transform .38s var(--ease)}
+.summary.show{opacity:1;transform:none}
+.summary .top{display:flex;align-items:baseline;gap:10px;margin-bottom:7px}
+.summary .top b{font-weight:600;font-size:13.5px}
+.summary .top .c{margin-left:auto;font-family:var(--mono);font-size:11.5px;color:var(--accent)}
+.summary ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:3px}
+.summary li{font-family:var(--mono);font-size:11.5px;color:var(--ink-2);display:flex;gap:10px}
+.summary li .k{color:var(--ink-3);width:34px;flex:none}
+
+.demo-foot{display:flex;align-items:center;gap:12px;padding:9px 14px;border-top:1px solid var(--rule);background:var(--paper);font-family:var(--mono);font-size:11px;color:var(--ink-3)}
+.demo-foot .lbl{flex:none}
+.pips{display:flex;gap:4px;flex-wrap:nowrap}
+.pip{width:9px;height:9px;border:1px solid var(--rule-2);border-radius:2px;transition:background .28s var(--ease),border-color .28s var(--ease)}
+.pip.on{background:var(--ok);border-color:var(--ok)}
+.demo-foot .cnt{margin-left:auto;font-variant-numeric:tabular-nums;color:var(--ink-2)}
+.demo-foot .rest{flex:0 0 76px;height:2px;background:var(--rule);border-radius:1px;overflow:hidden}
+.demo-foot .rest i{display:block;width:100%;height:100%;background:var(--accent);transform:scaleX(0);transform-origin:left;transition:transform 3.2s linear}
+.demo-cap{margin-top:10px;font-family:var(--mono);font-size:11px;line-height:1.85;color:var(--ink-3)}
+
+/* ── 02 对照：手册式的两栏对照表 ────────────────────────────────────── */
+.pairs{border-top:1px solid var(--rule)}
+.pair{display:grid;grid-template-columns:112px minmax(0,1fr) minmax(0,1fr);gap:0 20px;padding:13px 0;border-bottom:1px solid var(--rule);align-items:start}
+.pair .k{font-size:13.5px;font-weight:600}
+.pair .bad{font-size:13.5px;color:var(--ink-3)}
+.pair .good{font-size:13.5px;color:var(--ink)}
+.pair .good .tag{font-family:var(--mono);font-size:10.5px;color:var(--ok);margin-right:6px}
+.pair .bad .tag{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);margin-right:6px}
+.pairs-head{display:grid;grid-template-columns:112px minmax(0,1fr) minmax(0,1fr);gap:0 20px;padding:0 0 9px;font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
+
+/* ── 03 怎么工作：一条带刻度的尺 ────────────────────────────────────── */
+.ruler{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:0;border-top:2px solid var(--ink);position:relative;margin-top:4px}
+.ruler .fill{position:absolute;left:0;top:-2px;height:2px;width:0;background:var(--accent);transition:width 1.3s var(--ease)}
+.ruler.in .fill{width:100%}
+.step{padding:14px 18px 0 0;border-right:1px solid var(--rule)}
+.step:last-child{border-right:0;padding-right:0}
+.step .tick{width:1px;height:9px;background:var(--rule-2);margin-bottom:10px;transition:background .5s var(--ease)}
+.ruler.in .step .tick{background:var(--ink)}
+.step .idx{font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
+.step h3{font-size:14.5px;margin:4px 0 6px}
+.step p{font-size:13px;color:var(--ink-2)}
+
+/* ── 04 渠道 ────────────────────────────────────────────────────────── */
+.chsplit{display:grid;grid-template-columns:minmax(0,.78fr) minmax(0,1.22fr);gap:36px;align-items:start}
+.chsplit > *{min-width:0}
+.chlist{list-style:none;margin:0;padding:0;border-top:1px solid var(--rule-2)}
+.chlist li{display:grid;grid-template-columns:24px minmax(0,1fr) auto;gap:10px;align-items:baseline;padding:8px 0;border-bottom:1px solid var(--rule);font-size:13.5px}
+.chlist .i{font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
+.chlist .t{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);white-space:nowrap}
+.previews{display:flex;flex-direction:column;gap:10px}
+.pv{border:1px solid var(--rule-2);border-radius:4px;background:var(--card);padding:11px 13px}
+.pv .ph{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:10.5px;color:var(--ink-3);margin-bottom:7px;padding-bottom:7px;border-bottom:1px dashed var(--rule)}
+.pv .ph .ok{margin-left:auto;color:var(--ok);white-space:nowrap}
+.pv .ti{font-size:13px;font-weight:600;margin-bottom:5px}
+.pv .bd{font-family:var(--mono);font-size:11.5px;color:var(--ink-2);line-height:1.7}
+.pv.mail .ti{font-weight:600}
+
+/* ── 05 配置面板 ────────────────────────────────────────────────────── */
+.panel{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,.7fr);gap:32px;align-items:start}
+.panel > *{min-width:0}
+.cfg{border:1px solid var(--rule-2);border-radius:6px;background:var(--card);overflow:hidden}
+.cfg-bar{display:flex;align-items:center;gap:8px;padding:8px 13px;border-bottom:1px solid var(--rule);background:var(--paper);font-family:var(--mono);font-size:11px;color:var(--ink-3)}
+.cfg-bar .dot{width:6px;height:6px;border-radius:1px;background:var(--ok)}
+.cfg-body{padding:4px 13px}
+.row{display:grid;grid-template-columns:92px minmax(0,1fr) 26px;gap:10px;align-items:center;padding:8px 0;border-bottom:1px solid var(--rule);font-size:12.5px}
+.row:last-child{border-bottom:0}
+.row .k{font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
+.row .v{font-family:var(--mono);font-size:11.5px;color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sw{width:22px;height:13px;border-radius:2px;border:1px solid var(--ink);background:var(--ink);justify-self:end;position:relative}
+.sw::after{content:"";position:absolute;top:1px;right:1px;width:9px;height:9px;background:var(--card)}
+.sw.off{background:transparent;border-color:var(--rule-2)}
+.sw.off::after{right:auto;left:1px;background:var(--rule-2)}
+.notes p{font-size:13.5px;color:var(--ink-2);padding:9px 0;border-bottom:1px solid var(--rule)}
+.notes p:first-child{padding-top:0}
+.notes p:last-child{border-bottom:0}
+.notes b{color:var(--ink);font-weight:600}
+
+/* ── 06 安装 ────────────────────────────────────────────────────────── */
+.inst{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px}
+.inst > *{min-width:0}
+.code{border:1px solid var(--rule-2);border-radius:5px;background:var(--code-bg);overflow:hidden}
+.code .ch{display:flex;align-items:center;gap:8px;padding:7px 12px;border-bottom:1px solid var(--rule);font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
+.code pre{margin:0;padding:12px;overflow-x:auto;font-family:var(--mono);font-size:11.5px;line-height:1.75;color:var(--ink-2)}
+.code .c{color:var(--ink-3)}
+.code .a{color:var(--accent)}
+.hint{display:flex;gap:9px;margin-top:14px;padding:10px 12px;border:1px solid var(--rule);border-left:2px solid var(--accent);border-radius:4px;background:var(--card);font-size:12.5px;color:var(--ink-2)}
+.hint svg{width:14px;height:14px;flex:none;color:var(--accent);margin-top:3px}
+
+/* ── 07 常见问题 ────────────────────────────────────────────────────── */
+.faq{border-top:1px solid var(--rule-2)}
+.faq details{border-bottom:1px solid var(--rule)}
+.faq summary{display:grid;grid-template-columns:30px minmax(0,1fr) 16px;gap:10px;align-items:center;padding:12px 0;cursor:pointer;font-size:14px;list-style:none}
+.faq summary::-webkit-details-marker{display:none}
+.faq summary .n{font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
+.faq summary svg{width:14px;height:14px;color:var(--ink-3);transition:transform .22s var(--ease)}
+.faq details[open] summary svg{transform:rotate(180deg)}
+.faq details[open] summary .n{color:var(--accent)}
+.faq details p{padding:0 0 15px 40px;font-size:13.5px;color:var(--ink-2);max-width:66ch}
+
+/* ── 页脚 ───────────────────────────────────────────────────────────── */
+.colophon{padding:26px 0 56px;display:flex;flex-wrap:wrap;gap:8px 22px;align-items:baseline;font-size:12px;color:var(--ink-3)}
+.colophon .links{margin-left:auto;display:flex;gap:18px;flex-wrap:wrap}
+.colophon a:hover{color:var(--accent)}
+
+section[id]{scroll-margin-top:24px}
+@media (max-width:980px){ section[id]{scroll-margin-top:80px} }
+@media (max-width:720px){
+  .masthead h1{font-size:26px}
+  .masthead .lede{font-size:15px}
+  .spec{grid-template-columns:1fr 1fr}
+  .spec div:nth-child(2){border-right:0}
+  .spec div{padding-bottom:10px}
+  .sec{padding:34px 0}
+  .sec-head{grid-template-columns:40px minmax(0,1fr)}
+  .pair,.pairs-head{grid-template-columns:minmax(0,1fr);gap:3px}
+  .pairs-head{display:none}
+  .pair{padding:12px 0}
+  .pair .k{margin-bottom:2px}
+  .pair .bad,.pair .good{padding-left:0}
+  .ruler{grid-template-columns:1fr 1fr;row-gap:0}
+  .step{padding:12px 14px 14px 0}
+  .step:nth-child(3){border-right:1px solid var(--rule);padding-left:0}
+  .chsplit,.panel,.inst{grid-template-columns:1fr;gap:22px}
+  .line{grid-template-columns:48px 54px minmax(0,1fr);font-size:11.5px}
+  .demo-foot{flex-wrap:wrap;gap:8px}
+  .demo-foot .rest{flex:1 1 60px}
+  .colophon .links{margin-left:0}
 }
 @media (prefers-reduced-motion:reduce){
   html{scroll-behavior:auto}
   *{animation:none!important;transition:none!important}
   .line{opacity:1;transform:none}
-  .merged{opacity:1;transform:none}
+  .summary{opacity:1;transform:none}
 }
 </style>
 </head>
 <body>
+<div class="shell">
 
-<header class="nav">
-  <div class="wrap">
-    <a class="brand" href="#top">
-      <img class="mark" src="assets/app-icon.png" width="256" height="256" alt="FnMessageBots" />
-      FnMessageBots<span class="kind">日志推送</span>
-    </a>
-    <nav aria-label="页面导航">
-      <a href="#why">为什么装</a>
-      <a href="#how">怎么工作</a>
-      <a href="#channels">支持的渠道</a>
-      <a href="#panel">配置页</a>
-      <a href="#install">安装</a>
+  <aside class="rail">
+    <a class="brand" href="#top"><img src="assets/app-icon.png" width="256" height="256" alt="FnMessageBots" />FnMessageBots</a>
+    <p class="state"><span class="dot" aria-hidden="true"></span>开源 · MIT · Python 单进程</p>
+    <nav class="toc" aria-label="章节目录">
+      <a href="#demo"><span class="n">01</span>运行示例</a>
+      <a href="#why"><span class="n">02</span>为什么装</a>
+      <a href="#how"><span class="n">03</span>怎么工作</a>
+      <a href="#channels"><span class="n">04</span>支持的渠道</a>
+      <a href="#panel"><span class="n">05</span>配置页</a>
+      <a href="#install"><span class="n">06</span>安装</a>
+      <a href="#faq"><span class="n">07</span>常见问题</a>
     </nav>
-    <details class="menu">
-      <summary aria-label="打开导航菜单">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
-      </summary>
-      <nav class="menu-list" aria-label="页面导航">
-        <a href="#why">为什么装</a>
-        <a href="#how">怎么工作</a>
-        <a href="#channels">支持的渠道</a>
-        <a href="#panel">配置页</a>
-        <a href="#install">安装</a>
-        <a href="#faq">常见问题</a>
-      </nav>
-    </details>
-    <a class="repo" href="https://github.com/Sunanang/FnMessageBots">
-      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.4 7.4 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
-      GitHub
-    </a>
-  </div>
-</header>
+    <div class="foot">
+      <a href="https://github.com/Sunanang/FnMessageBots">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.4 7.4 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+        源码仓库
+      </a>
+      <span class="icp">© 2026 · MIT 许可</span>
+    </div>
+  </aside>
 
-<main id="top">
+  <main id="top">
 
-  <section class="hero">
-    <div class="wrap hero-split">
-      <div>
-        <p class="meta"><span class="dot live" aria-hidden="true"></span>开源 · Python 单进程 · Docker / FPk 双发行</p>
-        <h1>日志一直在写。<br />你只是不在看。</h1>
-        <p class="lede">FnMessageBots 只读轮询飞牛 NAS 的事件库，把一轮里发生的事合成一条汇总，送到你已经开着的消息软件里。</p>
-        <div class="actions">
-          <a class="btn primary" href="#install">装到 NAS 上</a>
-          <a class="btn" href="#how">看它怎么工作</a>
-        </div>
-        <p class="fine">只读数据库 · 不写日志 · 全本地运行 · 通知只发到你配置的渠道</p>
+    <header class="masthead">
+      <p class="eyebrow"><span class="dot" aria-hidden="true"></span>飞牛 NAS · 事件日志推送</p>
+      <h1>日志一直在写，你只是不在看。让它来找你。</h1>
+      <p class="lede">只读轮询飞牛 NAS 的事件库，把一轮里发生的事合成一条汇总，送到你已经开着的消息软件里。没有云端账号，没有第三方中转。</p>
+      <dl class="spec">
+        <div><dt>运行方式</dt><dd>Python 单进程</dd></div>
+        <div><dt>分发渠道</dt><dd class="mono">10</dd></div>
+        <div><dt>配置端口</dt><dd class="mono">18080</dd></div>
+        <div><dt>发行</dt><dd class="mono">Docker / FPk</dd></div>
+      </dl>
+    </header>
+
+    <section class="sec" id="demo">
+      <div class="sec-head">
+        <span class="num">01</span>
+        <h2>一次轮询会发生什么</h2>
+        <p>下面这段是真的在跑：几秒内它会把新日志读进来，合并成一条汇总，再分发到各个渠道。真实部署时一轮是 60 秒。</p>
       </div>
 
-      <!-- 首屏亮面：轮询 → 合并 → 分发，循环演示（脚本驱动，prefers-reduced-motion 下停在终态） -->
-      <figure class="console-wrap" aria-label="演示：几条新日志被轮询到，合并成一条汇总，随后分发到各渠道">
-        <div class="console">
-        <div class="cbar">
+      <figure class="demo" aria-label="演示：几条新日志被轮询到，合并成一条汇总，随后分发到各渠道">
+        <div class="demo-bar">
           <span class="path">eventlogger / logger_data.db3</span>
-          <span class="right"><span class="dot live" aria-hidden="true"></span><span id="pollState">轮询中 · 60s</span></span>
+          <span class="right"><span class="dot" aria-hidden="true"></span><span id="pollState">轮询中</span></span>
         </div>
-        <div class="cbody">
+        <div class="demo-body">
           <ol class="stream" id="stream" aria-live="polite"></ol>
-
-          <div class="merged" id="merged">
-            <div class="head">
-              <span class="title">本轮日志汇总</span>
-              <span class="count" id="mergedCount">3 条</span>
-            </div>
+          <div class="summary" id="summary">
+            <div class="top"><b>本轮日志汇总</b><span class="c" id="sumCount">3 条</span></div>
             <ul>
               <li><span class="k">影视</span><span>入库 1 部 · 刮削完成 2 部</span></li>
               <li><span class="k">磁盘</span><span>存储空间 1 唤醒 1 次（同类型已合并）</span></li>
               <li><span class="k">系统</span><span>更新检查完成，无需处理</span></li>
             </ul>
           </div>
-
-          <div class="cfoot">
-            <span class="lbl">送达</span>
-            <span class="pips" id="pips"></span>
-            <span class="cnt" id="fanCount">0 / 9</span>
-            <span class="rest"><i id="restFill"></i></span>
-          </div>
         </div>
+        <div class="demo-foot">
+          <span class="lbl">送达</span>
+          <span class="pips" id="pips"></span>
+          <span class="cnt" id="fanCount">0 / 9</span>
+          <span class="rest"><i id="restFill"></i></span>
         </div>
-        <figcaption class="cap">企业微信 · 钉钉 · 飞书 · Bark · PushPlus · 魔法推送 · MeoW · 邮件 · 自建 Webhook</figcaption>
+        <figcaption class="demo-cap">企业微信 · 钉钉 · 飞书 · Bark · PushPlus · 魔法推送 · MeoW · 邮件 · 自建 Webhook</figcaption>
       </figure>
-    </div>
-  </section>
+    </section>
 
-  <section class="sec" id="why">
-    <div class="wrap">
+    <section class="sec" id="why">
       <div class="sec-head">
-        <span class="lab">为什么装它</span>
-        <h2>飞牛把每件事都记了，但它不会主动找你</h2>
-        <p>于是你要么想起来去翻页面，要么自己写个脚本推通知 —— 后者通常死在「一轮刷出几十条」和「半夜被磁盘唤醒吵醒」这两件事上。</p>
+        <span class="num">02</span>
+        <h2>为什么装</h2>
+        <p>飞牛把每件事都记了，但它不会主动找你。于是你要么想起来去翻页面，要么自己写脚本推通知 —— 后者通常死在「一轮刷出几十条」和「半夜被磁盘唤醒吵醒」这两件事上。</p>
       </div>
-      <table class="diff">
-        <thead>
-          <tr><th>情形</th><th>自己盯日志</th><th>交给机器人</th></tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td>新事件</td>
-            <td class="old" data-l="自己盯">想起来才去翻，错过就过去了</td>
-            <td class="new" data-l="机器人"><span class="dot" aria-hidden="true"></span>只处理启动后的新记录，不漏不重</td>
-          </tr>
-          <tr>
-            <td>一轮几十条</td>
-            <td class="old" data-l="自己盯">逐条推送，推送本身变成噪音</td>
-            <td class="new" data-l="机器人"><span class="dot" aria-hidden="true"></span>一轮合成一条，影视、音乐库再按静默窗口汇总</td>
-          </tr>
-          <tr>
-            <td>半夜磁盘唤醒</td>
-            <td class="old" data-l="自己盯">照样把你叫醒</td>
-            <td class="new" data-l="机器人"><span class="dot" aria-hidden="true"></span>同类型事件合并；勿扰时段静默、结束后补一条</td>
-          </tr>
-          <tr>
-            <td>多个渠道</td>
-            <td class="old" data-l="自己盯">每个渠道各写一遍，各自失败</td>
-            <td class="new" data-l="机器人"><span class="dot" aria-hidden="true"></span>一次配置并发投递，失败重试、队列落盘</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-  </section>
+      <div class="pairs">
+        <div class="pairs-head"><span>情形</span><span>自己盯日志</span><span>交给机器人</span></div>
+        <div class="pair">
+          <span class="k">新事件</span>
+          <span class="bad"><span class="tag">×</span>想起来才去翻，错过就过去了</span>
+          <span class="good"><span class="tag">·</span>只处理启动后的新记录，不漏不重</span>
+        </div>
+        <div class="pair">
+          <span class="k">一轮几十条</span>
+          <span class="bad"><span class="tag">×</span>逐条推送，推送本身变成噪音</span>
+          <span class="good"><span class="tag">·</span>一轮合成一条，影视、音乐库再按静默窗口汇总</span>
+        </div>
+        <div class="pair">
+          <span class="k">半夜磁盘唤醒</span>
+          <span class="bad"><span class="tag">×</span>照样把你叫醒</span>
+          <span class="good"><span class="tag">·</span>同类型事件合并；勿扰时段静默、结束后补一条</span>
+        </div>
+        <div class="pair">
+          <span class="k">多个渠道</span>
+          <span class="bad"><span class="tag">×</span>每个渠道各写一遍，各自失败</span>
+          <span class="good"><span class="tag">·</span>一次配置并发投递，失败重试、队列落盘</span>
+        </div>
+      </div>
+    </section>
 
-  <section class="sec" id="how">
-    <div class="wrap">
+    <section class="sec" id="how">
       <div class="sec-head">
-        <span class="lab">怎么工作</span>
-        <h2>四步，都发生在你自己的机器上</h2>
-        <p>没有云端账号，没有第三方中转。数据库只读打开，配置和待发队列都存在本地。</p>
+        <span class="num">03</span>
+        <h2>怎么工作</h2>
+        <p>四步都发生在你自己的机器上。数据库只读打开，配置和待发队列都存在本地。</p>
       </div>
-      <div class="pipe" id="pipe">
+      <div class="ruler" id="ruler">
         <span class="fill" aria-hidden="true"></span>
-        <div class="node">
-          <span class="pin" aria-hidden="true"></span>
+        <div class="step">
+          <span class="tick" aria-hidden="true"></span>
           <span class="idx">01</span>
           <h3>只读轮询</h3>
           <p>定时查 <code>log</code> 表，只取启动时间之后的新记录。</p>
         </div>
-        <div class="node">
-          <span class="pin" aria-hidden="true"></span>
+        <div class="step">
+          <span class="tick" aria-hidden="true"></span>
           <span class="idx">02</span>
           <h3>去重与合并</h3>
-          <p>默认 300 秒时间窗去重；同类型磁盘事件合并。</p>
+          <p>默认 300 秒时间窗去重；同类型磁盘事件合并成一条。</p>
         </div>
-        <div class="node">
-          <span class="pin" aria-hidden="true"></span>
+        <div class="step">
+          <span class="tick" aria-hidden="true"></span>
           <span class="idx">03</span>
           <h3>静默与汇总</h3>
           <p>勿扰时段只累计，结束后汇总补发；队列落盘，重启不丢。</p>
         </div>
-        <div class="node">
-          <span class="pin" aria-hidden="true"></span>
+        <div class="step">
+          <span class="tick" aria-hidden="true"></span>
           <span class="idx">04</span>
           <h3>并发分发</h3>
           <p>并行投递并重试；连续失败可自愈重启通知链路。</p>
         </div>
       </div>
-    </div>
-  </section>
+    </section>
 
-  <section class="sec" id="channels">
-    <div class="wrap">
+    <section class="sec" id="channels">
       <div class="sec-head">
-        <span class="lab">支持的渠道</span>
-        <h2>同一条汇总，按各家的格式发出去</h2>
-        <p>每个渠道可单独开关、单独填 key。Web 配置页保存即热加载，一般不用重启。</p>
+        <span class="num">04</span>
+        <h2>支持的渠道</h2>
+        <p>同一条汇总按各家的格式发出去。每个渠道可单独开关、单独填 key。</p>
       </div>
       <div class="chsplit">
         <ul class="chlist">
-          <li><span class="i">01</span><span class="n"><span class="dot" aria-hidden="true"></span><span>企业微信</span></span><span class="t">群机器人</span></li>
-          <li><span class="i">02</span><span class="n"><span class="dot" aria-hidden="true"></span><span>企业微信应用</span></span><span class="t">应用消息</span></li>
-          <li><span class="i">03</span><span class="n"><span class="dot" aria-hidden="true"></span><span>钉钉</span></span><span class="t">群机器人</span></li>
-          <li><span class="i">04</span><span class="n"><span class="dot" aria-hidden="true"></span><span>飞书</span></span><span class="t">群机器人</span></li>
-          <li><span class="i">05</span><span class="n"><span class="dot" aria-hidden="true"></span><span>Bark</span></span><span class="t">iOS</span></li>
-          <li><span class="i">06</span><span class="n"><span class="dot" aria-hidden="true"></span><span>PushPlus</span></span><span class="t">微信</span></li>
-          <li><span class="i">07</span><span class="n"><span class="dot" aria-hidden="true"></span><span>魔法推送</span></span><span class="t">App</span></li>
-          <li><span class="i">08</span><span class="n"><span class="dot" aria-hidden="true"></span><span>MeoW</span></span><span class="t">App</span></li>
-          <li><span class="i">09</span><span class="n"><span class="dot" aria-hidden="true"></span><span>SMTP 邮件</span></span><span class="t">任意邮箱</span></li>
-          <li><span class="i">10</span><span class="n"><span class="dot" aria-hidden="true"></span><span>通用 Webhook</span></span><span class="t">自定义 JSON</span></li>
+          <li><span class="i">01</span><span>企业微信</span><span class="t">群机器人</span></li>
+          <li><span class="i">02</span><span>企业微信应用</span><span class="t">应用消息</span></li>
+          <li><span class="i">03</span><span>钉钉</span><span class="t">群机器人</span></li>
+          <li><span class="i">04</span><span>飞书</span><span class="t">群机器人</span></li>
+          <li><span class="i">05</span><span>Bark</span><span class="t">iOS</span></li>
+          <li><span class="i">06</span><span>PushPlus</span><span class="t">微信</span></li>
+          <li><span class="i">07</span><span>魔法推送</span><span class="t">App</span></li>
+          <li><span class="i">08</span><span>MeoW</span><span class="t">App</span></li>
+          <li><span class="i">09</span><span>SMTP 邮件</span><span class="t">邮箱</span></li>
+          <li><span class="i">10</span><span>通用 Webhook</span><span class="t">自定义</span></li>
         </ul>
-
         <div class="previews">
           <div class="pv">
-            <div class="ph"><span>企业微信 · 群机器人</span><span class="ok"><span class="dot" aria-hidden="true"></span>21:16 送达</span></div>
+            <div class="ph"><span>企业微信 · 群机器人</span><span class="ok">21:16 送达</span></div>
             <div class="ti">[NAS] 影视处理本轮汇总 · 3 条</div>
             <div class="bd">&gt; 入库 1 部：某电影（2024）<br />&gt; 刮削完成 2 部<br />&gt; 磁盘唤醒 1 次（已合并同类型）</div>
           </div>
-          <div class="pv bark">
-            <div class="ph"><span>Bark · iPhone</span><span class="ok"><span class="dot" aria-hidden="true"></span>21:16 送达</span></div>
+          <div class="pv">
+            <div class="ph"><span>Bark · iPhone</span><span class="ok">21:16 送达</span></div>
             <div class="ti">[NAS] 影视处理本轮汇总</div>
             <div class="bd">入库 1 · 刮削 2 · 磁盘唤醒 1</div>
           </div>
           <div class="pv mail">
-            <div class="ph"><span>SMTP · 邮件</span><span class="ok"><span class="dot" aria-hidden="true"></span>21:16 送达</span></div>
-            <div class="sub">主题：[NAS] 影视处理本轮汇总 · 3 条</div>
-            <div class="bd">本轮新增 3 条记录，已按资源去重。正文按事件分区展示，附件可选。</div>
+            <div class="ph"><span>SMTP · 邮件</span><span class="ok">21:16 送达</span></div>
+            <div class="ti">主题：[NAS] 影视处理本轮汇总 · 3 条</div>
+            <div class="bd">本轮新增 3 条记录，已按资源去重；正文按事件分区展示。</div>
           </div>
           <div class="pv">
-            <div class="ph"><span>通用 Webhook</span><span class="ok"><span class="dot" aria-hidden="true"></span>21:16 送达</span></div>
+            <div class="ph"><span>通用 Webhook</span><span class="ok">21:16 送达</span></div>
             <div class="bd">{ "title": "[NAS] 影视处理本轮汇总",<br />&nbsp;&nbsp;"count": 3, "channels": 9 }</div>
           </div>
         </div>
       </div>
-    </div>
-  </section>
+    </section>
 
-  <section class="sec" id="panel">
-    <div class="wrap">
+    <section class="sec" id="panel">
       <div class="sec-head">
-        <span class="lab">配置页</span>
-        <h2>一个内置页面就够，不用改配置文件</h2>
+        <span class="num">05</span>
+        <h2>配置页</h2>
         <p>默认监听 18080，带访问密码（首次用启动日志里的初始化码设置）。key、token、SMTP 密码在页面上打码显示。</p>
       </div>
       <div class="panel">
         <div class="cfg">
-          <div class="cfg-bar"><span class="dot" aria-hidden="true"></span><span class="url">localhost:18080 · 通知配置</span></div>
+          <div class="cfg-bar"><span class="dot" aria-hidden="true"></span>localhost:18080 · 通知配置</div>
           <div class="cfg-body">
             <div class="row"><span class="k">企业微信</span><span class="v">https://qyapi.weixin.qq.com/…key=••••••</span><span class="sw"></span></div>
             <div class="row"><span class="k">钉钉</span><span class="v">https://oapi.dingtalk.com/…access_token=••••••</span><span class="sw"></span></div>
@@ -504,24 +453,22 @@ section[id]{scroll-margin-top:76px}
             <div class="row"><span class="k">PushPlus</span><span class="v">token=••••••</span><span class="sw off"></span></div>
             <div class="row"><span class="k">SMTP</span><span class="v">smtp.example.com:465 · 收件人 2</span><span class="sw"></span></div>
             <div class="row"><span class="k">去重窗口</span><span class="v">300 秒</span><span class="sw"></span></div>
-            <div class="row"><span class="k">勿扰时段</span><span class="v">23:00 – 08:00（结束后汇总补发）</span><span class="sw"></span></div>
+            <div class="row"><span class="k">勿扰时段</span><span class="v">23:00 – 08:00</span><span class="sw"></span></div>
             <div class="row"><span class="k">标题前缀</span><span class="v">[NAS]</span><span class="sw off"></span></div>
           </div>
         </div>
-        <div>
-          <p class="note"><strong>保存即生效。</strong>改完点保存，配置热加载，一般不需要重启容器。</p>
-          <p class="note">Web 访问默认要密码，<code class="mono">config.json</code> 里只存盐值与哈希；忘记密码可用环境变量 <code class="mono">FNMB_WEB_PASSWORD</code> 预置。</p>
-          <p class="note">配置页之外还有历史记录页，能翻到已经发出的每一条，以及哪些渠道投递失败过。</p>
+        <div class="notes">
+          <p><b>保存即生效。</b>改完点保存，配置热加载，一般不需要重启容器。</p>
+          <p>Web 访问默认要密码，<code>config.json</code> 里只存盐值与哈希；忘记密码可用环境变量 <code>FNMB_WEB_PASSWORD</code> 预置。</p>
+          <p>另有历史记录页，能翻到已发出的每一条，以及哪些渠道投递失败过。</p>
         </div>
       </div>
-    </div>
-  </section>
+    </section>
 
-  <section class="sec" id="install">
-    <div class="wrap">
+    <section class="sec" id="install">
       <div class="sec-head">
-        <span class="lab">安装</span>
-        <h2>两条路，选一条</h2>
+        <span class="num">06</span>
+        <h2>安装</h2>
         <p>Docker 适合大多数情况；飞牛应用中心装 FPk 更省事，装完点开就能配置。</p>
       </div>
       <div class="inst">
@@ -551,68 +498,64 @@ services:
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v5"/><path d="M12 16h.01"/></svg>
         <span>首次启动会打印一串初始化码，用它设置 Web 访问密码；也可以在部署时用 <code>FNMB_WEB_PASSWORD</code> 预置。</span>
       </div>
-    </div>
-  </section>
+    </section>
 
-  <section class="sec" id="faq">
-    <div class="wrap">
+    <section class="sec" id="faq">
       <div class="sec-head">
-        <span class="lab">常见问题</span>
-        <h2>几个常被问到的</h2>
+        <span class="num">07</span>
+        <h2>常见问题</h2>
       </div>
       <div class="faq">
         <details>
-          <summary><span class="q">01</span>它会不会改动我的日志或系统<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary>
+          <summary><span class="n">01</span><span>它会不会改动我的日志或系统</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary>
           <p>不会。数据库只读打开，只查启动之后的新记录；它不写日志表、不改系统设置，除了自己的配置目录（默认挂载到 <code>./config</code>）不落任何文件。</p>
         </details>
         <details>
-          <summary><span class="q">02</span>为什么一轮只收到一条，而不是每条都推<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary>
+          <summary><span class="n">02</span><span>为什么一轮只收到一条，而不是每条都推</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary>
           <p>这是刻意的。一次导入会刷出几十条记录，逐条推送只会让人屏蔽群。默认按轮询批次合并成一条汇总；影视、音乐库还会在连续 60 秒没有新增后合成一条本轮汇总。</p>
         </details>
         <details>
-          <summary><span class="q">03</span>半夜被磁盘唤醒的消息吵醒怎么办<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary>
+          <summary><span class="n">03</span><span>半夜被磁盘唤醒的消息吵醒怎么办</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary>
           <p>开勿扰模式。时段内不推送、只累计，结束后汇总成一条补发；同一类型的磁盘唤醒与休眠在时间窗内本来也会合并成一条。</p>
         </details>
         <details>
-          <summary><span class="q">04</span>某个渠道挂了，消息会丢吗<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary>
+          <summary><span class="n">04</span><span>某个渠道挂了，消息会丢吗</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary>
           <p>不会。待发通知会落盘保存，全部渠道都失败时保留整批、至少间隔 60 秒重试；连续失败达到阈值可触发进程内重启通知链路（可调参或关闭）。</p>
         </details>
         <details>
-          <summary><span class="q">05</span>能在多台 NAS 上跑吗<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary>
+          <summary><span class="n">05</span><span>能在多台 NAS 上跑吗</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary>
           <p>可以。每台单独部署一份，各自指向本机的 <code>logger_data.db3</code>，渠道 key 可以不同；实例之间没有共享状态。</p>
         </details>
         <details>
-          <summary><span class="q">06</span>支持哪些事件类型<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary>
+          <summary><span class="n">06</span><span>支持哪些事件类型</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary>
           <p>影视入库与刮削、磁盘唤醒与休眠、音乐库入库与移出、收藏与加入歌单、系统与通用事件等，逐项可在配置页勾选；只处理勾选的阶段。</p>
         </details>
       </div>
-    </div>
-  </section>
+    </section>
 
-</main>
+    <footer class="colophon">
+      <span>FnMessageBots · MIT 许可</span>
+      <span><a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener noreferrer">京ICP备2026075277号-1</a></span>
+      <span class="links">
+        <a href="https://github.com/Sunanang/FnMessageBots">源码</a>
+        <a href="https://github.com/Sunanang/FnMessageBots/releases">下载</a>
+        <a href="https://github.com/Sunanang/FnMessageBots/issues">反馈</a>
+        <a href="https://github.com/Sunanang/FnMessageBots/blob/main/docs/notification-channels.md">渠道文档</a>
+      </span>
+    </footer>
 
-<footer>
-  <div class="wrap">
-    <span>© 2026 FnMessageBots · MIT 许可</span>
-    <span><a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener noreferrer">京ICP备2026075277号-1</a></span>
-    <span class="links">
-      <a href="https://github.com/Sunanang/FnMessageBots">源码</a>
-      <a href="https://github.com/Sunanang/FnMessageBots/releases">下载</a>
-      <a href="https://github.com/Sunanang/FnMessageBots/issues">反馈</a>
-      <a href="https://github.com/Sunanang/FnMessageBots/blob/main/docs/notification-channels.md">渠道文档</a>
-    </span>
-  </div>
-</footer>
+  </main>
+</div>
 
 <script>
-/* 两段脚本，都只为「展示」服务：
-   1) 首屏演示：日志流入 → 折叠合并 → 渠道依次点亮，循环。
-   2) 管道进度线：滚到该区时把连线填满。
-   系统设置「减弱动态效果」时，两者都直接停在终态。 */
+/* 两件事，都只为「展示」：
+   1) 01 章那条运行示例：日志流入 → 变暗 → 汇总 → 渠道逐格点亮 → 走向下一轮。
+   2) 目录高亮 + 03 章刻度尺填充。
+   系统开「减弱动态效果」时，示例直接停在终态。 */
 (function () {
   var reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-  /* ── 1. 首屏演示 ─────────────────────────────────────────────── */
+  /* ── 运行示例 ─────────────────────────────────────────────── */
   var EVENTS = [
     ['21:14', '影视', '《某剧 S02E03》入库完成'],
     ['21:15', '磁盘', '存储空间 1 唤醒'],
@@ -621,98 +564,106 @@ services:
     ['21:17', '磁盘', '存储空间 2 休眠']
   ];
   var stream = document.getElementById('stream');
-  var merged = document.getElementById('merged');
-  var poll = document.getElementById('pollState');
-  var count = document.getElementById('mergedCount');
+  var summary = document.getElementById('summary');
   var pipsBox = document.getElementById('pips');
   var fanCount = document.getElementById('fanCount');
   var restFill = document.getElementById('restFill');
-  if (!stream || !merged || !pipsBox) return;
-
-  /* 9 个渠道各一颗小点，比 9 个标签省地方，也不会换行成孤字 */
-  var PIPS = 9;
-  for (var i = 0; i < PIPS; i++) {
-    var pip = document.createElement('span');
-    pip.className = 'pip';
-    pipsBox.appendChild(pip);
-  }
-  var pips = pipsBox.querySelectorAll('.pip');
+  var poll = document.getElementById('pollState');
   var timers = [];
+  var PIPS = 9;
 
-  function clearAll() { timers.forEach(clearTimeout); timers = []; }
-  function later(fn, ms) { timers.push(setTimeout(fn, ms)); }
-
-  function addLine(ev) {
-    var li = document.createElement('li');
-    li.className = 'line';
-    li.innerHTML = '<span class="t">' + ev[0] + '</span>' +
-      '<span class="svc">' + ev[1] + '</span>' +
-      '<span class="msg">' + ev[2] + '</span>';
-    stream.appendChild(li);
-    while (stream.children.length > 4) stream.removeChild(stream.firstChild);
-  }
-
-  function reset() {
-    clearAll();
-    stream.innerHTML = '';
-    stream.classList.remove('stowed');
-    merged.classList.remove('show');
-    pips.forEach(function (x) { x.classList.remove('on'); });
-    fanCount.textContent = '0 / ' + PIPS;
-    restFill.style.transform = 'scaleX(0)';
-    poll.textContent = '轮询中';
-    count.textContent = '3 条';
-  }
-
-  function run() {
-    reset();
-    var t = 0;
-    EVENTS.forEach(function (ev, i) { later(function () { addLine(ev); }, i * 620); });
-    t += EVENTS.length * 620;
-
-    later(function () {
-      stream.classList.add('stowed');
-      poll.textContent = '本轮结束';
-    }, t + 500);
-    later(function () { merged.classList.add('show'); }, t + 620);
-
-    var fan = t + 1200;
-    for (var k = 0; k < PIPS; k++) {
-      (function (idx) {
-        later(function () {
-          pips[idx].classList.add('on');
-          fanCount.textContent = (idx + 1) + ' / ' + PIPS;
-        }, fan + idx * 80);
-      })(k);
+  if (stream && pipsBox) {
+    for (var i = 0; i < PIPS; i++) {
+      var p = document.createElement('span');
+      p.className = 'pip';
+      pipsBox.appendChild(p);
     }
+    var pips = pipsBox.querySelectorAll('.pip');
 
-    var restAt = fan + PIPS * 80 + 240;
-    later(function () { restFill.style.transform = 'scaleX(1)'; }, restAt);
-    later(run, restAt + 3300);
+    var clearAll = function () { timers.forEach(clearTimeout); timers = []; };
+    var later = function (fn, ms) { timers.push(setTimeout(fn, ms)); };
+
+    var addLine = function (ev) {
+      var li = document.createElement('li');
+      li.className = 'line';
+      li.innerHTML = '<span class="t">' + ev[0] + '</span><span class="svc">' + ev[1] +
+        '</span><span class="msg">' + ev[2] + '</span>';
+      stream.appendChild(li);
+      while (stream.children.length > 4) stream.removeChild(stream.firstChild);
+    };
+
+    var reset = function () {
+      clearAll();
+      stream.innerHTML = '';
+      stream.classList.remove('stowed');
+      summary.classList.remove('show');
+      pips.forEach(function (x) { x.classList.remove('on'); });
+      fanCount.textContent = '0 / ' + PIPS;
+      restFill.style.transform = 'scaleX(0)';
+      poll.textContent = '轮询中';
+    };
+
+    var run = function () {
+      reset();
+      EVENTS.forEach(function (ev, k) { later(function () { addLine(ev); }, k * 600); });
+      var t = EVENTS.length * 600;
+      later(function () { stream.classList.add('stowed'); poll.textContent = '本轮结束'; }, t + 420);
+      later(function () { summary.classList.add('show'); }, t + 600);
+
+      var fan = t + 1150;
+      for (var k = 0; k < PIPS; k++) {
+        (function (idx) {
+          later(function () {
+            pips[idx].classList.add('on');
+            fanCount.textContent = (idx + 1) + ' / ' + PIPS;
+          }, fan + idx * 75);
+        })(k);
+      }
+      var restAt = fan + PIPS * 75 + 220;
+      later(function () { restFill.style.transform = 'scaleX(1)'; }, restAt);
+      later(run, restAt + 3200);
+    };
+
+    if (reduced) {
+      EVENTS.forEach(addLine);
+      stream.classList.add('stowed');
+      summary.classList.add('show');
+      pips.forEach(function (x) { x.classList.add('on'); });
+      fanCount.textContent = PIPS + ' / ' + PIPS;
+      poll.textContent = '已送达';
+    } else {
+      run();
+    }
   }
 
-  if (reduced) {
-    EVENTS.forEach(addLine);
-    stream.classList.add('stowed');
-    merged.classList.add('show');
-    pips.forEach(function (x) { x.classList.add('on'); });
-    fanCount.textContent = PIPS + ' / ' + PIPS;
-    poll.textContent = '已送达';
-  } else {
-    run();
-  }
-
-  /* ── 2. 管道进度线 ───────────────────────────────────────────── */
-  var pipe = document.getElementById('pipe');
-  if (pipe && 'IntersectionObserver' in window) {
-    var io = new IntersectionObserver(function (entries) {
+  /* ── 目录高亮：滚到哪章，左边就亮哪条 ─────────────────────── */
+  if ('IntersectionObserver' in window) {
+    var links = Array.prototype.slice.call(document.querySelectorAll('.toc a'));
+    var byId = {};
+    links.forEach(function (a) { byId[a.getAttribute('href').slice(1)] = a; });
+    var secIO = new IntersectionObserver(function (entries) {
       entries.forEach(function (e) {
-        if (e.isIntersecting) { pipe.classList.add('in'); io.disconnect(); }
+        if (!e.isIntersecting) return;
+        links.forEach(function (a) { a.removeAttribute('aria-current'); });
+        var a = byId[e.target.id];
+        if (a) a.setAttribute('aria-current', 'true');
       });
-    }, { threshold: 0.35 });
-    io.observe(pipe);
-  } else if (pipe) {
-    pipe.classList.add('in');
+    }, { rootMargin: '-15% 0px -70% 0px' });
+    Object.keys(byId).forEach(function (id) {
+      var el = document.getElementById(id);
+      if (el) secIO.observe(el);
+    });
+
+    /* 03 章刻度尺：进视野时把顶线填满 */
+    var ruler = document.getElementById('ruler');
+    if (ruler) {
+      var rIO = new IntersectionObserver(function (entries) {
+        entries.forEach(function (e) {
+          if (e.isIntersecting) { ruler.classList.add('in'); rIO.disconnect(); }
+        });
+      }, { threshold: 0.3 });
+      rIO.observe(ruler);
+    }
   }
 })();
 </script>
