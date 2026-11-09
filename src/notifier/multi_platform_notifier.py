@@ -112,11 +112,15 @@ class MultiPlatformMessage:
         return f"{title}{sep}{content_raw}"
     
     def to_wechat_format(self) -> Dict[str, Any]:
-        """转换为企业微信格式"""
+        """转换为企业微信格式。
+
+        群机器人文本上限 2048 字节（按 UTF-8 字节算，不是字符）：约 680 个汉字就会超限，
+        超限时企业微信整条拒收（errcode 45002），不是截断。所以这里按字节截断后发送。
+        """
         return {
             "msgtype": "text",
             "text": {
-                "content": self.merged_plain_text()
+                "content": _truncate_utf8(self.merged_plain_text(), WECOM_TEXT_MAX_BYTES)
             }
         }
     

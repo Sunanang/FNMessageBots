@@ -314,7 +314,11 @@ class UnifiedNotifier:
         current = now.hour * 60 + now.minute
         start_m = self._dnd_minutes_since_midnight(start_s)
         end_m = self._dnd_minutes_since_midnight(end_s)
-        if end_m <= start_m:
+        if end_m == start_m:
+            # 起止相同过去会被判成「全天勿扰」，等于把推送静音且永不汇总。
+            # 按「未设置有效时段」处理，宁可不静音也不要静默吞掉所有消息。
+            return False
+        if end_m < start_m:
             return current >= start_m or current < end_m
         return start_m <= current < end_m
 

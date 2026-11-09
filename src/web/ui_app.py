@@ -645,6 +645,9 @@ def create_app(on_config_saved=None) -> Flask:
                 return jsonify({"ok": False, "message": "勿扰开始时间格式不正确，请使用 HH:MM（如 22:00）。"}), 400
             if not re.match(r"^([01]?\d|2[0-3]):[0-5]\d$", dnd_end_time):
                 return jsonify({"ok": False, "message": "勿扰结束时间格式不正确，请使用 HH:MM（如 07:00）。"}), 400
+            normalize = lambda v: f"{int(v.split(':')[0]):02d}:{int(v.split(':')[1]):02d}"
+            if normalize(dnd_start_time) == normalize(dnd_end_time):
+                return jsonify({"ok": False, "message": "勿扰开始与结束时间不能相同，否则会静音全天。"}), 400
 
         if nas_patrol_enabled or nas_patrol_cron:
             try:
