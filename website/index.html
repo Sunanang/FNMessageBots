@@ -136,8 +136,11 @@ h3{font-size:17px;font-weight:600}
 .step p{margin:0;font-size:13px;color:var(--mut);line-height:1.6}
 
 /* 渠道墙 */
-.chgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(172px,1fr));gap:12px;margin-top:6px}
-.ch{display:flex;align-items:center;gap:9px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:13px 14px;font-size:14px;color:var(--ink);white-space:nowrap}
+.chgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(196px,1fr));gap:12px;margin-top:6px}
+.ch{display:flex;align-items:center;gap:9px;min-width:0;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:13px 14px;font-size:14px;color:var(--ink);white-space:nowrap}
+/* 标签宁可省略号也不能顶出边框：nm 可收缩，small 固定不压 */
+.ch .nm{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.ch small{flex:0 0 auto}
 .ch .g{width:8px;height:8px;border-radius:3px;background:var(--accent);flex:none}
 .ch small{margin-left:auto;color:var(--mut);font-size:11.5px;white-space:nowrap}
 
@@ -351,16 +354,16 @@ pre{max-width:100%}
         <p class="lead">每个渠道可单独开关、单独填 key。Web 配置页里保存即热加载，一般不用重启。</p>
       </div>
       <div class="chgrid">
-        <div class="ch"><span class="g"></span>企业微信<small>群机器人</small></div>
-        <div class="ch"><span class="g"></span>企业微信应用<small>应用消息</small></div>
-        <div class="ch"><span class="g"></span>钉钉<small>群机器人</small></div>
-        <div class="ch"><span class="g"></span>飞书<small>群机器人</small></div>
-        <div class="ch"><span class="g"></span>Bark<small>iOS</small></div>
-        <div class="ch"><span class="g"></span>PushPlus<small>微信</small></div>
-        <div class="ch"><span class="g"></span>魔法推送<small>App</small></div>
-        <div class="ch"><span class="g"></span>MeoW<small>App</small></div>
-        <div class="ch"><span class="g"></span>SMTP 邮件<small>任意邮箱</small></div>
-        <div class="ch"><span class="g"></span>通用 Webhook<small>自定义 JSON</small></div>
+        <div class="ch"><span class="g"></span><span class="nm">企业微信</span><small>群机器人</small></div>
+        <div class="ch"><span class="g"></span><span class="nm">企业微信应用</span><small>应用消息</small></div>
+        <div class="ch"><span class="g"></span><span class="nm">钉钉</span><small>群机器人</small></div>
+        <div class="ch"><span class="g"></span><span class="nm">飞书</span><small>群机器人</small></div>
+        <div class="ch"><span class="g"></span><span class="nm">Bark</span><small>iOS</small></div>
+        <div class="ch"><span class="g"></span><span class="nm">PushPlus</span><small>微信</small></div>
+        <div class="ch"><span class="g"></span><span class="nm">魔法推送</span><small>App</small></div>
+        <div class="ch"><span class="g"></span><span class="nm">MeoW</span><small>App</small></div>
+        <div class="ch"><span class="g"></span><span class="nm">SMTP 邮件</span><small>邮箱</small></div>
+        <div class="ch"><span class="g"></span><span class="nm">通用 Webhook</span><small>自定义</small></div>
       </div>
     </div>
   </section>
