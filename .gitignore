@@ -53,3 +53,8 @@ config/.setup_code
 # FPK 构建时从 src/ 临时复制，勿提交
 fpk/cmd/fnmessagebots/src/
 fpk/*.fpk
+
+# EdgeOne Makers 构建产物与本地凭据（deploy 生成，勿入库）
+website/.edgeone/
+website/.env
+.edgeone/
