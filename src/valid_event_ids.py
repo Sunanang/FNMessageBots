@@ -15,6 +15,8 @@ MONITOR_EVENT_IDS = frozenset({
     "LoginSucc2FA1",
     "LoginFail",
     "Logout",
+    "AddUser",
+    "DelUser",
     "FoundDisk",
     "InsertDisk",
     "EjectDisk",

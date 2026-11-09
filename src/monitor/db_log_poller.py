@@ -30,6 +30,9 @@ DB_EVENT_ID_TO_PROJECT: Dict[str, str] = {
     "LoginSucc2FA1": "LoginSucc2FA1",
     "LoginFail": "LoginFail",
     "Logout": "Logout",
+    # 系统用户管理，与影视库 MEDIA_USER_CREATED 分开。
+    "AddUser": "AddUser",
+    "DelUser": "DelUser",
     "FoundDisk": "FoundDisk",
     "InsertDisk": "InsertDisk",
     "EjectDisk": "EjectDisk",

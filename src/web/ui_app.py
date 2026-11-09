@@ -564,7 +564,7 @@ def create_app(on_config_saved=None) -> Flask:
         data = {
             "title": "FnMessageBot",
             "subtitle": "飞牛日志消息推送机器人",
-            "version": "2.7.5",
+            "version": "2.8.0",
             "web_password_enabled": _password_enabled(),
             "events_by_category": events_by_category,
             "third_party_events_by_category": third_party_events_by_category,
@@ -819,7 +819,7 @@ def create_app(on_config_saved=None) -> Flask:
                 content,
                 {
                     "hostname": socket.gethostname(),
-                    "version": "2.7.5",
+                    "version": "2.8.0",
                 },
             )
             ok = out.get("success", False) if isinstance(out, dict) else bool(out)

@@ -1,0 +1,937 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>日志推送 · 飞牛 NAS 的事件日志机器人</title>
+    <meta name="description" content="只读轮询飞牛 NAS 的事件库，一轮里发生的事合成一条汇总，送达到你已经开着的消息软件里。10 个通知渠道，Python 单进程，Docker / FPK 双发行。" />
+    <meta name="theme-color" content="#0B0D0F" />
+    <link rel="canonical" href="https://www.fnmb.lndo.top/" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="日志推送 · 飞牛 NAS 的事件日志机器人" />
+    <meta property="og:description" content="只读轮询飞牛 NAS 的事件库，一轮里发生的事合成一条汇总，送达到你已经开着的消息软件里。" />
+    <meta property="og:url" content="https://www.fnmb.lndo.top/" />
+    <meta property="og:image" content="https://www.fnmb.lndo.top/assets/app-icon.png" />
+    <link rel="icon" href="assets/app-icon.png" />
+    <style>
+      :root {
+        --bg: #0a0c0e;
+        --surface: #11151a;
+        --raised: #161b22;
+        --line: rgba(255, 255, 255, 0.07);
+        --line-2: rgba(255, 255, 255, 0.16);
+        --ink: #eceef1;
+        --ink-2: #a3aab3;
+        --ink-3: #6b727b;
+        --ok: #41c463;
+        --warn: #d29922;
+        --page: 1240px;
+        --gutter: 40px;
+        --r-s: 10px;
+        --r: 16px;
+        --r-l: 24px;
+        --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+        --ease: cubic-bezier(0.22, 1, 0.36, 1);
+        --card-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.048), rgba(255, 255, 255, 0.012));
+        --inset: inset 0 1px 0 rgba(255, 255, 255, 0.07);
+        --lift: 0 26px 50px -30px rgba(0, 0, 0, 0.95);
+      }
+      * { box-sizing: border-box; }
+      html { scroll-behavior: smooth; scroll-padding-top: 96px; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font-family: "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        -webkit-font-smoothing: antialiased;
+        line-height: 1.75;
+        overflow-x: hidden;
+      }
+      h1, h2, h3, p { margin: 0; }
+      a { color: inherit; text-decoration: none; }
+      button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+      ::selection { background: var(--ok); color: #04120a; }
+      :focus-visible { outline: 2px solid var(--ok); outline-offset: 3px; }
+
+      .wrap { max-width: var(--page); margin-inline: auto; padding-inline: var(--gutter); }
+      .eyebrow { font-size: 10.5px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--ink-3); font-weight: 500; }
+      .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+      .muted { color: var(--ink-2); }
+
+      /* 浮起卡片：统一的内高光 + 软阴影，替代原来那种硬网格 */
+      .card {
+        background: var(--card-bg);
+        border: 1px solid var(--line);
+        border-radius: var(--r);
+        box-shadow: var(--inset), var(--lift);
+        transition: border-color 0.35s var(--ease), transform 0.35s var(--ease), box-shadow 0.35s var(--ease);
+      }
+      .card:hover { border-color: var(--line-2); transform: translateY(-3px); }
+
+      /* ── 顶栏 ── */
+      .site-header {
+        position: fixed; inset: 0 0 auto 0; z-index: 40; height: 70px;
+        display: flex; align-items: center; justify-content: space-between;
+        padding-inline: var(--gutter);
+        transition: background 0.4s var(--ease), border-color 0.4s var(--ease), backdrop-filter 0.4s;
+        border-bottom: 1px solid transparent;
+      }
+      .site-header.stuck {
+        background: color-mix(in srgb, var(--bg) 72%, transparent);
+        backdrop-filter: blur(16px) saturate(140%);
+        border-bottom-color: var(--line);
+      }
+      .brand { display: flex; align-items: center; gap: 10px; font-size: 15px; font-weight: 600; letter-spacing: -0.2px; }
+      .brand img { width: 26px; height: 26px; border-radius: 8px; }
+      .site-nav {
+        display: flex; align-items: center; gap: 4px; font-size: 12.5px; color: var(--ink-2);
+        padding: 4px; border-radius: 999px; border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.02);
+      }
+      .site-nav a { padding: 7px 13px; border-radius: 999px; transition: color 0.25s var(--ease), background 0.25s var(--ease); }
+      .site-nav a:hover { color: var(--ink); background: rgba(255, 255, 255, 0.06); }
+      .header-actions { display: flex; align-items: center; gap: 12px; }
+      .nav-gh { font-size: 12.5px; color: var(--ink-2); transition: color 0.2s; }
+      .nav-gh:hover { color: var(--ink); }
+      .nav-cta {
+        display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; font-weight: 500;
+        padding: 9px 17px; border-radius: 999px;
+        background: linear-gradient(180deg, #fff, #dfe2e5); color: #0c0f12;
+        box-shadow: 0 8px 22px -12px rgba(255, 255, 255, 0.5);
+        transition: transform 0.25s var(--ease), box-shadow 0.25s var(--ease);
+      }
+      .nav-cta:hover { transform: translateY(-1px); box-shadow: 0 12px 26px -12px rgba(255, 255, 255, 0.65); }
+
+      /* ── Hero ── */
+      .hero { position: relative; padding: 148px 0 24px; overflow: clip; }
+      .hero::before {
+        content: ""; position: absolute; left: 50%; top: -30%; width: 1200px; height: 900px;
+        transform: translateX(-58%);
+        background: radial-gradient(closest-side, rgba(65, 196, 99, 0.16), transparent 70%);
+        pointer-events: none;
+      }
+      .hero::after {
+        content: ""; position: absolute; right: -10%; top: 20%; width: 700px; height: 700px;
+        background: radial-gradient(closest-side, rgba(90, 130, 255, 0.09), transparent 72%);
+        pointer-events: none;
+      }
+      .hero-grid { position: relative; display: grid; grid-template-columns: 1.04fr 0.96fr; gap: 60px; align-items: center; }
+      .hero h1 {
+        font-size: clamp(40px, 4.8vw, 70px); line-height: 1.14; font-weight: 600;
+        letter-spacing: -0.048em; margin: 20px 0 24px;
+      }
+      .hero h1 em { font-style: normal; color: #959ca4; }
+      .hero-desc { color: var(--ink-2); font-size: 15.5px; line-height: 1.95; max-width: 44ch; }
+      .hero-actions { display: flex; align-items: center; gap: 12px; margin-top: 34px; }
+      .btn {
+        display: inline-flex; align-items: center; justify-content: center; gap: 9px;
+        font-size: 13px; font-weight: 500; padding: 15px 26px; border-radius: 999px;
+        position: relative; overflow: hidden;
+        transition: transform 0.3s var(--ease), box-shadow 0.3s var(--ease), background 0.3s var(--ease), border-color 0.3s var(--ease);
+      }
+      .btn::after {
+        content: ""; position: absolute; inset: 0; border-radius: inherit;
+        background: linear-gradient(100deg, transparent 20%, rgba(255, 255, 255, 0.35) 50%, transparent 80%);
+        transform: translateX(-120%); transition: transform 0.7s var(--ease); pointer-events: none;
+      }
+      .btn:hover::after { transform: translateX(120%); }
+      .btn:hover { transform: translateY(-2px); }
+      .btn-primary { background: linear-gradient(180deg, #fff, #dde0e3); color: #0c0f12; box-shadow: 0 14px 30px -16px rgba(255, 255, 255, 0.55); }
+      .btn-primary:hover { box-shadow: 0 18px 36px -16px rgba(255, 255, 255, 0.7); }
+      .btn-quiet { border: 1px solid var(--line-2); color: var(--ink); background: rgba(255, 255, 255, 0.03); backdrop-filter: blur(8px); }
+      .btn-quiet:hover { background: rgba(255, 255, 255, 0.08); border-color: rgba(255, 255, 255, 0.28); }
+      .hero-meta { margin-top: 22px; font-size: 11px; letter-spacing: 0.05em; color: var(--ink-3); display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+      .hero-meta i { width: 3px; height: 3px; border-radius: 50%; background: var(--ink-3); }
+
+      /* 主视觉：斜放的汇总卡 + 背后错落的日志流 */
+      .hero-visual { position: relative; min-height: 430px; perspective: 1500px; }
+      .lv-lines { position: absolute; inset: 6% 4% auto 0; display: flex; flex-direction: column; gap: 10px; }
+      .lv-line {
+        display: flex; align-items: center; gap: 10px; padding: 10px 14px;
+        border: 1px solid var(--line); border-radius: 12px;
+        background: rgba(17, 21, 26, 0.72);
+        font-family: var(--mono); font-size: 11px; color: var(--ink-3);
+        opacity: 0.42; transform: translateX(-14px) scale(0.97);
+        transition: opacity 0.6s var(--ease), transform 0.6s var(--ease);
+      }
+      .lv-line:nth-child(2) { transform: translateX(-6px) scale(0.985); opacity: 0.5; }
+      .lv-line:nth-child(3) { transform: translateX(2px); opacity: 0.58; }
+      .lv-line:nth-child(4) { transform: translateX(10px); opacity: 0.66; }
+      .lv-line .t { color: #565d66; }
+      .lv-line .k { padding: 1px 7px; border: 1px solid var(--line-2); border-radius: 999px; font-size: 9.5px; color: var(--ink-2); }
+      .lv-card {
+        position: absolute; right: 0; bottom: 4%; width: min(352px, 88%);
+        border: 1px solid var(--line-2); border-radius: var(--r-l); padding: 18px 19px;
+        background: linear-gradient(180deg, #191f26, #11151a 70%);
+        box-shadow: var(--inset), 0 34px 70px -30px rgba(0, 0, 0, 0.95);
+        transform: rotateY(-9deg) rotateX(5deg) rotateZ(-1.4deg);
+        transition: transform 0.8s var(--ease);
+        transform-origin: 70% 60%;
+      }
+      .hero-visual:hover .lv-card { transform: rotateY(-3deg) rotateX(2deg) rotateZ(-0.5deg); }
+      .lv-card .app { display: flex; align-items: center; gap: 7px; font-size: 11px; color: var(--ink-3); }
+      .lv-card .app i { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 10px var(--ok); }
+      .lv-card h3 { font-size: 15px; font-weight: 600; margin: 12px 0 11px; letter-spacing: -0.01em; }
+      .lv-card ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 9px; }
+      .lv-card li { display: flex; gap: 9px; font-size: 12.5px; color: var(--ink-2); line-height: 1.6; }
+      .lv-card li b { flex: none; font-family: var(--mono); font-size: 10px; font-weight: 500; color: var(--ok); padding-top: 3px; }
+      .lv-card .foot { display: flex; align-items: center; justify-content: space-between; margin-top: 15px; padding-top: 12px; border-top: 1px solid var(--line); font-size: 10.5px; color: var(--ink-3); }
+      .lv-card .pips { display: flex; gap: 3px; }
+      .lv-card .pip { width: 7px; height: 7px; border-radius: 50%; background: rgba(255, 255, 255, 0.14); }
+      .lv-card .pip.on { background: var(--ok); box-shadow: 0 0 8px rgba(65, 196, 99, 0.7); }
+
+      /* 规格：胶囊组，取代原来的四列硬边框 */
+      .spec { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 64px; }
+      .spec div {
+        display: flex; align-items: baseline; gap: 9px; padding: 11px 18px;
+        border: 1px solid var(--line); border-radius: 999px;
+        background: rgba(255, 255, 255, 0.022);
+        transition: border-color 0.3s var(--ease), background 0.3s var(--ease);
+      }
+      .spec div:hover { border-color: var(--line-2); background: rgba(255, 255, 255, 0.05); }
+      .spec dt { font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em; color: var(--ink-3); text-transform: uppercase; }
+      .spec dd { margin: 0; font-size: 13px; font-weight: 500; }
+
+      /* ── 章节 ── */
+      .section { padding: 104px 0; position: relative; overflow: clip; }
+      .section::before {
+        content: ""; position: absolute; left: var(--gutter); right: var(--gutter); top: 0;
+        height: 1px; background: linear-gradient(90deg, transparent, var(--line) 12%, var(--line) 88%, transparent);
+      }
+      .section-top { display: flex; align-items: center; justify-content: space-between; gap: 20px; font-size: 12px; color: var(--ink-3); }
+      .section-head { display: grid; grid-template-columns: 1.15fr 0.85fr; gap: 48px; align-items: end; margin: 34px 0 52px; }
+      .section-head h2 { font-size: clamp(30px, 3.5vw, 48px); line-height: 1.22; font-weight: 500; letter-spacing: -0.042em; }
+      .section-head h2 em { font-style: normal; color: var(--ink-3); display: block; }
+      .section-head > p { font-size: 13.5px; line-height: 2; color: var(--ink-2); max-width: 40ch; padding-bottom: 6px; }
+
+      /* 能力：错落的 bento（一大两小），不再是等分三卡 */
+      .caps { display: grid; grid-template-columns: 1.18fr 0.82fr; gap: 14px; }
+      .cap { padding: 32px 30px; border-radius: var(--r); background: var(--card-bg); border: 1px solid var(--line); box-shadow: var(--inset), var(--lift); transition: border-color 0.35s var(--ease), transform 0.35s var(--ease); }
+      .cap:hover { border-color: var(--line-2); transform: translateY(-3px); }
+      .cap:first-child {
+        grid-row: span 2; display: flex; flex-direction: column; align-items: flex-start;
+        background: linear-gradient(160deg, rgba(65, 196, 99, 0.075), rgba(255, 255, 255, 0.02) 46%, rgba(255, 255, 255, 0.012));
+      }
+      .cap:first-child p { max-width: 32ch; }
+      .cap:first-child small { margin-top: auto; padding-top: 28px; }
+      .cap .idx { font-family: var(--mono); font-size: 11px; color: var(--ok); }
+      .cap h3 { font-size: 17px; font-weight: 600; margin: 13px 0 10px; letter-spacing: -0.012em; }
+      .cap:first-child h3 { font-size: 22px; }
+      .cap p { font-size: 13px; line-height: 1.9; color: var(--ink-2); }
+      .cap small { display: block; margin-top: 12px; font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); }
+
+      /* 演示区 */
+      .demo { border-radius: var(--r-l); background: var(--card-bg); border: 1px solid var(--line); box-shadow: var(--inset), var(--lift); overflow: hidden; }
+      .demo-bar { display: flex; align-items: center; justify-content: space-between; padding: 13px 20px; border-bottom: 1px solid var(--line); font-family: var(--mono); font-size: 11px; color: var(--ink-3); }
+      .demo-bar .live { display: flex; align-items: center; gap: 6px; color: var(--ok); }
+      .demo-bar .live i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: pulse 1.6s var(--ease) infinite; }
+      .stream { padding: 20px 20px 22px; min-height: 186px; display: flex; flex-direction: column; gap: 9px; }
+      .line { display: flex; align-items: center; gap: 11px; font-size: 12.5px; color: var(--ink-2); opacity: 0; transform: translateY(8px); transition: opacity 0.5s var(--ease), transform 0.5s var(--ease); }
+      .line.show { opacity: 1; transform: none; }
+      .line .t { font-family: var(--mono); font-size: 11px; color: var(--ink-3); }
+      .line .tag { font-family: var(--mono); font-size: 9.5px; padding: 2px 8px; border: 1px solid var(--line-2); border-radius: 999px; color: var(--ink-2); }
+      .line.stowed { color: var(--ink-3); }
+      .summary { margin: 0 20px 18px; border: 1px dashed var(--line-2); border-radius: 14px; padding: 15px 17px; display: grid; }
+      .summary > * { grid-area: 1 / 1; min-width: 0; }
+      .summary .pending { align-self: center; font-family: var(--mono); font-size: 11px; color: var(--ink-3); transition: opacity 0.35s var(--ease); }
+      .summary .content { opacity: 0; transition: opacity 0.45s var(--ease); }
+      .summary.show { border-style: solid; border-color: rgba(65, 196, 99, 0.4); background: linear-gradient(160deg, rgba(65, 196, 99, 0.08), transparent 60%); }
+      .summary.show .pending { opacity: 0; }
+      .summary.show .content { opacity: 1; }
+      .summary .top { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 10px; }
+      .summary .top b { font-size: 13px; font-weight: 600; }
+      .summary .top .c { font-family: var(--mono); font-size: 11px; color: var(--ok); }
+      .summary ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 7px; }
+      .summary li { display: flex; gap: 10px; font-size: 12px; color: var(--ink-2); }
+      .summary li .k { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); min-width: 30px; padding-top: 2px; }
+      .demo-foot { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 13px 20px; border-top: 1px solid var(--line); font-family: var(--mono); font-size: 11px; color: var(--ink-3); }
+      .demo-foot .pips { display: flex; gap: 4px; }
+      .demo-foot .pip { width: 8px; height: 8px; border-radius: 50%; background: rgba(255, 255, 255, 0.13); transition: background 0.4s var(--ease), box-shadow 0.4s var(--ease); }
+      .demo-foot .pip.on { background: var(--ok); box-shadow: 0 0 9px rgba(65, 196, 99, 0.65); }
+      .demo-foot .rest { flex: 1; height: 1px; background: var(--line); position: relative; overflow: hidden; }
+      .demo-foot .rest span { position: absolute; inset: 0 auto 0 0; width: 0; background: linear-gradient(90deg, transparent, var(--ok)); transition: width 0.7s linear; }
+      @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+
+      /* ── 渠道：5 列胶囊网格 + 悬浮预览 ── */
+      .channels { display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 44px; align-items: start; }
+      .ch-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+      .ch {
+        display: flex; align-items: baseline; gap: 10px; padding: 15px 18px;
+        border: 1px solid var(--line); border-radius: 14px;
+        background: rgba(255, 255, 255, 0.022);
+        transition: border-color 0.3s var(--ease), background 0.3s var(--ease), transform 0.3s var(--ease);
+      }
+      .ch:hover { border-color: rgba(65, 196, 99, 0.45); background: rgba(65, 196, 99, 0.07); transform: translateY(-2px); }
+      .ch .i { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); transition: color 0.3s; }
+      .ch:hover .i { color: var(--ok); }
+      .ch .n { font-size: 13.5px; }
+      .ch .t { margin-left: auto; font-family: var(--mono); font-size: 9.5px; color: var(--ink-3); }
+      .pv-list { display: flex; flex-direction: column; gap: 12px; }
+      .pv {
+        border: 1px solid var(--line); border-radius: var(--r); background: var(--card-bg);
+        padding: 15px 17px; box-shadow: var(--inset);
+        transition: border-color 0.3s var(--ease), transform 0.3s var(--ease);
+      }
+      .pv:hover { border-color: var(--line-2); transform: translateY(-2px); }
+      .pv .ph { display: flex; align-items: center; justify-content: space-between; font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); margin-bottom: 10px; }
+      .pv .ph .ok { color: var(--ok); }
+      .pv .ti { font-size: 12.5px; font-weight: 500; margin-bottom: 8px; }
+      .pv .bd { font-size: 11.5px; line-height: 1.8; color: var(--ink-2); font-family: var(--mono); }
+
+      /* ── 配置页 ── */
+      .panel-grid { display: grid; grid-template-columns: 1.08fr 0.92fr; gap: 48px; align-items: center; }
+      .cfg { border-radius: var(--r-l); background: var(--card-bg); border: 1px solid var(--line); box-shadow: var(--inset), var(--lift); overflow: hidden; }
+      .cfg-bar { display: flex; align-items: center; gap: 8px; padding: 13px 18px; border-bottom: 1px solid var(--line); font-family: var(--mono); font-size: 11px; color: var(--ink-3); }
+      .cfg-bar .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 9px rgba(65, 196, 99, 0.8); }
+      .cfg-row { display: grid; grid-template-columns: 1fr auto 42px; align-items: center; gap: 12px; padding: 12px 18px; border-bottom: 1px solid var(--line); font-size: 12.5px; transition: background 0.25s; }
+      .cfg-row:hover { background: rgba(255, 255, 255, 0.028); }
+      .cfg-row:last-child { border-bottom: 0; }
+      .cfg-row .k { color: var(--ink-2); }
+      .cfg-row .v { font-family: var(--mono); font-size: 11.5px; color: var(--ink); }
+      .sw { width: 36px; height: 20px; border-radius: 999px; background: rgba(255, 255, 255, 0.14); position: relative; transition: background 0.3s var(--ease); }
+      .sw::after { content: ""; position: absolute; inset: 2px auto 2px 2px; width: 16px; border-radius: 50%; background: #fff; transition: transform 0.3s var(--ease); }
+      .sw.on { background: var(--ok); box-shadow: 0 0 14px -4px var(--ok); }
+      .sw.on::after { transform: translateX(16px); }
+      .panel-copy h3 { font-size: 21px; font-weight: 600; letter-spacing: -0.025em; margin-bottom: 6px; }
+      .panel-copy p { font-size: 13.5px; line-height: 2; color: var(--ink-2); margin-top: 15px; }
+      .panel-copy strong { color: var(--ink); font-weight: 500; }
+
+      /* ── 安装 / 下载 ── */
+      .install-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+      .code { border-radius: var(--r); background: var(--card-bg); border: 1px solid var(--line); box-shadow: var(--inset); overflow: hidden; display: flex; flex-direction: column; }
+      .code .ch { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--line); font-family: var(--mono); font-size: 11px; color: var(--ink-3); }
+      .code pre { margin: 0; padding: 16px; font-family: var(--mono); font-size: 11.5px; line-height: 1.85; color: var(--ink-2); overflow-x: auto; flex: 1; }
+      .copy { margin-left: auto; font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); border: 1px solid var(--line-2); border-radius: 999px; padding: 4px 11px; transition: color 0.25s, border-color 0.25s, background 0.25s; }
+      .copy:hover { color: var(--ok); border-color: var(--ok); background: rgba(65, 196, 99, 0.08); }
+      .copy[data-done] { color: var(--ok); border-color: var(--ok); }
+
+      .dl { margin-top: 18px; border-radius: var(--r-l); background: var(--card-bg); border: 1px solid var(--line); box-shadow: var(--inset), var(--lift); overflow: hidden; }
+      .dl-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; padding: 15px 20px; border-bottom: 1px solid var(--line); font-family: var(--mono); font-size: 11px; color: var(--ink-3); }
+      .dl-head b { color: var(--ink); font-size: 12.5px; font-weight: 600; }
+      .dl-hist { margin-left: auto; color: var(--ink-2); transition: color 0.25s; }
+      .dl-hist:hover { color: var(--ok); }
+      .dl-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 16px; padding: 16px 20px; border-bottom: 1px solid var(--line); transition: background 0.25s; }
+      .dl-row:hover { background: rgba(255, 255, 255, 0.026); }
+      .dl-row:last-of-type { border-bottom: 0; }
+      .dl-name { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+      .dl-name b { font-size: 13.5px; font-weight: 600; }
+      .dl-name span { font-family: var(--mono); font-size: 11px; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .dl-size { font-family: var(--mono); font-size: 11px; color: var(--ink-3); }
+      .dl-btn { display: inline-flex; align-items: center; justify-content: center; height: 36px; padding: 0 20px; border-radius: 999px; background: linear-gradient(180deg, #fff, #dde0e3); color: #0c0f12; font-size: 12.5px; font-weight: 500; box-shadow: 0 10px 24px -14px rgba(255, 255, 255, 0.6); transition: transform 0.25s var(--ease), box-shadow 0.25s var(--ease); }
+      .dl-btn:hover { transform: translateY(-1px); box-shadow: 0 14px 28px -14px rgba(255, 255, 255, 0.75); }
+      .dl-sha summary { padding: 13px 20px; font-family: var(--mono); font-size: 11px; color: var(--ink-3); cursor: pointer; list-style: none; transition: color 0.25s; }
+      .dl-sha summary::-webkit-details-marker { display: none; }
+      .dl-sha summary:hover { color: var(--ink-2); }
+      .dl-sha pre { margin: 0; padding: 0 20px 15px; font-family: var(--mono); font-size: 10.5px; line-height: 1.9; color: var(--ink-2); overflow-x: auto; }
+      .dl-note { padding: 14px 20px; border-top: 1px solid var(--line); font-size: 12.5px; color: var(--ink-2); }
+
+      /* ── FAQ：卡片式手风琴，取消整行下划线 ── */
+      .faq { max-width: 860px; margin-inline: auto; display: flex; flex-direction: column; gap: 10px; }
+      .faq details {
+        border: 1px solid var(--line); border-radius: 14px; background: rgba(255, 255, 255, 0.02);
+        transition: border-color 0.3s var(--ease), background 0.3s var(--ease);
+      }
+      .faq details:hover { border-color: var(--line-2); }
+      .faq details[open] { border-color: rgba(65, 196, 99, 0.32); background: var(--card-bg); }
+      .faq summary { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 19px 22px; cursor: pointer; font-size: 14.5px; color: var(--ink); list-style: none; }
+      .faq summary::-webkit-details-marker { display: none; }
+      .faq summary .q { flex: 1; min-width: 0; }
+      .faq summary .pm { font-family: var(--mono); font-size: 16px; color: var(--ink-3); transition: transform 0.3s var(--ease), color 0.3s; flex: none; }
+      .faq details[open] summary .pm { transform: rotate(45deg); color: var(--ok); }
+      .faq details p { font-size: 13px; line-height: 2; color: var(--ink-2); padding: 0 22px 20px; max-width: 66ch; }
+
+      /* ── 收尾 ── */
+      .closing { position: relative; text-align: center; padding: 140px 0 130px; overflow: hidden; }
+      .closing::before {
+        content: ""; position: absolute; left: 50%; top: 10%; width: 1000px; height: 620px;
+        transform: translateX(-50%);
+        background: radial-gradient(closest-side, rgba(65, 196, 99, 0.14), transparent 72%);
+        pointer-events: none;
+      }
+      .closing .wrap { position: relative; }
+      .closing h2 { font-size: clamp(30px, 4vw, 58px); line-height: 1.24; font-weight: 500; letter-spacing: -0.045em; margin: 24px 0 34px; }
+      .closing h2 em { font-style: normal; color: var(--ink-3); }
+      .closing p { font-size: 12px; color: var(--ink-3); margin-top: 22px; }
+
+      footer { border-top: 1px solid var(--line); padding: 30px 0 36px; font-size: 11.5px; color: var(--ink-3); }
+      footer .fin { display: flex; align-items: center; justify-content: space-between; gap: 20px; flex-wrap: wrap; }
+      footer .fbrand { display: flex; align-items: center; gap: 9px; color: var(--ink-2); }
+      footer .fbrand img { width: 20px; height: 20px; border-radius: 6px; }
+      footer .flinks { display: flex; gap: 8px; flex-wrap: wrap; }
+      footer .flinks a { padding: 6px 13px; border: 1px solid var(--line); border-radius: 999px; transition: color 0.25s, border-color 0.25s; }
+      footer .flinks a:hover { color: var(--ink); border-color: var(--line-2); }
+      .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+      /* 滚动淡入：默认可见，只有 JS 跑起来才启用位移 */
+      .js .reveal { opacity: 0; transform: translateY(20px); transition: opacity 0.7s var(--ease), transform 0.7s var(--ease); }
+      .js .reveal.in { opacity: 1; transform: none; }
+
+      /* ── 响应式 ── */
+      @media (max-width: 1080px) {
+        .hero-grid { grid-template-columns: 1fr; gap: 44px; }
+        .hero-visual { min-height: 390px; }
+        .channels, .panel-grid { grid-template-columns: 1fr; gap: 32px; }
+        .section-head { grid-template-columns: 1fr; gap: 20px; align-items: start; }
+        .section-head > p { max-width: 54ch; padding-bottom: 0; }
+      }
+      @media (max-width: 900px) {
+        :root { --gutter: 26px; }
+        .site-nav { display: none; }
+        .hero { padding-top: 116px; }
+        .caps { grid-template-columns: 1fr; }
+        .cap:first-child { grid-row: auto; }
+        .install-grid { grid-template-columns: 1fr; }
+        .section { padding: 76px 0; }
+      }
+      @media (max-width: 600px) {
+        :root { --gutter: 20px; }
+        .hero h1 { font-size: 33px; letter-spacing: -0.035em; }
+        .hero-desc { font-size: 14px; }
+        .hero-actions { flex-wrap: wrap; }
+        .btn { flex: 1 1 auto; padding: 14px 20px; }
+        .hero-visual { min-height: 360px; }
+        .lv-card { width: 100%; transform: none; }
+        .lv-line { transform: none !important; opacity: 0.5; }
+        .spec { gap: 8px; }
+        .spec div { padding: 9px 14px; }
+        .ch-grid { grid-template-columns: 1fr; }
+        .dl-row { grid-template-columns: minmax(0, 1fr) auto; gap: 8px 12px; }
+        .dl-row .dl-btn { grid-column: 1 / -1; width: 100%; }
+        .dl-head { gap: 6px 10px; }
+        .dl-hist { margin-left: 0; }
+        .closing { padding: 96px 0 86px; }
+        footer .fin { justify-content: center; text-align: center; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        html { scroll-behavior: auto; }
+        *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
+        .js .reveal { opacity: 1; transform: none; }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="site-header" id="siteHeader">
+      <a class="brand" href="#top">
+        <img src="assets/app-icon.png" width="26" height="26" alt="" />
+        <span>日志推送</span>
+      </a>
+      <nav class="site-nav" aria-label="页面导航">
+        <a href="#demo">运行示例</a>
+        <a href="#how">怎么工作</a>
+        <a href="#channels">支持的渠道</a>
+        <a href="#panel">配置页</a>
+        <a href="#install">安装</a>
+        <a href="#faq">常见问题</a>
+      </nav>
+      <div class="header-actions">
+        <a class="nav-gh" href="https://github.com/Sunanang/FNMessageBots">源码</a>
+        <a class="nav-cta" href="downloads/FnMessageBot-2.7.5.fpk" download data-dl="plain">
+          下载 <span data-ver>v2.7.5</span>
+        </a>
+      </div>
+    </header>
+
+    <main id="top">
+      <section class="hero">
+        <div class="wrap hero-grid">
+          <div class="hero-copy">
+            <span class="eyebrow">飞牛 NAS · 事件日志推送</span>
+            <h1>日志一直在写，<br /><em>你只是不在看。</em></h1>
+            <p class="hero-desc">
+              只读轮询飞牛 NAS 的事件库。一轮里发生的事合成一条汇总，送达到你已经开着的消息软件里。
+              默认每 5 秒查一次，影视、音乐库连续 60 秒没有新增才结算一轮。
+            </p>
+            <div class="hero-actions">
+              <a class="btn btn-primary" href="downloads/FnMessageBot-2.7.5.fpk" download data-dl="plain">
+                下载 <span data-ver>v2.7.5</span>
+              </a>
+              <a class="btn btn-quiet" href="#demo">看它怎么跑</a>
+            </div>
+            <p class="hero-meta">fnOS 微应用 · Docker · Python 单进程 · 10 个通知渠道</p>
+          </div>
+
+          <div class="hero-visual" aria-hidden="true">
+            <div class="lv-lines">
+              <div class="lv-line"><span class="t">21:14</span><span class="k">影视</span>《某剧 S02E03》入库完成</div>
+              <div class="lv-line"><span class="t">21:15</span><span class="k">磁盘</span>存储空间 1 唤醒</div>
+              <div class="lv-line"><span class="t">21:16</span><span class="k">系统</span>软件更新检查完成</div>
+              <div class="lv-line"><span class="t">21:16</span><span class="k">音乐</span>专辑《某专辑》入库 12 首</div>
+            </div>
+            <div class="lv-card">
+              <div class="app"><i></i>企业微信 · 群机器人</div>
+              <h3>飞牛NAS-影视处理汇总</h3>
+              <ul>
+                <li><b>入库</b><span>1 部：某电影（2024）</span></li>
+                <li><b>刮削</b><span>完成 2 部</span></li>
+                <li><b>磁盘</b><span>唤醒 1 次（同类型已合并）</span></li>
+              </ul>
+              <div class="foot">
+                <span>10 个渠道 · 21:16 送达</span>
+                <span class="pips" id="heroPips"></span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="wrap">
+          <dl class="spec">
+            <div><dt>运行方式</dt><dd>Python 单进程</dd></div>
+            <div><dt>分发渠道</dt><dd class="mono">10</dd></div>
+            <div><dt>配置端口</dt><dd class="mono">18080 / 18230</dd></div>
+            <div><dt>发行</dt><dd>Docker / FPK</dd></div>
+          </dl>
+        </div>
+      </section>
+
+      <section class="section" id="demo">
+        <div class="wrap">
+          <div class="section-top"><span class="eyebrow">01 — 运行示例</span><span class="demo-mark mono">interface preview</span></div>
+          <div class="section-head reveal">
+            <h2>一次轮询，<em>一条消息。</em></h2>
+            <p>下面这段是界面示意：几秒内把新日志读进来、合并成一条汇总、再分发到各个渠道。真实部署默认每 5 秒查一次。</p>
+          </div>
+
+          <div class="demo reveal" id="demoBox">
+            <div class="demo-bar">
+              <span>eventlogger / logger_data.db3</span>
+              <span class="live"><i></i><span id="pollState">轮询中</span></span>
+            </div>
+            <div class="stream" id="stream">
+              <div class="line"><span class="t">21:14</span><span class="tag">影视</span>《某剧 S02E03》入库完成</div>
+              <div class="line"><span class="t">21:15</span><span class="tag">磁盘</span>存储空间 1 唤醒</div>
+              <div class="line"><span class="t">21:16</span><span class="tag">系统</span>软件更新检查完成</div>
+              <div class="line"><span class="t">21:16</span><span class="tag">音乐</span>专辑《某专辑》入库 12 首</div>
+              <div class="line"><span class="t">21:17</span><span class="tag">磁盘</span>存储空间 2 休眠</div>
+            </div>
+            <div class="summary" id="summary">
+              <p class="pending">本轮还在收日志，汇总会在轮询结束时生成</p>
+              <div class="content">
+                <div class="top"><b>本轮日志汇总</b><span class="c">3 条</span></div>
+                <ul>
+                  <li><span class="k">影视</span><span>入库 1 部 · 刮削完成 2 部</span></li>
+                  <li><span class="k">磁盘</span><span>存储空间 1 唤醒 1 次（同类型已合并）</span></li>
+                  <li><span class="k">系统</span><span>更新检查完成，无需处理</span></li>
+                </ul>
+              </div>
+            </div>
+            <div class="demo-foot">
+              <span>送达</span>
+              <span class="pips" id="pips"></span>
+              <span class="rest"><span id="restFill"></span></span>
+              <span class="mono" id="fanCount">0 / 10</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="how">
+        <div class="wrap">
+          <div class="section-top"><span class="eyebrow">02 — 怎么工作</span></div>
+          <div class="section-head">
+            <h2>四件事，<em>都在你自己的机器上做完。</em></h2>
+            <p>事件库只读打开，配置和待发队列都留在本地。没有云端账号，也没有第三方中转。</p>
+          </div>
+          <div class="caps reveal">
+            <div class="cap">
+              <span class="idx">01</span>
+              <h3>只读轮询</h3>
+              <p>定时查 <span class="mono">log</span> 表，以只读方式打开，只取启动之后的新记录。不写日志表、不改系统设置。</p>
+              <small>mode=ro · 默认 5s</small>
+            </div>
+            <div class="cap">
+              <span class="idx">02</span>
+              <h3>合并与去重</h3>
+              <p>300 秒去重窗口内同一事件不重复打扰；同一类型的磁盘事件 5 秒内合并；影视、音乐库静默 60 秒后结算。</p>
+              <small>dedup 300s · merge 5s</small>
+            </div>
+            <div class="cap">
+              <span class="idx">03</span>
+              <h3>静默与队列</h3>
+              <p>勿扰时段只累计、结束后补发一条；待发通知落盘保存，全部渠道都失败时保留整批、至少间隔 60 秒重试。</p>
+              <small>outbox · retry 60s</small>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="channels">
+        <div class="wrap">
+          <div class="section-top"><span class="eyebrow">03 — 支持的渠道</span><span class="mono">10 / 10</span></div>
+          <div class="section-head">
+            <h2>同一份汇总，<em>按各家的格式发出去。</em></h2>
+            <p>每个渠道可单独开关、单独填 key。消息直接从你的 NAS 发往各渠道。</p>
+          </div>
+          <div class="channels reveal">
+            <div class="ch-grid">
+              <div class="ch"><span class="i">01</span><span class="n">企业微信</span><span class="t">群机器人</span></div>
+              <div class="ch"><span class="i">02</span><span class="n">企业微信应用</span><span class="t">应用消息</span></div>
+              <div class="ch"><span class="i">03</span><span class="n">钉钉</span><span class="t">群机器人</span></div>
+              <div class="ch"><span class="i">04</span><span class="n">飞书</span><span class="t">群机器人</span></div>
+              <div class="ch"><span class="i">05</span><span class="n">Bark</span><span class="t">iOS</span></div>
+              <div class="ch"><span class="i">06</span><span class="n">PushPlus</span><span class="t">微信</span></div>
+              <div class="ch"><span class="i">07</span><span class="n">魔法推送</span><span class="t">App</span></div>
+              <div class="ch"><span class="i">08</span><span class="n">MeoW</span><span class="t">App</span></div>
+              <div class="ch"><span class="i">09</span><span class="n">SMTP 邮件</span><span class="t">邮箱</span></div>
+              <div class="ch"><span class="i">10</span><span class="n">通用 Webhook</span><span class="t">自定义</span></div>
+            </div>
+            <div class="pv-list">
+              <div class="pv">
+                <div class="ph"><span>企业微信 · 群机器人</span><span class="ok">21:16 送达</span></div>
+                <div class="ti">飞牛NAS-影视处理汇总</div>
+                <div class="bd">&gt; 入库 1 部：某电影（2024）<br />&gt; 刮削完成 2 部<br />&gt; 磁盘唤醒 1 次（已合并同类型）</div>
+              </div>
+              <div class="pv">
+                <div class="ph"><span>Bark · iPhone</span><span class="ok">21:16 送达</span></div>
+                <div class="ti">飞牛NAS-影视处理汇总</div>
+                <div class="bd">入库 1 · 刮削 2 · 磁盘唤醒 1</div>
+              </div>
+              <div class="pv">
+                <div class="ph"><span>通用 Webhook</span><span class="ok">21:16 送达</span></div>
+                <div class="bd">{ "title": "飞牛NAS-影视处理汇总",<br />&nbsp;&nbsp;"content": "…" }</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="panel">
+        <div class="wrap">
+          <div class="section-top"><span class="eyebrow">04 — 配置页</span></div>
+          <div class="panel-grid reveal">
+            <div class="cfg">
+              <div class="cfg-bar"><span class="dot"></span>localhost:18230 · 通知配置</div>
+              <div class="cfg-row"><span class="k">企业微信</span><span class="v">https://qyapi.weixin.qq.com/c…</span><span class="sw on"></span></div>
+              <div class="cfg-row"><span class="k">钉钉</span><span class="v">https://oapi.dingtalk.com/…</span><span class="sw on"></span></div>
+              <div class="cfg-row"><span class="k">飞书</span><span class="v">https://open.feishu.cn/…</span><span class="sw on"></span></div>
+              <div class="cfg-row"><span class="k">Bark</span><span class="v">https://api.day.app/••••••</span><span class="sw on"></span></div>
+              <div class="cfg-row"><span class="k">SMTP</span><span class="v">smtp.example.com:465</span><span class="sw on"></span></div>
+              <div class="cfg-row"><span class="k">去重窗口</span><span class="v">300 秒</span><span class="sw on"></span></div>
+              <div class="cfg-row"><span class="k">勿扰时段</span><span class="v">22:00–07:00</span><span class="sw"></span></div>
+              <div class="cfg-row"><span class="k">标题前缀</span><span class="v">飞牛NAS</span><span class="sw on"></span></div>
+            </div>
+            <div class="panel-copy">
+              <h3 style="font-size:19px; font-weight:600; letter-spacing:-0.02em">默认监听本机，带访问密码。</h3>
+              <p>Docker 版默认端口 <strong>18080</strong>，FPK 版安装时默认 <strong>18230</strong>，仅本机可访问，从飞牛桌面打开。</p>
+              <p><strong>保存即生效。</strong> 改完点保存，配置热加载，一般不需要重启容器。</p>
+              <p>key、token、SMTP 密码在页面上打码显示。<strong>密码不会明文保存</strong>，部署时可用环境变量预置初始密码（仅未设过密码时生效）。</p>
+              <p>另有历史记录页，能翻到最近的推送记录（最多保留 1 万条），以及哪些渠道投递失败过。</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="install">
+        <div class="wrap">
+          <div class="section-top"><span class="eyebrow">05 — 安装</span></div>
+          <div class="section-head">
+            <h2>装完就能配，<em>不用写配置文件。</em></h2>
+            <p>Docker 适合大多数情况；飞牛应用中心装 FPK 更省事，装完点开就能配。</p>
+          </div>
+          <div class="install-grid reveal">
+            <div class="code">
+              <div class="ch">docker compose<button class="copy" type="button">复制</button></div>
+              <pre># 挂载 fnOS 的事件库（只读即可）
+services:
+  fn-message-bots:
+    image: sunanang/fn-message-bots:latest
+    container_name: fn-message-bots
+    restart: unless-stopped
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      - /usr/trim/var/eventlogger_service:/usr/trim/var/eventlogger_service:ro
+      - ./config:/app/config
+      - ./data:/app/data</pre>
+            </div>
+            <div class="code">
+              <div class="ch">飞牛应用中心 · FPK<button class="copy" type="button">复制</button></div>
+              <pre># 用上面的按钮下载 .fpk
+# 应用中心 → 手动安装 → 选择文件
+
+# 或从源码打包（需要 fnpack）
+./scripts/build-fpk.sh</pre>
+            </div>
+          </div>
+
+          <div class="dl reveal">
+            <div class="dl-head">
+              <b><span data-ver>v2.7.5</span> · <span data-date>2026-11-02</span></b>
+              <span>最新版本</span>
+              <a class="dl-hist" href="https://github.com/Sunanang/FNMessageBots/releases">历史版本 →</a>
+            </div>
+            <div class="dl-row">
+              <div class="dl-name">
+                <b>飞牛应用中心包</b>
+                <span data-name="plain">FnMessageBot-2.7.5.fpk</span>
+              </div>
+              <span class="dl-size mono" data-size="plain">712 KB</span>
+              <a class="dl-btn" href="downloads/FnMessageBot-2.7.5.fpk" download data-dl="plain">下载</a>
+            </div>
+            <div class="dl-row">
+              <div class="dl-name">
+                <b>root 版</b>
+                <span data-name="root">FnMessageBot-2.7.5-root.fpk</span>
+              </div>
+              <span class="dl-size mono" data-size="root">712 KB</span>
+              <a class="dl-btn" href="downloads/FnMessageBot-2.7.5-root.fpk" download data-dl="root">下载</a>
+            </div>
+            <details class="dl-sha">
+              <summary>SHA-256 校验值</summary>
+              <pre data-sha>af7514ef951fa5c4c46d65857efbb993a8f9aaad023784b2aca3c83319a82a2b  FnMessageBot-2.7.5.fpk
+5a485f309b0e04ca349ff4f728d706a29aba94f330acd9976122b7ef6393e6d3  FnMessageBot-2.7.5-root.fpk</pre>
+            </details>
+            <p class="dl-note">两个包只差安装权限：一般装普通版；需要写系统目录时才用 root 版。</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="faq">
+        <div class="wrap">
+          <div class="section-top"><span class="eyebrow">06 — 常见问题</span></div>
+          <div class="section-head">
+            <h2>会被问到的几件事。</h2>
+          </div>
+          <div class="faq reveal">
+            <details open>
+              <summary><span class="q">它会不会改我的日志或系统？</span><span class="pm">+</span></summary>
+              <p>不会。数据库只读打开，只查启动之后的新记录；它不写日志表、不改系统设置，除了自己的配置目录和本地数据目录（<span class="mono">./config</span>、<span class="mono">./data</span>）不落任何文件。</p>
+            </details>
+            <details>
+              <summary><span class="q">为什么一轮只收到一条，而不是每条都推？</span><span class="pm">+</span></summary>
+              <p>这是刻意的。一次导入会刷出几十条记录，逐条推送只会让人屏蔽群。打开「轮询汇总模式」后，一轮的日志按轮询批次合并成一条汇总；影视、音乐库还会在连续 60 秒没有新增后合成一条本轮汇总。默认是逐条推送 + 300 秒去重。</p>
+            </details>
+            <details>
+              <summary><span class="q">半夜磁盘唤醒的提醒怎么关掉？</span><span class="pm">+</span></summary>
+              <p>开勿扰模式（默认关闭，时段默认 22:00–07:00）。时段内不推送、只累计，结束后汇总成一条补发；同一类型的磁盘事件在 5 秒窗口内本来也会合并成一条。</p>
+            </details>
+            <details>
+              <summary><span class="q">某个渠道挂了，消息会丢吗？</span><span class="pm">+</span></summary>
+              <p>不会。待发通知会落盘保存，全部渠道都失败时保留整批、至少间隔 60 秒重试；连续失败达到阈值可触发进程内重启通知链路（默认关闭，可开启）。</p>
+            </details>
+            <details>
+              <summary><span class="q">能装在多台 NAS 上吗？</span><span class="pm">+</span></summary>
+              <p>能，每台各跑一份、各配各的渠道。不建议多个进程指向同一个数据目录：一个数据目录只允许一个进程。</p>
+            </details>
+            <details>
+              <summary><span class="q">支持哪些事件类型？</span><span class="pm">+</span></summary>
+              <p>影视入库与刮削、磁盘唤醒与休眠、音乐入库与移除、收藏与歌单变更、备份任务结果、相册共享与人脸识别、WAN IP 变化、SSH 登录与超时、系统更新等。可在配置页逐项开关。</p>
+            </details>
+            <details>
+              <summary><span class="q">Web 访问密码忘了怎么办？</span><span class="pm">+</span></summary>
+              <p>密码不会明文保存，也没有找回通道。部署时可用环境变量 <span class="mono">FNMB_WEB_PASSWORD</span> 预置初始密码（仅在还没设过密码时生效）。</p>
+            </details>
+          </div>
+        </div>
+      </section>
+
+      <section class="closing">
+        <div class="wrap">
+          <span class="eyebrow">开始</span>
+          <h2>让它来告诉你，<br /><em>今天 NAS 上发生了什么。</em></h2>
+          <a class="btn btn-primary" href="downloads/FnMessageBot-2.7.5.fpk" download data-dl="plain">下载 <span data-ver>v2.7.5</span></a>
+          <p>开源 · MIT 许可 · Python 3.9+</p>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="wrap fin">
+        <span class="fbrand"><img src="assets/app-icon.png" alt="" />FnMessageBots · MIT 许可</span>
+        <span>© 2024–2026 Lando</span>
+        <span class="flinks">
+          <a href="https://github.com/Sunanang/FNMessageBots">GitHub</a>
+          <a href="https://github.com/Sunanang/FNMessageBots/issues">反馈</a>
+          <a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener noreferrer">京ICP备2026075277号-1</a>
+        </span>
+      </div>
+    </footer>
+
+    <script>
+      (function () {
+        /* 只有脚本真的跑起来才启用「淡入前先隐藏」，避免脚本失效导致整页空白 */
+        document.documentElement.classList.add('js');
+        var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+        /* ── 滚动淡入 ─────────────────────────────────────── */
+        var reveals = document.querySelectorAll('.reveal');
+        if (!reveals.length) { /* 没有目标 */ }
+        else if (reduce || !('IntersectionObserver' in window)) {
+          Array.prototype.forEach.call(reveals, function (el) { el.classList.add('in'); });
+        } else {
+          var io = new IntersectionObserver(function (entries, obs) {
+            entries.forEach(function (e) {
+              if (e.isIntersecting) { e.target.classList.add('in'); obs.unobserve(e.target); }
+            });
+          }, { threshold: 0.1, rootMargin: '0px 0px -6% 0px' });
+          Array.prototype.forEach.call(reveals, function (el) { io.observe(el); });
+        }
+
+        /* ── 顶栏滚动态 ───────────────────────────────────── */
+        var header = document.getElementById('siteHeader');
+        var onScroll = function () {
+          header.classList.toggle('stuck', window.scrollY > 8);
+        };
+        onScroll();
+        window.addEventListener('scroll', onScroll, { passive: true });
+
+        /* ── Hero 里的 10 个渠道格（静态点亮） ─────────────── */
+        var heroPips = document.getElementById('heroPips');
+        if (heroPips) {
+          for (var h = 0; h < 10; h++) {
+            var hp = document.createElement('span');
+            hp.className = 'pip';
+            heroPips.appendChild(hp);
+          }
+        }
+
+        /* ── 01 章：真在跑的一轮轮询 ──────────────────────── */
+        var box = document.getElementById('demoBox');
+        var stream = document.getElementById('stream');
+        var pipsBox = document.getElementById('pips');
+        var summary = document.getElementById('summary');
+        var pollState = document.getElementById('pollState');
+        var fanCount = document.getElementById('fanCount');
+        var restFill = document.getElementById('restFill');
+        var PIPS = 10;
+        var timers = [];
+
+        function later(fn, ms) { timers.push(setTimeout(fn, ms)); }
+        function clearAll() {
+          timers.forEach(clearTimeout);
+          timers = [];
+        }
+
+        if (stream && pipsBox) {
+          var lines = stream.querySelectorAll('.line');
+          for (var i = 0; i < PIPS; i++) {
+            var p = document.createElement('span');
+            p.className = 'pip';
+            pipsBox.appendChild(p);
+          }
+          var pips = pipsBox.querySelectorAll('.pip');
+
+          function paint(final) {
+            /* final=true 时直接铺终态，用于 reduced-motion */
+            lines.forEach(function (l, idx) {
+              l.classList.add('show');
+              if (final) l.classList.add('stowed');
+            });
+            if (final) {
+              summary.classList.add('show');
+              pips.forEach(function (p) { p.classList.add('on'); });
+              fanCount.textContent = PIPS + ' / ' + PIPS;
+              pollState.textContent = '已送达';
+              restFill.style.width = '100%';
+            }
+          }
+
+          function cycle() {
+            clearAll();
+            lines.forEach(function (l) { l.classList.remove('show', 'stowed'); });
+            summary.classList.remove('show');
+            pips.forEach(function (p) { p.classList.remove('on'); });
+            pollState.textContent = '轮询中';
+            fanCount.textContent = '0 / ' + PIPS;
+            restFill.style.width = '0%';
+
+            lines.forEach(function (l, idx) {
+              later(function () { l.classList.add('show'); }, 220 + idx * 420);
+            });
+            var done = 220 + lines.length * 420;
+            later(function () {
+              lines.forEach(function (l) { l.classList.add('stowed'); });
+              pollState.textContent = '本轮结束';
+            }, done + 320);
+            later(function () { summary.classList.add('show'); }, done + 540);
+            for (var k = 0; k < PIPS; k++) {
+              (function (n) {
+                later(function () {
+                  pips[n].classList.add('on');
+                  fanCount.textContent = (n + 1) + ' / ' + PIPS;
+                }, done + 640 + n * 130);
+              })(k);
+            }
+            later(function () {
+              pollState.textContent = '已送达';
+              restFill.style.width = '100%';
+            }, done + 640 + PIPS * 130);
+            later(cycle, done + 640 + PIPS * 130 + 2400);
+          }
+
+          if (reduce) paint(true);
+          else cycle();
+
+          /* 切到别的标签页就停，回来自动接着跑 */
+          document.addEventListener('visibilitychange', function () {
+            if (document.hidden) clearAll();
+            else if (!reduce) cycle();
+          });
+        }
+
+        /* ── 代码块复制 ───────────────────────────────────── */
+        Array.prototype.forEach.call(document.querySelectorAll('.code'), function (block) {
+          var btn = block.querySelector('.copy');
+          var pre = block.querySelector('pre');
+          if (!btn || !pre) return;
+          btn.addEventListener('click', function () {
+            var text = pre.innerText;
+            var done = function () {
+              btn.textContent = '已复制';
+              btn.setAttribute('data-done', '');
+              setTimeout(function () {
+                btn.textContent = '复制';
+                btn.removeAttribute('data-done');
+              }, 1400);
+            };
+            if (navigator.clipboard) navigator.clipboard.writeText(text).then(done, done);
+            else done();
+          });
+        });
+
+        /* ── 下载块：从 downloads/version.json 补全版本、体积、校验值与链接
+              HTML 里写了当前版本兜底，脚本失效时按钮照样能下 ─────────── */
+        (function () {
+          var fmt = function (b) {
+            return b >= 1048576 ? (b / 1048576).toFixed(1) + ' MB' : Math.round(b / 1024) + ' KB';
+          };
+          if (!window.fetch) return;
+          fetch('downloads/version.json', { cache: 'no-store' })
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (v) {
+              if (!v || !Array.isArray(v.assets) || !v.assets.length) return;
+              var pick = function (kind) {
+                return v.assets.filter(function (a) {
+                  return kind === 'root' ? /-root\./.test(a.name) : !/-root\./.test(a.name);
+                })[0];
+              };
+              Array.prototype.forEach.call(document.querySelectorAll('[data-ver]'), function (e) {
+                e.textContent = v.tag;
+              });
+              Array.prototype.forEach.call(document.querySelectorAll('[data-date]'), function (e) {
+                e.textContent = v.publishedAt;
+              });
+              ['plain', 'root'].forEach(function (kind) {
+                var a = pick(kind);
+                if (!a) return;
+                Array.prototype.forEach.call(document.querySelectorAll('[data-dl="' + kind + '"]'), function (el) {
+                  el.setAttribute('href', 'downloads/' + a.name);
+                  if (el.hasAttribute('download')) el.setAttribute('download', a.name);
+                });
+                var n = document.querySelector('[data-name="' + kind + '"]');
+                if (n) n.textContent = a.name;
+                var s = document.querySelector('[data-size="' + kind + '"]');
+                if (s) s.textContent = fmt(a.size);
+              });
+              var sha = document.querySelector('[data-sha]');
+              if (sha) {
+                sha.textContent = v.assets
+                  .map(function (a) { return a.sha256 + '  ' + a.name; })
+                  .join('\n');
+              }
+            })
+            .catch(function () { /* 拿不到就沿用静态兜底值 */ });
+        })();
+      })();
+    </script>
+  </body>
+</html>
