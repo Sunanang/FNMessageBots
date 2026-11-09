@@ -93,10 +93,10 @@ main{min-width:0;border-left:1px solid var(--rule);padding:0 0 0 56px}
 .masthead h1{font-size:clamp(27px,3.2vw,38px);letter-spacing:-.025em;max-width:26ch}
 .masthead .lede{margin-top:14px;font-size:16px;color:var(--ink-2);max-width:52ch}
 .spec{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));margin-top:28px;border-top:1px solid var(--rule)}
-.spec div{padding:12px 14px 0 0;border-right:1px solid var(--rule)}
+.spec div{padding:14px 10px 2px;border-right:1px solid var(--rule);text-align:center}
 .spec div:last-child{border-right:0}
-.spec dt{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);margin-bottom:3px}
-.spec dd{margin:0;font-size:13.5px}
+.spec dt{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);margin-bottom:5px}
+.spec dd{margin:0;font-size:14px}
 .spec dd .mono{font-size:12.5px}
 
 /* ── 章节骨架 ───────────────────────────────────────────────────────── */
@@ -121,8 +121,14 @@ main{min-width:0;border-left:1px solid var(--rule);padding:0 0 0 56px}
 .stream.stowed .line{opacity:.4;color:var(--ink-3)}
 @keyframes enter{to{opacity:1;transform:none}}
 
-.summary{margin:0 14px 12px;border:1px solid var(--rule-2);border-left:2px solid var(--accent);border-radius:4px;padding:12px 14px;opacity:0;transform:translateY(4px);transition:opacity .38s var(--ease),transform .38s var(--ease)}
-.summary.show{opacity:1;transform:none}
+/* 两块内容叠在同一格里：高度始终取较大者，所以「待生成 → 已生成」不会让页面跳动 */
+.summary{margin:0 14px 12px;border:1px dashed var(--rule-2);border-radius:4px;padding:12px 14px;display:grid;transition:border-color .3s var(--ease)}
+.summary > *{grid-area:1/1;min-width:0}
+.summary .pending{font-family:var(--mono);font-size:11.5px;color:var(--ink-3);align-self:center;transition:opacity .3s var(--ease)}
+.summary .content{opacity:0;transition:opacity .38s var(--ease)}
+.summary.show{border-style:solid;border-left:2px solid var(--accent)}
+.summary.show .pending{opacity:0}
+.summary.show .content{opacity:1}
 .summary .top{display:flex;align-items:baseline;gap:10px;margin-bottom:7px}
 .summary .top b{font-weight:600;font-size:13.5px}
 .summary .top .c{margin-left:auto;font-family:var(--mono);font-size:11.5px;color:var(--accent)}
@@ -154,9 +160,9 @@ main{min-width:0;border-left:1px solid var(--rule);padding:0 0 0 56px}
 .ruler{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:0;border-top:2px solid var(--ink);position:relative;margin-top:4px}
 .ruler .fill{position:absolute;left:0;top:-2px;height:2px;width:0;background:var(--accent);transition:width 1.3s var(--ease)}
 .ruler.in .fill{width:100%}
-.step{padding:14px 18px 0 0;border-right:1px solid var(--rule)}
-.step:last-child{border-right:0;padding-right:0}
-.step .tick{width:1px;height:9px;background:var(--rule-2);margin-bottom:10px;transition:background .5s var(--ease)}
+.step{padding:14px 18px 18px;border-right:1px solid var(--rule);text-align:center}
+.step:last-child{border-right:0;padding-right:18px}
+.step .tick{width:1px;height:11px;background:var(--rule-2);margin:0 auto 12px;transition:background .5s var(--ease)}
 .ruler.in .step .tick{background:var(--ink)}
 .step .idx{font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
 .step h3{font-size:14.5px;margin:4px 0 6px}
@@ -240,8 +246,9 @@ section[id]{scroll-margin-top:24px}
   .pair .k{margin-bottom:2px}
   .pair .bad,.pair .good{padding-left:0}
   .ruler{grid-template-columns:1fr 1fr;row-gap:0}
-  .step{padding:12px 14px 14px 0}
-  .step:nth-child(3){border-right:1px solid var(--rule);padding-left:0}
+  .step{padding:12px 10px 16px}
+  .step:nth-child(2n){border-right:0}
+  .step:nth-child(1),.step:nth-child(2){border-bottom:1px solid var(--rule)}
   .chsplit,.panel,.inst{grid-template-columns:1fr;gap:22px}
   .line{grid-template-columns:48px 54px minmax(0,1fr);font-size:11.5px}
   .demo-foot{flex-wrap:wrap;gap:8px}
@@ -309,12 +316,15 @@ section[id]{scroll-margin-top:24px}
         <div class="demo-body">
           <ol class="stream" id="stream" aria-live="polite"></ol>
           <div class="summary" id="summary">
-            <div class="top"><b>本轮日志汇总</b><span class="c" id="sumCount">3 条</span></div>
-            <ul>
-              <li><span class="k">影视</span><span>入库 1 部 · 刮削完成 2 部</span></li>
-              <li><span class="k">磁盘</span><span>存储空间 1 唤醒 1 次（同类型已合并）</span></li>
-              <li><span class="k">系统</span><span>更新检查完成，无需处理</span></li>
-            </ul>
+            <p class="pending">本轮还在收日志，汇总会在轮询结束时生成</p>
+            <div class="content">
+              <div class="top"><b>本轮日志汇总</b><span class="c" id="sumCount">3 条</span></div>
+              <ul>
+                <li><span class="k">影视</span><span>入库 1 部 · 刮削完成 2 部</span></li>
+                <li><span class="k">磁盘</span><span>存储空间 1 唤醒 1 次（同类型已合并）</span></li>
+                <li><span class="k">系统</span><span>更新检查完成，无需处理</span></li>
+              </ul>
+            </div>
           </div>
         </div>
         <div class="demo-foot">
