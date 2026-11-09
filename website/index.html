@@ -4,12 +4,12 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>FnMessageBots · 飞牛 NAS 日志推送</title>
-<meta name="description" content="飞牛 NAS 的事件监控机器人：只读轮询 SQLite 事件库，一轮轮询合并成一条汇总后分发到企业微信、钉钉、飞书、Bark、PushPlus、魔法推送、MeoW、邮件和自建 Webhook。Python 单进程，Docker / FPk 双发行。" />
+<meta name="description" content="飞牛 NAS 的事件监控机器人：只读轮询 SQLite 事件库，一轮轮询合并成一条汇总后分发到企业微信（群机器人 / 应用消息）、钉钉、飞书、Bark、PushPlus、魔法推送、MeoW、邮件和自建 Webhook。Python 单进程，Docker / FPK 双发行。" />
 <meta name="theme-color" content="#FAF8F3" />
 <link rel="canonical" href="https://www.fnmb.lndo.top/" />
 <link rel="icon" href="assets/app-icon.png" />
 <meta property="og:title" content="FnMessageBots · 飞牛 NAS 日志推送" />
-<meta property="og:description" content="只读轮询 SQLite 事件库，把一轮日志合并成一条汇总，分发到 10 种通知渠道。Python 单进程，零第三方依赖。" />
+<meta property="og:description" content="只读轮询 SQLite 事件库，把一轮日志合并成一条汇总，分发到 10 个通知渠道。Python 单进程，依赖随包自动安装。" />
 <meta property="og:url" content="https://www.fnmb.lndo.top/" />
 <meta property="og:site_name" content="FnMessageBots" />
 <meta property="og:image" content="https://www.fnmb.lndo.top/assets/app-icon.png" />
@@ -356,7 +356,7 @@ section[id]{scroll-margin-top:24px}
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.4 7.4 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
         源码仓库
       </a>
-      <span class="icp">© 2026 · MIT 许可</span>
+      <span class="icp">© 2024–2026 · MIT 许可</span>
     </div>
   </aside>
 
@@ -369,7 +369,7 @@ section[id]{scroll-margin-top:24px}
       <dl class="spec">
         <div><dt>运行方式</dt><dd>Python 单进程</dd></div>
         <div><dt>分发渠道</dt><dd class="mono">10</dd></div>
-        <div><dt>配置端口</dt><dd class="mono">18080</dd></div>
+        <div><dt>配置端口</dt><dd class="mono">18080 / 18230</dd></div>
         <div><dt>发行</dt><dd class="mono">Docker / FPk</dd></div>
       </dl>
     </header>
@@ -378,7 +378,7 @@ section[id]{scroll-margin-top:24px}
       <div class="sec-head">
         <span class="num">01</span>
         <h2>一次轮询会发生什么<a class="anchor" href="#demo" aria-label="复制本节链接">§</a></h2>
-        <p>下面这段是真的在跑：几秒内它会把新日志读进来，合并成一条汇总，再分发到各个渠道。真实部署时一轮是 60 秒。</p>
+        <p>下面这段是界面示意：几秒内把新日志读进来、合并成一条汇总、再分发到各个渠道。真实部署默认每 5 秒查一次；影视、音乐库连续 60 秒没有新增，才合成一条本轮汇总。</p>
       </div>
 
       <figure class="demo" aria-label="演示：几条新日志被轮询到，合并成一条汇总，随后分发到各渠道">
@@ -403,10 +403,10 @@ section[id]{scroll-margin-top:24px}
         <div class="demo-foot">
           <span class="lbl">送达</span>
           <span class="pips" id="pips"></span>
-          <span class="cnt" id="fanCount">0 / 9</span>
+          <span class="cnt" id="fanCount">0 / 10</span>
           <span class="rest"><i id="restFill"></i></span>
         </div>
-        <figcaption class="demo-cap">企业微信 · 钉钉 · 飞书 · Bark · PushPlus · 魔法推送 · MeoW · 邮件 · 自建 Webhook</figcaption>
+        <figcaption class="demo-cap">企业微信 · 企业微信应用 · 钉钉 · 飞书 · Bark · PushPlus · 魔法推送 · MeoW · 邮件 · 自建 Webhook</figcaption>
       </figure>
     </section>
 
@@ -421,7 +421,7 @@ section[id]{scroll-margin-top:24px}
         <div class="pair">
           <span class="k">新事件</span>
           <span class="bad"><span class="tag">×</span>想起来才去翻，错过就过去了</span>
-          <span class="good"><span class="tag">·</span>只处理启动后的新记录，不漏不重</span>
+          <span class="good"><span class="tag">·</span>只处理启动后的新记录，不补发历史</span>
         </div>
         <div class="pair">
           <span class="k">一轮几十条</span>
@@ -431,12 +431,12 @@ section[id]{scroll-margin-top:24px}
         <div class="pair">
           <span class="k">半夜磁盘唤醒</span>
           <span class="bad"><span class="tag">×</span>照样把你叫醒</span>
-          <span class="good"><span class="tag">·</span>同类型事件合并；勿扰时段静默、结束后补一条</span>
+          <span class="good"><span class="tag">·</span>同一类型的磁盘事件 5 秒内合并；勿扰时段静默、结束后补一条</span>
         </div>
         <div class="pair">
           <span class="k">多个渠道</span>
           <span class="bad"><span class="tag">×</span>每个渠道各写一遍，各自失败</span>
-          <span class="good"><span class="tag">·</span>一次配置并发投递，失败重试、队列落盘</span>
+          <span class="good"><span class="tag">·</span>一次配置逐渠道投递，失败重试、队列落盘</span>
         </div>
       </div>
     </section>
@@ -470,8 +470,8 @@ section[id]{scroll-margin-top:24px}
         <div class="step">
           <span class="tick" aria-hidden="true"></span>
           <span class="idx">04</span>
-          <h3>并发分发</h3>
-          <p>并行投递并重试；连续失败可自愈重启通知链路。</p>
+          <h3>分发与重试</h3>
+          <p>逐渠道投递并自动重试；连续失败可按阈值重启通知链路（默认关闭）。</p>
         </div>
       </div>
     </section>
@@ -513,7 +513,7 @@ section[id]{scroll-margin-top:24px}
           </div>
           <div class="pv">
             <div class="ph"><span>通用 Webhook</span><span class="ok">21:16 送达</span></div>
-            <div class="bd">{ "title": "[NAS] 影视处理本轮汇总",<br />&nbsp;&nbsp;"count": 3, "channels": 9 }</div>
+            <div class="bd">{ "title": "飞牛NAS-影视处理汇总",<br />&nbsp;&nbsp;"content": "…" }</div>
           </div>
         </div>
       </div>
@@ -523,7 +523,7 @@ section[id]{scroll-margin-top:24px}
       <div class="sec-head">
         <span class="num">05</span>
         <h2>配置页<a class="anchor" href="#panel" aria-label="复制本节链接">§</a></h2>
-        <p>默认监听 18080，带访问密码（首次用启动日志里的初始化码设置）。key、token、SMTP 密码在页面上打码显示。</p>
+        <p>Docker 版默认监听 18080，FPK 版安装时默认 18230（仅本机，从飞牛桌面打开）。带访问密码；key、token、SMTP 密码在页面上打码显示。</p>
       </div>
       <div class="panel">
         <div class="cfg">
@@ -536,14 +536,14 @@ section[id]{scroll-margin-top:24px}
             <div class="row"><span class="k">PushPlus</span><span class="v">token=••••••</span><span class="sw off"></span></div>
             <div class="row"><span class="k">SMTP</span><span class="v">smtp.example.com:465 · 收件人 2</span><span class="sw"></span></div>
             <div class="row"><span class="k">去重窗口</span><span class="v">300 秒</span><span class="sw"></span></div>
-            <div class="row"><span class="k">勿扰时段</span><span class="v">23:00 – 08:00</span><span class="sw"></span></div>
-            <div class="row"><span class="k">标题前缀</span><span class="v">[NAS]</span><span class="sw off"></span></div>
+            <div class="row"><span class="k">勿扰时段</span><span class="v">22:00–07:00</span><span class="sw off"></span></div>
+            <div class="row"><span class="k">标题前缀</span><span class="v">飞牛NAS</span><span class="sw"></span></div>
           </div>
         </div>
         <div class="notes">
           <p><b>保存即生效。</b>改完点保存，配置热加载，一般不需要重启容器。</p>
-          <p>Web 访问默认要密码，<code>config.json</code> 里只存盐值与哈希；忘记密码可用环境变量 <code>FNMB_WEB_PASSWORD</code> 预置。</p>
-          <p>另有历史记录页，能翻到已发出的每一条，以及哪些渠道投递失败过。</p>
+          <p>Web 访问默认要密码，密码不会明文保存；部署时可用环境变量 <code>FNMB_WEB_PASSWORD</code> 预置初始密码（仅在还没设过密码时生效）。</p>
+          <p>另有历史记录页，能翻到最近的推送记录（最多保留 1 万条），以及哪些渠道投递失败过。</p>
         </div>
       </div>
     </section>
@@ -596,7 +596,7 @@ services:
     ports: [<span class="a">"18080:18080"</span>]
     volumes:
       - ./config:/app/config
-      - /vol1/@appdata/trim.eventlogger:/db:ro</pre>
+      - /usr/trim/var/eventlogger_service:/usr/trim/var/eventlogger_service:ro</pre>
         </div>
         <div class="code">
           <div class="ch">飞牛应用中心 · FPk<button class="copy" type="button">复制</button></div>
@@ -621,19 +621,19 @@ services:
       <div class="faq">
         <details>
           <summary><span class="n">01</span><span>它会不会改动我的日志或系统</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary>
-          <p>不会。数据库只读打开，只查启动之后的新记录；它不写日志表、不改系统设置，除了自己的配置目录（默认挂载到 <code>./config</code>）不落任何文件。</p>
+          <p>不会。数据库只读打开，只查启动之后的新记录；它不写日志表、不改系统设置，除了自己的配置目录和本地数据目录（<code>./config</code>、<code>./data</code>）不落任何文件。</p>
         </details>
         <details>
           <summary><span class="n">02</span><span>为什么一轮只收到一条，而不是每条都推</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary>
-          <p>这是刻意的。一次导入会刷出几十条记录，逐条推送只会让人屏蔽群。默认按轮询批次合并成一条汇总；影视、音乐库还会在连续 60 秒没有新增后合成一条本轮汇总。</p>
+          <p>这是刻意的。一次导入会刷出几十条记录，逐条推送只会让人屏蔽群。打开「轮询汇总模式」后，一轮的日志按轮询批次合并成一条汇总；影视、音乐库还会在连续 60 秒没有新增后合成一条本轮汇总。</p>
         </details>
         <details>
           <summary><span class="n">03</span><span>半夜被磁盘唤醒的消息吵醒怎么办</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary>
-          <p>开勿扰模式。时段内不推送、只累计，结束后汇总成一条补发；同一类型的磁盘唤醒与休眠在时间窗内本来也会合并成一条。</p>
+          <p>开勿扰模式。时段内不推送、只累计，结束后汇总成一条补发；同一类型的磁盘事件在 5 秒窗口内本来也会合并成一条。</p>
         </details>
         <details>
           <summary><span class="n">04</span><span>某个渠道挂了，消息会丢吗</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary>
-          <p>不会。待发通知会落盘保存，全部渠道都失败时保留整批、至少间隔 60 秒重试；连续失败达到阈值可触发进程内重启通知链路（可调参或关闭）。</p>
+          <p>不会。待发通知会落盘保存，全部渠道都失败时保留整批、至少间隔 60 秒重试；连续失败达到阈值可触发进程内重启通知链路（默认关闭，可开启）。</p>
         </details>
         <details>
           <summary><span class="n">05</span><span>能在多台 NAS 上跑吗</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></summary>
@@ -683,7 +683,7 @@ services:
   var restFill = document.getElementById('restFill');
   var poll = document.getElementById('pollState');
   var timers = [];
-  var PIPS = 9;
+  var PIPS = 10;
 
   if (stream && pipsBox) {
     for (var i = 0; i < PIPS; i++) {
