@@ -58,3 +58,7 @@ fpk/*.fpk
 website/.edgeone/
 website/.env
 .edgeone/
+
+# 官网下载区要随 Git 集成部署一起打包，必须入库（其余 downloads/ 仍忽略）
+!website/downloads/
+!website/downloads/**
