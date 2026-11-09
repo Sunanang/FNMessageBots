@@ -9,6 +9,13 @@ cd website && python3 -m http.server 8081
 # http://127.0.0.1:8081
 ```
 
+## 版式
+
+深色落地页：hero（左侧标题 + 右侧 HTML 复刻的汇总通知卡与日志流）+ 规格条 + 六个章节
+（运行示例 / 怎么工作 / 支持的渠道 / 配置页 / 安装 / 常见问题）+ 收尾 CTA。
+版本信息、体积、SHA-256 由 `downloads/version.json` 在运行时填充，HTML 里保留兜底值。
+演示循环用原生脚本驱动，`prefers-reduced-motion` 下直接停在终态，页面不可见时暂停。
+
 ## 下载区怎么更新
 
 官网的「下载」不跳 GitHub，走 **本站直连**（EdgeOne 国内节点）：安装包放在
