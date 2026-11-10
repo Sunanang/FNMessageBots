@@ -100,6 +100,56 @@ jobs:
         if: always()
         run: docker rm --force fnmb-smoke >/dev/null 2>&1 || true
 
+  sync-site:
+    name: Sync installers into website and open a PR
+    needs: [publish]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # main 有「必须来自 dev PR」的保护，bot 推不了 main，所以这里把官网改动提交到 dev，
+    # 再开一个 dev -> main 的 PR。合并那一下由人来点，保护规则继续有效。
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Pull the newest installers into website/downloads
+        run: bash scripts/sync-website-downloads.sh
+
+      - name: Commit to dev and open a dev -> main pull request
+        run: |
+          set -euo pipefail
+          if [ -z "$(git status --porcelain website/downloads)" ]; then
+            echo '官网下载区已是最新，无需提 PR'
+            exit 0
+          fi
+          TAG="$(python3 -c "import json;print(json.load(open('website/downloads/version.json'))['tag'])")"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add website/downloads
+          git commit -m "chore(release): 官网下载区同步到 ${TAG}"
+          git push origin dev
+
+          # 已经有同标题的 PR 时不再重复开
+          if gh pr list --base main --head dev --state open --json title -q '.[].title' | grep -qF "官网下载区同步到 ${TAG}"; then
+            echo '同标题 PR 已存在，跳过'
+            exit 0
+          fi
+          gh pr create --base main --head dev \
+            --title "官网下载区同步到 ${TAG}" \
+            --body "发版流水线把 ${TAG} 的安装包同步进了网站目录，合并后 EdgeOne 会自动构建，官网的下载区就指向这个版本。
+
+          - \`website/downloads/\` 里的 fpk 与 sha256 取自 Release 资产
+          - \`version.json\` 由 sync 脚本按实际文件重新计算
+          - 页面运行时读 version.json，所以合并构建后即可生效"
+
   fpk:
     name: Build and verify package-user and root FPKs
     needs: test
