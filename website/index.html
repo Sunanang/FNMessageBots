@@ -360,6 +360,8 @@
       footer .flinks { display: flex; gap: 8px; flex-wrap: wrap; }
       footer .flinks a { padding: 6px 13px; border: 1px solid var(--line); border-radius: 999px; transition: color 0.25s, border-color 0.25s; }
       footer .flinks a:hover { color: var(--ink); border-color: var(--line-2); }
+      footer .flinks a.beian { display: inline-flex; align-items: center; gap: 5px; }
+      footer .flinks a.beian img { width: 15px; height: auto; display: block; }
       .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
       /* 滚动淡入：默认可见，只有 JS 跑起来才启用位移 */
@@ -742,6 +744,7 @@ ccf0751132bf71d77709b76a58fb0da1af40ec685d89d33e8c0878c12357ee99  FnMessageBot-2
           <a href="https://github.com/Sunanang/FNMessageBots">GitHub</a>
           <a href="https://github.com/Sunanang/FNMessageBots/issues">反馈</a>
           <a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener noreferrer">京ICP备2026075277号-1</a>
+          <a class="beian" href="https://beian.mps.gov.cn/#/query/webSearch?code=11011502041182" target="_blank" rel="noopener noreferrer"><img src="assets/beian.png" alt="公安联网备案" width="15" height="16" />京公网安备11011502041182号</a>
         </span>
       </div>
     </footer>
