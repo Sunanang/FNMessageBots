@@ -62,6 +62,21 @@ class SecretRedactFixesTests(unittest.TestCase):
             self.assertNotIn(TG_TOKEN, blob)
             self.assertNotIn(MAGIC_TOKEN, blob)
 
+    def test_bare_telegram_token_without_bot_prefix(self):
+        """历史/错误摘要里常只有裸 token，无 /bot 路径。"""
+        self.assertNotIn(TG_TOKEN, redact_secrets(f"e {TG_TOKEN}"))
+        self.assertNotIn(TG_TOKEN, redact_secrets(TG_TOKEN))
+        with tempfile.TemporaryDirectory() as directory:
+            push_history.init(directory)
+            push_history.add_record(
+                False,
+                "TEST",
+                summary=f"e {TG_TOKEN}",
+                detail={"channel_results": [{"channel": "tg", "success": False, "error": TG_TOKEN}]},
+            )
+            blob = json.dumps(push_history.get_records(limit=1)[0], ensure_ascii=False)
+            self.assertNotIn(TG_TOKEN, blob)
+
 
 class BackupWatermarkOnFailureTests(unittest.TestCase):
     def test_handler_failure_does_not_advance_past_failed_row(self):
