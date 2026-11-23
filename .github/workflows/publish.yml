@@ -125,7 +125,7 @@ jobs:
 
       - name: Commit to dev and open a dev -> main pull request
         run: |
-          set -euo pipefail
+          set -euxo pipefail
           if [ -z "$(git status --porcelain website/downloads website/index.html)" ]; then
             echo '官网下载区已是最新，无需提 PR'
             exit 0
@@ -135,6 +135,9 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add website/downloads website/index.html
           git commit -m "chore(release): 官网下载区同步到 ${TAG}"
+          # 上一步到这一步之间 dev 可能被别的提交推过，先对齐再推，避免 non-fast-forward 失败
+          git fetch origin dev
+          git rebase origin/dev
           git push origin dev
 
           # 已经有同标题的 PR 时不再重复开
