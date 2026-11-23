@@ -62,3 +62,7 @@ website/.env
 # 官网下载区要随 Git 集成部署一起打包，必须入库（其余 downloads/ 仍忽略）
 !website/downloads/
 !website/downloads/**
+
+# FPK 用的离线依赖轮子：随安装包分发，必须入库
+!vendor/wheels/
+!vendor/wheels/**

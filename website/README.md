@@ -25,7 +25,7 @@ cd website && python3 -m http.server 8081
 
 ```bash
 ./scripts/sync-website-downloads.sh   # 拉最新 Release 的包 + 重建 version.json
-git add website/downloads && git commit -m "chore(website): 同步 vX.Y.Z 安装包"
+git add website/downloads website/index.html && git commit -m "chore(website): 同步 vX.Y.Z 安装包"
 ```
 
 页面里 `data-ver / data-date / data-name` 的默认值是兜底（脚本失效或 JS 被关时仍能下），

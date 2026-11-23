@@ -47,7 +47,42 @@ with open(os.path.join(out_dir, "version.json"), "w", encoding="utf-8") as f:
 print("version.json:", data["tag"], "→", ", ".join(a["name"] for a in data["assets"]))
 '
 
+# 页面静态兜底也一起改：脚本没跑起来（老浏览器、代理拦 JSON）时，按钮仍指向真实存在的包
+python3 - "$OUT" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+out = Path(sys.argv[1])
+site = out.parent
+data = json.loads((out / "version.json").read_text(encoding="utf-8"))
+tag = data["tag"]
+version = tag[1:] if tag.startswith("v") else tag
+plain = next(a for a in data["assets"] if a["name"].endswith(".fpk") and not a["name"].endswith("-root.fpk"))
+root = next(a for a in data["assets"] if a["name"].endswith("-root.fpk"))
+
+
+def human(size):
+    return f"{size / 1048576:.1f} MB" if size >= 1048576 else f"{round(size / 1024)} KB"
+
+
+page = site / "index.html"
+html = page.read_text(encoding="utf-8")
+before = html
+html = re.sub(r"FnMessageBot-\d+\.\d+\.\d+(-root)?\.fpk",
+              lambda m: f"FnMessageBot-{version}{m.group(1) or ''}.fpk", html)
+html = re.sub(r"(<span data-ver>)[^<]*(</span>)", lambda m: m.group(1) + tag + m.group(2), html)
+html = re.sub(r"(<span data-date>)[^<]*(</span>)",
+              lambda m: m.group(1) + data["publishedAt"] + m.group(2), html)
+html = re.sub(r'(data-size="plain">)[^<]*(<)', lambda m: m.group(1) + human(plain["size"]) + m.group(2), html)
+html = re.sub(r'(data-size="root">)[^<]*(<)', lambda m: m.group(1) + human(root["size"]) + m.group(2), html)
+checksums = "\n".join(f'{a["sha256"]}  {a["name"]}' for a in data["assets"])
+html = re.sub(r"(<pre data-sha>)[\s\S]*?(</pre>)", lambda m: m.group(1) + checksums + m.group(2), html, count=1)
+if html != before:
+    page.write_text(html, encoding="utf-8")
+    print(f"index.html 静态兜底已同步到 {tag}")
+PY
+
 echo
-echo "页面里的兜底版本号（npm/html 静态值）如需同步，改 website/index.html 里的 data-ver / data-date / data-name 默认值；"
-echo "运行时若有 version.json，页面会自动覆盖成最新值，所以不改也能正确显示。"
 echo "别忘了提交： git add website/downloads website/index.html"

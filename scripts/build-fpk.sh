@@ -40,6 +40,12 @@ rsync -a --delete --exclude '__pycache__/' --exclude '*.py[cod]' --exclude '.DS_
     "${ROOT}/src/" "${CODE_DIR}/src/"
 cp "${ROOT}/requirements.txt" "${CODE_DIR}/requirements.txt"
 rsync -a --delete --exclude '.DS_Store' "${ROOT}/assets/" "${CODE_DIR}/assets/"
+# 离线依赖轮子（vendor/wheels）：安装时先用它们，装不动才联网
+if [ -d "${ROOT}/vendor/wheels" ]; then
+    rsync -a --delete --exclude '.DS_Store' "${ROOT}/vendor/wheels/" "${CODE_DIR}/wheels/"
+else
+    echo "警告: 缺少 vendor/wheels，安装包会退回联网安装依赖（可运行 scripts/update-fpk-wheels.sh 生成）" >&2
+fi
 python3 "${ROOT}/scripts/verify-fpk.py" --prepare-variant "${VARIANT}" "${PAYLOAD}"
 
 # fnpack 将产物写到当前目录；不在源仓库中生成、删除或覆盖临时源码。
