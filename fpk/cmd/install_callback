@@ -121,8 +121,9 @@ if [ ! -f "${TRIM_PKGVAR}/config/config.json" ]; then
 fi
 
 # 安装向导设置的访问密码：只写入 PBKDF2 盐值与哈希（与 web/auth_service.py 一致），明文不落盘、不输出。
-# 未经向导安装（变量为空）时跳过，应用启动后走初始化码流程。
-if [ "${FNMB_FRESH_CONFIG}" = "1" ] && [ -n "${wizard_web_password:-}" ]; then
+# 首次与覆盖安装均生效——向导要求填写密码时，用户输入的新密码必须写入，不能静默保留旧哈希。
+# 未经向导安装（变量为空）时跳过，应用启动后走初始化码流程。升级回调不走此逻辑。
+if [ -n "${wizard_web_password:-}" ]; then
     set +e
     FNMB_PW="${wizard_web_password}" \
     FNMB_PW2="${wizard_web_password_confirm:-}" \
@@ -143,6 +144,8 @@ if pw != os.environ.get("FNMB_PW2", "").strip():
 cfg = os.environ["FNMB_CFG"]
 with open(cfg, encoding="utf-8") as f:
     data = json.load(f)
+if not isinstance(data, dict):
+    data = {}
 salt = secrets.token_hex(16)
 data["web_password_salt"] = salt
 data["web_password_hash"] = hashlib.pbkdf2_hmac("sha256", pw.encode("utf-8"), bytes.fromhex(salt), 100000).hex()
