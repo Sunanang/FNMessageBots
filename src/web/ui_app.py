@@ -39,6 +39,9 @@ from web.api_helpers import parse_success_filter as _parse_success_filter
 from web.app_paths import BASE_DIR
 from web.app_paths import ASSETS_DIR
 from utils.secret_redact import redact_json, redact_secrets
+from utils.startup_quiet import MAX_SECONDS as STARTUP_QUIET_MAX_SECONDS
+from utils.startup_quiet import MIN_SECONDS as STARTUP_QUIET_MIN_SECONDS
+from utils.startup_quiet import clamp_seconds as clamp_startup_quiet_seconds
 from web.app_paths import CONFIG_FILE
 from web.app_paths import ICON_FILE
 from web.app_paths import SUPPORT_QR_DIR
@@ -578,6 +581,10 @@ def create_app(on_config_saved=None) -> Flask:
             "dnd_enabled": as_bool(raw.get("dnd_enabled", False), False),
             "dnd_start_time": (raw.get("dnd_start_time") or "22:00").strip(),
             "dnd_end_time": (raw.get("dnd_end_time") or "07:00").strip(),
+            "startup_quiet_enabled": as_bool(raw.get("startup_quiet_enabled", False), False),
+            "startup_quiet_seconds": clamp_startup_quiet_seconds(raw.get("startup_quiet_seconds", 180)),
+            "startup_quiet_keep_urgent": as_bool(raw.get("startup_quiet_keep_urgent", True), True),
+            "startup_quiet_only_after_boot": as_bool(raw.get("startup_quiet_only_after_boot", True), True),
             "poll_batch_summary_enabled": as_bool(raw.get("poll_batch_summary_enabled", False), False),
             "minimal_push_enabled": as_bool(raw.get("minimal_push_enabled", False), False),
             "ssh_ignore_loopback": as_bool(raw.get("ssh_ignore_loopback", False), False),
@@ -625,6 +632,16 @@ def create_app(on_config_saved=None) -> Flask:
         dnd_start_time = (payload.get("dnd_start_time") or "22:00").strip()
         dnd_end_time = (payload.get("dnd_end_time") or "07:00").strip()
         poll_batch_summary_enabled = as_bool(payload.get("poll_batch_summary_enabled", False), False)
+        startup_quiet_enabled = as_bool(payload.get("startup_quiet_enabled", False), False)
+        raw_quiet_seconds = payload.get("startup_quiet_seconds", 180)
+        try:
+            startup_quiet_seconds = int(raw_quiet_seconds)
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "message": "启动静默期时长必须为 30–1800 的整数秒。"}), 400
+        if startup_quiet_seconds < STARTUP_QUIET_MIN_SECONDS or startup_quiet_seconds > STARTUP_QUIET_MAX_SECONDS:
+            return jsonify({"ok": False, "message": "启动静默期时长必须为 30–1800 秒。"}), 400
+        startup_quiet_keep_urgent = as_bool(payload.get("startup_quiet_keep_urgent", True), True)
+        startup_quiet_only_after_boot = as_bool(payload.get("startup_quiet_only_after_boot", True), True)
         minimal_push_enabled = as_bool(payload.get("minimal_push_enabled", False), False)
         ssh_ignore_loopback = as_bool(payload.get("ssh_ignore_loopback", False), False)
         ssh_ignore_lan = as_bool(payload.get("ssh_ignore_lan", False), False)
@@ -764,6 +781,10 @@ def create_app(on_config_saved=None) -> Flask:
                 "dnd_start_time": dnd_start_time,
                 "dnd_end_time": dnd_end_time,
                 "poll_batch_summary_enabled": poll_batch_summary_enabled,
+                "startup_quiet_enabled": startup_quiet_enabled,
+                "startup_quiet_seconds": startup_quiet_seconds,
+                "startup_quiet_keep_urgent": startup_quiet_keep_urgent,
+                "startup_quiet_only_after_boot": startup_quiet_only_after_boot,
                 "minimal_push_enabled": minimal_push_enabled,
                 "ssh_ignore_loopback": ssh_ignore_loopback,
                 "ssh_ignore_lan": ssh_ignore_lan,

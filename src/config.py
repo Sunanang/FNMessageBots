@@ -9,6 +9,7 @@ from typing import List, Dict, Any
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from notifier.channel_params import validate_channel_json
+from utils.startup_quiet import DEFAULT_SECONDS as STARTUP_QUIET_DEFAULT_SECONDS, clamp_seconds as clamp_startup_quiet_seconds
 from utils.value_parser import as_bool
 from valid_event_ids import filter_monitor_events
 
@@ -98,6 +99,14 @@ class Config:
     dnd_enabled: bool = False
     dnd_start_time: str = "22:00"  # HH:MM，如 22:00
     dnd_end_time: str = "07:00"   # HH:MM，如 07:00（跨日则到次日该时间结束）
+
+    # 启动静默期（开启后应用启动/开机后的一段时间内只记录不推送，结束时汇总为一条）
+    startup_quiet_enabled: bool = False
+    startup_quiet_seconds: int = STARTUP_QUIET_DEFAULT_SECONDS  # 30–1800 秒
+    # 登录、SSH、UPS、磁盘错误、应用崩溃这类安全事件在静默期内照常实时推送
+    startup_quiet_keep_urgent: bool = True
+    # 只在真开机（读 /proc/uptime）时静默；关闭后手动重启应用也会静默
+    startup_quiet_only_after_boot: bool = True
 
     # NAS 定时巡检（Cron 调度；不参与日志事件勾选）
     nas_patrol_enabled: bool = False
@@ -256,6 +265,14 @@ class Config:
             self.dnd_start_time = data["dnd_start_time"].strip()
         if "dnd_end_time" in data and isinstance(data["dnd_end_time"], str):
             self.dnd_end_time = data["dnd_end_time"].strip()
+        if "startup_quiet_enabled" in data:
+            self.startup_quiet_enabled = as_bool(data["startup_quiet_enabled"], False)
+        if "startup_quiet_seconds" in data:
+            self.startup_quiet_seconds = clamp_startup_quiet_seconds(data["startup_quiet_seconds"])
+        if "startup_quiet_keep_urgent" in data:
+            self.startup_quiet_keep_urgent = as_bool(data["startup_quiet_keep_urgent"], True)
+        if "startup_quiet_only_after_boot" in data:
+            self.startup_quiet_only_after_boot = as_bool(data["startup_quiet_only_after_boot"], True)
         if "nas_patrol_enabled" in data:
             self.nas_patrol_enabled = as_bool(data["nas_patrol_enabled"], False)
         if "nas_patrol_cron" in data and isinstance(data["nas_patrol_cron"], str):
@@ -503,6 +520,11 @@ class Config:
     def _validate(self):
         """验证配置（部署时不强制 Webhook，可在 UI 中配置）"""
         self._migrate_ssh_open_timeout_event()
+        # 启动静默期：配置文件可能写成字符串或越界，统一收敛成合法值
+        self.startup_quiet_enabled = as_bool(self.startup_quiet_enabled, False)
+        self.startup_quiet_seconds = clamp_startup_quiet_seconds(self.startup_quiet_seconds)
+        self.startup_quiet_keep_urgent = as_bool(self.startup_quiet_keep_urgent, True)
+        self.startup_quiet_only_after_boot = as_bool(self.startup_quiet_only_after_boot, True)
 
         if self.wechat_webhook_url and not self.wechat_webhook_url.startswith('http'):
             raise ValueError("WECHAT_WEBHOOK_URL 必须是有效的URL")

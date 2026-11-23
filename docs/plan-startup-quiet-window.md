@@ -1,6 +1,10 @@
 # 方案探索：NAS 重启后的「启动静默期」开关
 
-> 状态：**只做方案，未改代码**（2026-11-23）。等确认后再实现。
+> 状态：**已按本方案实现（2026-11-23，dev 分支，待确认后发版）**。实现位置：
+> `src/utils/startup_quiet.py`（窗口判定与计数）、`src/notifier/unified_notifier.py`（通知出口 gate + 汇总发送）、
+> `src/config.py` + `src/web/ui_app.py` + `src/web/templates/index.html`（四个配置项与「启动静默期」开关）、
+> `tests/test_startup_quiet.py`（11 条用例）。与方案的两处差异：①窗口锚定开机时刻，容器里读不到 `/proc/uptime` 时退回「进程启动 + N 秒」；
+> ②「是否开机首启」用开机时刻 ±300 秒判定，重启应用不会重开窗口。
 
 ## 现象
 

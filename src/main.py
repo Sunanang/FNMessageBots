@@ -986,6 +986,11 @@ class Application:
                     except Exception as e:
                         if self.logger:
                             self.logger.warning("勿扰汇总检查异常: %s", e)
+                    try:
+                        self.notifier.flush_startup_quiet_if_needed()
+                    except Exception as e:
+                        if self.logger:
+                            self.logger.warning("启动静默期汇总检查异常: %s", e)
                 time.sleep(1)
 
         except KeyboardInterrupt:

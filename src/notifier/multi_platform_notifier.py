@@ -209,6 +209,7 @@ class MultiPlatformNotifier:
         'DISK_IO_ERR': '⚠️ 飞牛NAS-磁盘IO错误告警',
         'TEST_PUSH': '🧪 飞牛NAS-测试推送',
         'DND_SUMMARY': '📋 飞牛NAS-勿扰时段汇总',
+        'STARTUP_QUIET_SUMMARY': '🌙 飞牛NAS-开机静默期汇总',
         'NAS_PATROL_REPORT': '飞牛NAS-巡检任务完成',
         'POLL_BATCH_SUMMARY': '飞牛NAS-多事件合并通知',
         'BACKUP_TASK_SUCCESS': '✅ 飞牛NAS-备份任务完成',
@@ -3483,6 +3484,7 @@ class MultiPlatformNotifier:
             "APP_STOP": "监控停止",
             "APP_ERROR": "监控异常",
             "DND_SUMMARY": "勿扰汇总",
+            "STARTUP_QUIET_SUMMARY": "开机静默期汇总",
             "TEST_PUSH": "测试推送",
         }
         action = action_map.get(event_type, event_type)
@@ -3623,6 +3625,9 @@ class MultiPlatformNotifier:
         elif event_type == 'DND_SUMMARY':
             # 汇总正文和发送状态共用事件类型，但不能互相去重。
             key = f"DND_SUMMARY_{int(time.time() / 60)}_{event_data.get('message', '')}"
+        elif event_type == 'STARTUP_QUIET_SUMMARY':
+            # 同一次静默期只发一条；重复调用按分钟 + 正文去重
+            key = f"STARTUP_QUIET_SUMMARY_{int(time.time() / 60)}_{event_data.get('message', '')}"
         else:
             # 其他事件：按分钟去重
             minute_window = int(time.time() / 60)

@@ -1029,6 +1029,32 @@
             </div>
           </div>
         </div>
+        <div class="startup-quiet-section" style="margin-top: 16px; padding-top: 16px; border-top: 1px solid #e5e7eb;">
+          <div class="field-label" style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
+            <input type="checkbox" id="input-startup-quiet-enabled" />
+            <span>启动静默期</span>
+          </div>
+          <div class="field-helper" style="margin-bottom: 10px;">NAS 重启后本应用先起来，其它应用与容器陆续启动会刷出一批通知。开启后这段时间内只记录、不推送，结束时补一条「折叠 X 条」汇总。</div>
+          <div class="system-grid" style="grid-template-columns: 1fr 1fr;">
+            <div>
+              <div class="field-label">静默时长 (s)</div>
+              <input id="input-startup-quiet-seconds" type="number" min="30" max="1800" step="30" value="180" />
+              <div class="field-helper">30–1800 秒，默认 180 秒。</div>
+            </div>
+            <div>
+              <div class="field-label" style="display: flex; align-items: center; gap: 8px;">
+                <input type="checkbox" id="input-startup-quiet-only-after-boot" />
+                <span>只在真开机时静默</span>
+              </div>
+              <div class="field-helper">读系统开机时间判断；只是手动重启应用时不静默。</div>
+            </div>
+          </div>
+          <div class="field-label" style="display: flex; align-items: center; gap: 8px; margin-top: 8px;">
+            <input type="checkbox" id="input-startup-quiet-keep-urgent" />
+            <span>安全事件照常推送</span>
+          </div>
+          <div class="field-helper">静默期内登录、SSH、UPS、磁盘错误、应用崩溃这类事件仍然实时推送。</div>
+        </div>
         <div class="nas-patrol-section" style="margin-top: 16px; padding-top: 16px; border-top: 1px solid #e5e7eb;">
           <div class="field-label" style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
             <input type="checkbox" id="input-nas-patrol-enabled" />
@@ -2142,6 +2168,25 @@
           document.getElementById("input-dnd-end").disabled = !en;
         };
 
+        const quietEnabled = !!data.startup_quiet_enabled;
+        document.getElementById("input-startup-quiet-enabled").checked = quietEnabled;
+        document.getElementById("input-startup-quiet-seconds").value = data.startup_quiet_seconds || 180;
+        document.getElementById("input-startup-quiet-only-after-boot").checked =
+          data.startup_quiet_only_after_boot !== false;
+        document.getElementById("input-startup-quiet-keep-urgent").checked =
+          data.startup_quiet_keep_urgent !== false;
+        function syncStartupQuietInputs() {
+          const en = document.getElementById("input-startup-quiet-enabled").checked;
+          const sec = document.getElementById("input-startup-quiet-seconds");
+          const boot = document.getElementById("input-startup-quiet-only-after-boot");
+          const urgent = document.getElementById("input-startup-quiet-keep-urgent");
+          if (sec) sec.disabled = !en;
+          if (boot) boot.disabled = !en;
+          if (urgent) urgent.disabled = !en;
+        }
+        document.getElementById("input-startup-quiet-enabled").onchange = syncStartupQuietInputs;
+        syncStartupQuietInputs();
+
         const nasEn = document.getElementById("input-nas-patrol-enabled");
         const nasCron = document.getElementById("input-nas-patrol-cron");
         if (nasEn) nasEn.checked = !!data.nas_patrol_enabled;
@@ -2260,6 +2305,14 @@
         dnd_enabled: document.getElementById("input-dnd-enabled").checked,
         dnd_start_time: document.getElementById("input-dnd-start").value || "22:00",
         dnd_end_time: document.getElementById("input-dnd-end").value || "07:00",
+        startup_quiet_enabled: document.getElementById("input-startup-quiet-enabled").checked,
+        startup_quiet_seconds: (function () {
+          const n = parseInt(document.getElementById("input-startup-quiet-seconds").value, 10);
+          if (!Number.isFinite(n)) return 180;
+          return Math.min(Math.max(n, 30), 1800);
+        })(),
+        startup_quiet_only_after_boot: document.getElementById("input-startup-quiet-only-after-boot").checked,
+        startup_quiet_keep_urgent: document.getElementById("input-startup-quiet-keep-urgent").checked,
         nas_patrol_enabled: document.getElementById("input-nas-patrol-enabled").checked,
         nas_patrol_cron: (document.getElementById("input-nas-patrol-cron").value || "").trim(),
         bark_icon: (document.getElementById("input-bark-icon").value || "").trim(),
