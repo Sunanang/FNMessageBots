@@ -45,7 +45,11 @@ class TelegramTokenRedactionTests(unittest.TestCase):
                 with patch.object(pool.session, "request", side_effect=failure):
                     with self.assertLogs("notifier.connection_pool", logging.ERROR) as logs:
                         result = pool.post(URL, {"text": "test"})
-                self.assertNotIn(TOKEN, " ".join(logs.output) + str(result))
+                joined = " ".join(logs.output) + str(result)
+                self.assertNotIn(TOKEN, joined)
+                if isinstance(failure, RuntimeError):
+                    self.assertIn("Traceback (most recent call last):", joined)
+                    self.assertIn("RuntimeError", joined)
         pool.close()
 
     def test_proxy_url_with_port_is_also_redacted(self):

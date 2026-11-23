@@ -5,6 +5,7 @@ HTTP连接池管理
 import logging
 import re
 import threading
+import traceback
 from typing import Dict, Any, Optional, Mapping
 from dataclasses import dataclass
 
@@ -130,6 +131,14 @@ class ConnectionPool:
             message = message.replace(token_match.group(2), "***")
         message = _TELEGRAM_TOKEN_RE.sub(r"\1***", message)
         return _QUERY_RE.sub("?***", message)
+
+    @classmethod
+    def _safe_traceback(cls, exc: BaseException, url: str) -> str:
+        """Format a stack trace with credentials removed so logs stay useful without leaking tokens."""
+        return cls._safe_error(
+            "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+            url,
+        )
 
     @classmethod
     def _safe_response(cls, value: Any, url: str) -> Any:
@@ -259,7 +268,13 @@ class ConnectionPool:
             out["response"] = resp_obj
             return out
         except Exception as e:
-            self.logger.error(f"{method}请求异常: {safe_url} - {type(e).__name__}")
+            self.logger.error(
+                "%s请求异常: %s - %s\n%s",
+                method,
+                safe_url,
+                type(e).__name__,
+                self._safe_traceback(e, url),
+            )
             with self.stats_lock:
                 self.stats.failed_requests += 1
             out["error"] = f"{type(e).__name__}: {self._safe_error(e, url)[:80]}"
@@ -346,7 +361,12 @@ class ConnectionPool:
                 out["response"] = resp_obj
             return out
         except Exception as e:
-            self.logger.error(f"GET请求异常: {self._safe_url(url)} - {type(e).__name__}")
+            self.logger.error(
+                "GET请求异常: %s - %s\n%s",
+                self._safe_url(url),
+                type(e).__name__,
+                self._safe_traceback(e, url),
+            )
             with self.stats_lock:
                 self.stats.failed_requests += 1
             out["error"] = f"{type(e).__name__}: {self._safe_error(e, url)[:80]}"
