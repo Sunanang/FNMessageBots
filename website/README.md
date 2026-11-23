@@ -30,6 +30,12 @@ git add website/downloads website/index.html && git commit -m "chore(website): �
 
 页面里 `data-ver / data-date / data-name` 的默认值是兜底（脚本失效或 JS 被关时仍能下），
 有 `version.json` 时会被自动覆盖，所以平时**不用手改 HTML**。
+
+同步脚本会同时改 HTML 里的静态兜底（版本号、日期、体积、SHA-256、下载链接），
+所以页面在 JS 被拦、只有静态 HTML 时也指向真实存在的包。
+
+校验口径：官网 `downloads/*.sha256` 对应的是**官网这一份**安装包（与 GitHub Release 资产由同一提交分别构建，
+字节不同）；从官网下载就用官网的校验值，从 Release 页下载就用 Release 页的校验值。
 「历史版本」链接始终指向 GitHub Releases。
 
 ## 部署

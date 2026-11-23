@@ -1,18 +1,18 @@
 {
-  "tag": "v2.8.0",
-  "name": "FnMessageBot 2.8.0",
-  "publishedAt": "2026-11-11",
-  "releasePage": "https://github.com/Sunanang/FNMessageBots/releases/tag/v2.8.0",
+  "tag": "v2.9.0",
+  "name": "FnMessageBot 2.9.0",
+  "publishedAt": "2026-11-23",
+  "releasePage": "https://github.com/Sunanang/FNMessageBots/releases/tag/v2.9.0",
   "assets": [
     {
-      "name": "FnMessageBot-2.8.0-root.fpk",
-      "size": 729247,
-      "sha256": "b7c9a79e45eb06a6bc3cd1910fd2a07d97555135ca94a6159936be87ca196b44"
+      "name": "FnMessageBot-2.9.0-root.fpk",
+      "size": 3103482,
+      "sha256": "ff14ddc74670f56e6d6089c94ce17f430c48d05e919f85c85f072f2e5760deb4"
     },
     {
-      "name": "FnMessageBot-2.8.0.fpk",
-      "size": 729356,
-      "sha256": "e0c4c85a9f92b9d8eff278e339d596114050cc3f7da91078dbd0f2d794da5e5e"
+      "name": "FnMessageBot-2.9.0.fpk",
+      "size": 3103536,
+      "sha256": "ca892b6e4da31444b487587f7cca89a4c6da0b8705a094ca24ff43ee791f5afa"
     }
   ]
 }
