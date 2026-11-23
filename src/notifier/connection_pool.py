@@ -13,6 +13,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 _QUERY_RE = re.compile(r"\?[^\s'\")]*")
+_TELEGRAM_TOKEN_RE = re.compile(r"(?i)(/bot)([0-9]+:[A-Za-z0-9_-]+)")
 
 @dataclass
 class PoolStats:
@@ -118,7 +119,27 @@ class ConnectionPool:
     @staticmethod
     def _safe_url(url: str) -> str:
         """日志用：去掉查询串（常含 webhook key / access_token / corpsecret）。"""
-        return str(url or "").split("?", 1)[0]
+        return _TELEGRAM_TOKEN_RE.sub(r"\1***", str(url or "").split("?", 1)[0])
+
+    @staticmethod
+    def _safe_error(value: Any, url: str) -> str:
+        """Remove credentials from exception and response text before returning or logging it."""
+        message = str(value or "")
+        token_match = _TELEGRAM_TOKEN_RE.search(str(url or ""))
+        if token_match:
+            message = message.replace(token_match.group(2), "***")
+        message = _TELEGRAM_TOKEN_RE.sub(r"\1***", message)
+        return _QUERY_RE.sub("?***", message)
+
+    @classmethod
+    def _safe_response(cls, value: Any, url: str) -> Any:
+        if isinstance(value, str):
+            return cls._safe_error(value, url)
+        if isinstance(value, dict):
+            return {key: cls._safe_response(item, url) for key, item in value.items()}
+        if isinstance(value, list):
+            return [cls._safe_response(item, url) for item in value]
+        return value
 
     def post(
         self,
@@ -178,11 +199,11 @@ class ConnectionPool:
             body_obj = result if isinstance(result, dict) else {}
             # 企业微信/钉钉等含 errcode，非 0 视为失败但保留返回体
             if check_errcode and "errcode" in body_obj and str(body_obj.get("errcode")).strip() != "0":
-                self.logger.error(f"API返回错误: {body_obj}")
+                self.logger.error("API返回错误: %s", self._safe_error(body_obj, url))
                 with self.stats_lock:
                     self.stats.failed_requests += 1
-                out["response"] = body_obj
-                out["error"] = body_obj.get("errmsg") or f"errcode={body_obj.get('errcode')}"
+                out["response"] = self._safe_response(body_obj, url)
+                out["error"] = self._safe_error(body_obj.get("errmsg") or f"errcode={body_obj.get('errcode')}", url)
                 return out
             with self.stats_lock:
                 self.stats.successful_requests += 1
@@ -190,10 +211,10 @@ class ConnectionPool:
             if result is None and response.content:
                 out["response"] = {
                     "status_code": response.status_code,
-                    "text_preview": (response.text or "")[: self._BODY_PREVIEW_CHARS],
+                    "text_preview": self._safe_error((response.text or "")[: self._BODY_PREVIEW_CHARS], url),
                 }
             else:
-                out["response"] = body_obj
+                out["response"] = self._safe_response(body_obj, url)
             return out
         except requests.exceptions.Timeout:
             self.logger.error(f"{method}请求超时 (timeout={self.timeout}s): {safe_url}")
@@ -207,7 +228,7 @@ class ConnectionPool:
             with self.stats_lock:
                 self.stats.connection_errors += 1
                 self.stats.failed_requests += 1
-            out["error"] = "连接错误: " + (_QUERY_RE.sub("?***", str(e))[:80] or "未知")
+            out["error"] = "连接错误: " + (self._safe_error(e, url)[:80] or "未知")
             return out
         except requests.exceptions.HTTPError as e:
             code = e.response.status_code if e.response is not None else 0
@@ -228,20 +249,20 @@ class ConnectionPool:
             # 失败也保留接口返回体（优先 JSON，否则 text 预览）
             resp_obj: Dict[str, Any] = {"status_code": code}
             if isinstance(body_dict, dict):
-                resp_obj["json"] = body_dict
+                resp_obj["json"] = self._safe_response(body_dict, url)
                 msg = body_dict.get("errmsg") or body_dict.get("message") or ""
-                out["error"] = f"HTTP {code}" + (f": {msg}" if msg else "")
+                out["error"] = f"HTTP {code}" + (f": {self._safe_error(msg, url)}" if msg else "")
             else:
                 preview = (body_text or "")[: self._BODY_PREVIEW_CHARS]
-                resp_obj["text_preview"] = preview
+                resp_obj["text_preview"] = self._safe_error(preview, url)
                 out["error"] = f"HTTP {code}"
             out["response"] = resp_obj
             return out
         except Exception as e:
-            self.logger.error(f"{method}请求异常: {safe_url} - {type(e).__name__}", exc_info=True)
+            self.logger.error(f"{method}请求异常: {safe_url} - {type(e).__name__}")
             with self.stats_lock:
                 self.stats.failed_requests += 1
-            out["error"] = f"{type(e).__name__}: {_QUERY_RE.sub('?***', str(e) or '')[:80]}"
+            out["error"] = f"{type(e).__name__}: {self._safe_error(e, url)[:80]}"
             return out
 
     def get(self, url: str) -> Dict[str, Any]:
@@ -269,9 +290,9 @@ class ConnectionPool:
                     self.stats.successful_requests += 1
                 out["success"] = True
                 try:
-                    out["response"] = response.json() if response.content else {}
+                    out["response"] = self._safe_response(response.json(), url) if response.content else {}
                 except Exception:
-                    out["response"] = {"status_code": response.status_code, "text_preview": (response.text or "")[: self._BODY_PREVIEW_CHARS]}
+                    out["response"] = {"status_code": response.status_code, "text_preview": self._safe_error((response.text or "")[: self._BODY_PREVIEW_CHARS], url)}
                 return out
             self.logger.error(f"GET请求失败: {response.status_code}")
             with self.stats_lock:
@@ -283,9 +304,9 @@ class ConnectionPool:
             except Exception:
                 body = None
             if isinstance(body, dict):
-                resp_obj["json"] = body
+                resp_obj["json"] = self._safe_response(body, url)
             else:
-                resp_obj["text_preview"] = (response.text or "")[: self._BODY_PREVIEW_CHARS]
+                resp_obj["text_preview"] = self._safe_error((response.text or "")[: self._BODY_PREVIEW_CHARS], url)
             out["response"] = resp_obj
             out["error"] = f"HTTP {response.status_code}"
             return out
@@ -301,7 +322,7 @@ class ConnectionPool:
             with self.stats_lock:
                 self.stats.connection_errors += 1
                 self.stats.failed_requests += 1
-            out["error"] = "连接错误: " + (_QUERY_RE.sub("?***", str(e))[:80] or "未知")
+            out["error"] = "连接错误: " + (self._safe_error(e, url)[:80] or "未知")
             return out
         except requests.exceptions.HTTPError as e:
             code = e.response.status_code if e.response is not None else 0
@@ -316,19 +337,19 @@ class ConnectionPool:
                 except Exception:
                     body = None
                 if isinstance(body, dict):
-                    resp_obj["json"] = body
+                    resp_obj["json"] = self._safe_response(body, url)
                 else:
                     try:
-                        resp_obj["text_preview"] = (e.response.text or "")[: self._BODY_PREVIEW_CHARS]
+                        resp_obj["text_preview"] = self._safe_error((e.response.text or "")[: self._BODY_PREVIEW_CHARS], url)
                     except Exception:
                         pass
                 out["response"] = resp_obj
             return out
         except Exception as e:
-            self.logger.error(f"GET请求异常: {self._safe_url(url)} - {type(e).__name__}", exc_info=True)
+            self.logger.error(f"GET请求异常: {self._safe_url(url)} - {type(e).__name__}")
             with self.stats_lock:
                 self.stats.failed_requests += 1
-            out["error"] = f"{type(e).__name__}: {(str(e) or '')[:80]}"
+            out["error"] = f"{type(e).__name__}: {self._safe_error(e, url)[:80]}"
             return out
     
     def get_stats(self) -> Dict[str, Any]:
