@@ -3,6 +3,12 @@ name: Publish Docker and FPK
 on:
   push:
     branches: [main]
+    # 只改官网/文档的合并不重新发版：FPK 打包不是字节可复现的，
+    # 否则「发版→同步官网→再合并→再发版」会无限开新的同步 PR。
+    paths-ignore:
+      - 'website/**'
+      - 'docs/**'
+      - '**.md'
   workflow_dispatch:
 
 permissions:
