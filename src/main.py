@@ -167,12 +167,12 @@ class Application:
         try:
             outbox = self._poll_outbox()
             if outbox is not None:
+                selected = set(getattr(self.config, "monitor_events", []) or [])
+                # 热加载瞬间 monitor_events 为空：不要 claim（否则会写入 last_attempt，卡住队列约 60s），也不要 ack
+                if not selected:
+                    return
                 job = outbox.claim_poll(time.time())
                 if job is None:
-                    return
-                selected = set(getattr(self.config, "monitor_events", []) or [])
-                # 热加载瞬间 monitor_events 为空时不要整批 ack，否则待发会被误确认
-                if not selected:
                     return
                 buf = [item for item in job["items"] if item.get("event_type") in selected]
                 if not buf:

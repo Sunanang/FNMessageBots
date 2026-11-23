@@ -265,14 +265,18 @@ class StartupQuietWindow:
         self._save(state)
         return True
 
-    def take_summary(self) -> Optional[str]:
-        """窗口结束后取出要补发的汇总文案；取过一次就置为已发送。"""
-        if not self.enabled:
+    def peek_summary(self, *, force: bool = False) -> Optional[str]:
+        """窗口结束后返回汇总文案，不清空计数。
+
+        force=True：关闭静默期等场景，忽略 enabled / 窗口是否结束，只要有未发送折叠就返回。
+        """
+        if not force and not self.enabled:
             return None
-        state = self._ensure_window()
-        window_end = state.get("window_end")
-        if window_end is not None and self._clock() < float(window_end):
-            return None
+        state = self._load() if force else self._ensure_window()
+        if not force:
+            window_end = state.get("window_end")
+            if window_end is not None and self._clock() < float(window_end):
+                return None
         folded = dict(state.get("folded") or {})
         carry = dict(state.get("carry") or {})
         total = self._total(folded) + self._total(carry)
@@ -285,13 +289,24 @@ class StartupQuietWindow:
                     categories[str(name)] = categories.get(str(name), 0) + int(count)
                 except (TypeError, ValueError):
                     continue
+        return self._format_summary(total, categories)
+
+    def confirm_summary(self) -> None:
+        """推送成功后再清空折叠计数并标记已发送；失败时不要调用，以便重试。"""
+        state = self._load()
         state["folded"] = {}
         state["folded_categories"] = {}
         state["carry"] = {}
         state["carry_categories"] = {}
         state["summary_sent"] = True
         self._save(state)
-        return self._format_summary(total, categories)
+
+    def take_summary(self, *, force: bool = False) -> Optional[str]:
+        """窗口结束后取出汇总并立即确认（单测兼容）；投递路径请用 peek + confirm。"""
+        summary = self.peek_summary(force=force)
+        if summary:
+            self.confirm_summary()
+        return summary
 
     @staticmethod
     def _total(bucket: Dict[str, Any]) -> int:

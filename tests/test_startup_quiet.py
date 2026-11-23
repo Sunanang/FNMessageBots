@@ -187,6 +187,64 @@ class StartupQuietNotifierTests(unittest.TestCase):
         self.assertNotEqual(result.method, "startup_quiet_skipped")
         self.assertEqual(self.notifier.multi_platform_notifier.send_notification.call_count, 1)
 
+    def test_failed_summary_keeps_counts_for_retry(self):
+        self.notifier.send_notification("APP_STARTED", {"name": "相册"}, "{}", "now")
+        self.now += 200
+        self.notifier.multi_platform_notifier.send_system_notification.return_value = {
+            "success": False, "success_count": 0, "fail_count": 1,
+            "channel_results": [{"channel": "wechat", "success": False, "error": "down"}],
+        }
+        self.notifier.flush_startup_quiet_if_needed()
+        self.assertEqual(self.notifier.multi_platform_notifier.send_system_notification.call_count, 1)
+        status = self.notifier._startup_quiet.status()
+        self.assertEqual(status["folded"].get("APP_STARTED"), 1)
+        self.assertFalse(status["summary_sent"])
+
+        self.notifier.multi_platform_notifier.send_system_notification.return_value = {
+            "success": True, "success_count": 1, "fail_count": 0,
+        }
+        self.notifier.flush_startup_quiet_if_needed()
+        self.assertEqual(self.notifier.multi_platform_notifier.send_system_notification.call_count, 2)
+        status = self.notifier._startup_quiet.status()
+        self.assertEqual(status["folded"], {})
+        self.assertTrue(status["summary_sent"])
+
+    def test_disabling_mid_window_flushes_folded_summary(self):
+        self.notifier.send_notification("APP_STARTED", {"name": "相册"}, "{}", "now")
+        self.notifier.send_notification("DOCKER_CONTAINER_START", {"name": "x"}, "{}", "now")
+        self.assertTrue(self.notifier._startup_quiet.in_window())
+        self.config.startup_quiet_enabled = False
+        self.notifier._configure_startup_quiet(self.notifier._startup_quiet)
+        self.assertEqual(self.notifier.multi_platform_notifier.send_system_notification.call_count, 1)
+        event_type, message = self.notifier.multi_platform_notifier.send_system_notification.call_args[0][:2]
+        self.assertEqual(event_type, "STARTUP_QUIET_SUMMARY")
+        self.assertIn("折叠 2 条事件", message)
+        self.assertEqual(self.notifier._startup_quiet.status()["folded"], {})
+
+
+class StartupQuietPeekConfirmTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.dir = Path(temp.name)
+        self.now = 1_700_000_000.0
+
+    def test_peek_does_not_clear_until_confirm(self):
+        window = StartupQuietWindow(
+            self.dir, clock=lambda: self.now, uptime_reader=lambda: 5.0
+        )
+        window.configure(enabled=True, seconds=180, keep_urgent=True, only_after_boot=True)
+        window.should_suppress("APP_STARTED")
+        self.now += 200
+        first = window.peek_summary()
+        second = window.peek_summary()
+        self.assertEqual(first, second)
+        self.assertIn("折叠 1 条事件", first or "")
+        self.assertEqual(window.status()["folded"].get("APP_STARTED"), 1)
+        window.confirm_summary()
+        self.assertIsNone(window.peek_summary())
+        self.assertEqual(window.status()["folded"], {})
+
 
 if __name__ == "__main__":
     unittest.main()

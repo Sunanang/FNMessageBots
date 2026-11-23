@@ -241,12 +241,16 @@ class UnifiedNotifier:
         return window
 
     def _configure_startup_quiet(self, window: StartupQuietWindow) -> None:
+        was_enabled = bool(window.enabled)
         window.configure(
             enabled=bool(getattr(self.config, "startup_quiet_enabled", False)),
             seconds=getattr(self.config, "startup_quiet_seconds", 180),
             keep_urgent=bool(getattr(self.config, "startup_quiet_keep_urgent", True)),
             only_after_boot=bool(getattr(self.config, "startup_quiet_only_after_boot", True)),
         )
+        # 热加载关闭静默期：立刻补发已折叠计数，避免永远留在磁盘里
+        if was_enabled and not window.enabled:
+            self.flush_startup_quiet_if_needed(force=True)
 
     @staticmethod
     def _startup_quiet_event_count(event_type: str, event_data: Dict[str, Any]) -> int:
@@ -258,13 +262,15 @@ class UnifiedNotifier:
                 return 1
         return 1
 
-    def flush_startup_quiet_if_needed(self) -> None:
-        """静默期结束后补一条「折叠 N 条」汇总。"""
+    def flush_startup_quiet_if_needed(self, *, force: bool = False) -> None:
+        """静默期结束后补一条「折叠 N 条」汇总；仅推送成功后才清空计数。"""
         window = getattr(self, "_startup_quiet", None)
-        if window is None or not window.enabled:
+        if window is None:
+            return
+        if not force and not window.enabled:
             return
         try:
-            summary = window.take_summary()
+            summary = window.peek_summary(force=force)
         except Exception as e:
             self.logger.warning("启动静默期汇总生成失败: %s", e)
             return
@@ -284,8 +290,13 @@ class UnifiedNotifier:
                 "STARTUP_QUIET_SUMMARY", summary, {"hostname": "", "version": ""},
                 channel_results if isinstance(channel_results, list) else [],
             )
-        else:
-            self.logger.info("启动静默期汇总已发送：%s", summary)
+            return
+        try:
+            window.confirm_summary()
+        except Exception as e:
+            self.logger.warning("启动静默期汇总确认落盘失败: %s", e)
+            return
+        self.logger.info("启动静默期汇总已发送：%s", summary)
 
     def _handle_dnd_config_transition_after_reload(self) -> None:
         """
