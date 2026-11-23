@@ -227,7 +227,7 @@ class SchedulerDBPoller:
     # ── 数据库 ─────────────────────────────────────────────────────────────────
 
     def _connect(self) -> sqlite3.Connection:
-        conn = connect_readonly_with_fallback(self.db_path, timeout=5.0)
+        conn = connect_readonly_with_fallback(self.db_path, timeout=5.0, allow_immutable=False)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -356,37 +356,42 @@ class SchedulerDBPoller:
         lower_bound_ts = max(0.0, last_ts - SCHEDULER_LOOKBACK_SECONDS)
         rows = self._fetch_rows(lower_bound_ts)
 
-        max_finished_at = last_finished_at
-        max_id = last_id
+        confirmed_finished_at = last_finished_at
+        confirmed_id = last_id
 
         for row in rows:
             row_finished_at = str(row.get("finished_at") or "")
             row_id = int(row.get("id") or 0)
             row_ts = _iso_to_timestamp(row_finished_at)
 
-            # 更新最大水位
-            if (row_ts, row_id) > (_iso_to_timestamp(max_finished_at), max_id):
-                max_finished_at = row_finished_at
-                max_id = row_id
-
             # 只处理严格晚于已确认水位的记录，或同时间戳但 id 更大的
             if (row_ts, row_id) <= (last_ts, last_id):
                 continue
 
+            def _advance_confirmed() -> None:
+                nonlocal confirmed_finished_at, confirmed_id
+                if (row_ts, row_id) > (_iso_to_timestamp(confirmed_finished_at), confirmed_id):
+                    confirmed_finished_at = row_finished_at
+                    confirmed_id = row_id
+
             fp = self._fingerprint(row)
             if fp in self._dedup_seen:
+                _advance_confirmed()
                 continue
 
             ev = self._to_event(row)
             if ev is None:
+                _advance_confirmed()
                 continue
 
             et = ev["event_type"]
             if self.monitor_events and et not in self.monitor_events:
+                _advance_confirmed()
                 continue
 
             handler = self.event_handlers.get(et)
             if not handler:
+                _advance_confirmed()
                 continue
 
             try:
@@ -410,15 +415,17 @@ class SchedulerDBPoller:
                 else:
                     handler(ed, entry)
                 self._dedup_seen[fp] = int(time.time())
+                _advance_confirmed()
             except OutboxWriteError:
                 raise
             except Exception as e:
                 self.logger.error("处理任务计划事件失败 %s: %s", et, e, exc_info=True)
+                break
 
         self._prune_dedup()
         self._save_dedup()
-        self._write_cursor(max_finished_at, max_id)
-        return {"last_finished_at": max_finished_at, "last_id": max_id}
+        self._write_cursor(confirmed_finished_at, confirmed_id)
+        return {"last_finished_at": confirmed_finished_at, "last_id": confirmed_id}
 
     def _run_loop(self) -> None:
         self._load_dedup()

@@ -653,7 +653,7 @@ def _patrol_read_hostname_fnos_from_logger_db(cfg: Any) -> Tuple[str, str]:
     conn: Optional[sqlite3.Connection] = None
     rows: List[Any] = []
     try:
-        conn = connect_readonly_with_fallback(path, timeout=3.0)
+        conn = connect_readonly_with_fallback(path, timeout=3.0, allow_immutable=False)
         rows = conn.execute("SELECT parameter FROM log ORDER BY rowid DESC LIMIT 500").fetchall()
     except Exception:
         return "", ""

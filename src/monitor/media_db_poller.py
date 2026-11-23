@@ -202,6 +202,7 @@ class MediaDBPoller:
             self.db_path,
             timeout=10.0,
             table_probe_sql="SELECT 1 FROM item LIMIT 1",
+            allow_immutable=False,
         )
         conn.row_factory = sqlite3.Row
         return conn

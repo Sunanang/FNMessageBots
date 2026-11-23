@@ -170,6 +170,8 @@ class DBLogPoller:
         self.batch_handler: Optional[Callable[[List[Dict[str, Any]]], None]] = None
         # 当 SSH journal 轮询可用时，跳过库内 Sshd*，避免双推
         self.skip_ssh_events = False
+        # 可选：每轮轮询动态刷新 skip_ssh_events（journal 稍后就绪时无需热加载）
+        self.journal_available_checker: Optional[Callable[[], bool]] = None
         # 与 SshJournalPoller 一致：忽略本机回环 / 局域网的 SSH 登录成功 / 断开
         self.ignore_ssh_loopback = False
         self.ignore_ssh_lan = False
@@ -247,7 +249,7 @@ class DBLogPoller:
     def _get_max_log_id(self) -> Optional[int]:
         """获取 log 表当前最大 id；启动时用此值作为游标，只处理此后新写入的记录。"""
         try:
-            with closing(connect_readonly_with_fallback(self.db_path, timeout=5.0)) as conn:
+            with closing(connect_readonly_with_fallback(self.db_path, timeout=5.0, allow_immutable=False)) as conn:
                 row = conn.execute("SELECT COALESCE(MAX(id), 0) AS mx FROM log").fetchone()
                 if row is None:
                     raise RuntimeError("最新日志 ID 查询未返回结果")
@@ -259,7 +261,7 @@ class DBLogPoller:
     def _fetch_new_rows(self, after_id: int) -> List[Dict[str, Any]]:
         """查询 id > after_id 的记录，按 id 升序。"""
         try:
-            with closing(connect_readonly_with_fallback(self.db_path, timeout=5.0)) as conn:
+            with closing(connect_readonly_with_fallback(self.db_path, timeout=5.0, allow_immutable=False)) as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.execute(
                     "SELECT id, serviceId, uid, uname, logtime, loglevel, eventId, parameter, category FROM log WHERE id > ? ORDER BY id ASC",
@@ -271,6 +273,11 @@ class DBLogPoller:
             return []
 
     def _poll_once(self, last_id: int) -> int:
+        if self.journal_available_checker is not None:
+            try:
+                self.skip_ssh_events = bool(self.journal_available_checker())
+            except Exception as e:
+                self.logger.debug("刷新 SSH journal 可用性失败: %s", e)
         rows = self._fetch_new_rows(last_id)
         batch_events: List[Dict[str, Any]] = []
         for row in rows:
@@ -320,21 +327,19 @@ class DBLogPoller:
                 "entry": entry,
                 "handler": handler,
             })
-        batch_delivery_failed = False
-        persistence_failed = False
         if batch_events:
             if self.batch_handler:
                 try:
                     self.batch_handler(batch_events)
                 except OutboxWriteError as e:
                     self.logger.error("批次尚未持久化，保留水位: %s", e)
-                    batch_delivery_failed = True
-                    persistence_failed = True
+                    return last_id
                 except Exception as e:
                     self.logger.error("批量处理事件失败（count=%s）: %s", len(batch_events), e, exc_info=True)
-                    batch_delivery_failed = True
+                    # 未入队成功前不推进游标，也不因次数上限丢弃（与 notification-delivery.md 一致）
+                    return last_id
             else:
-                # 兼容旧逻辑：未注册批处理时按条处理
+                # 兼容旧逻辑：未注册批处理时按条处理；任一条失败则停在原水位，下轮重试
                 for item in batch_events:
                     try:
                         item["handler"](item["event_data"], item["entry"])
@@ -342,18 +347,8 @@ class DBLogPoller:
                         return last_id
                     except Exception as e:
                         self.logger.error("处理事件失败 eventId=%s: %s", item["db_event_id"], e)
+                        return last_id
         if rows:
-            # 汇总投递异常时同批最多重试 BATCH_MAX_ATTEMPTS 次，之后推进游标，避免无限重发
-            if self.batch_handler and batch_events and batch_delivery_failed:
-                self._batch_fail_count += 1
-                if persistence_failed or self._batch_fail_count < self.BATCH_MAX_ATTEMPTS:
-                    return last_id
-                self.logger.warning(
-                    "批量处理连续失败 %s 次，放弃本批（id %s–%s）",
-                    self._batch_fail_count,
-                    rows[0].get("id"),
-                    rows[-1].get("id"),
-                )
             self._batch_fail_count = 0
             self._write_last_id(rows[-1].get("id", last_id))
         return last_id if not rows else rows[-1].get("id", last_id)

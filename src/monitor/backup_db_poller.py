@@ -162,7 +162,7 @@ class BackupDBPoller:
 
     def _connect(self) -> sqlite3.Connection:
         # 仅做轮询读取，使用只读连接避免要求数据库目录可写（WAL/journal 权限）
-        conn = connect_readonly_with_fallback(self.db_path, timeout=5.0)
+        conn = connect_readonly_with_fallback(self.db_path, timeout=5.0, allow_immutable=False)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -301,28 +301,29 @@ class BackupDBPoller:
         last_id = int(cursor.get("last_id") or 0)
         lower_bound = max(0, last_finished_time - BACKUP_LOOKBACK_SECONDS)
         rows = self._fetch_rows_with_lookback(lower_bound)
-        max_key = (last_finished_time, last_id)
+        confirmed = (last_finished_time, last_id)
 
         for row in rows:
             key = self._row_watermark(row)
-            if key > max_key:
-                max_key = key
-
             # 只处理“严格晚于已确认水位”的记录；回看窗口内旧记录仅用于防漏与去重。
             if key <= (last_finished_time, last_id):
                 continue
             fp = self._fingerprint(row)
             if fp in self._dedup_seen:
+                confirmed = key if key > confirmed else confirmed
                 continue
 
             ev = self._to_event(row)
             if not ev:
+                confirmed = key if key > confirmed else confirmed
                 continue
             et = ev["event_type"]
             if self.monitor_events and et not in self.monitor_events:
+                confirmed = key if key > confirmed else confirmed
                 continue
             handler = self.event_handlers.get(et)
             if not handler:
+                confirmed = key if key > confirmed else confirmed
                 continue
             try:
                 rid = int(row.get("id") or 0) or (abs(hash(fp)) % (2**31 - 1))
@@ -345,13 +346,15 @@ class BackupDBPoller:
                 else:
                     handler(ed, entry)
                 self._dedup_seen[fp] = int(time.time())
+                confirmed = key if key > confirmed else confirmed
             except OutboxWriteError:
                 raise
             except Exception as e:
                 self.logger.error("处理备份事件失败 %s: %s", et, e, exc_info=True)
+                break
         self._prune_dedup()
         self._save_dedup()
-        next_cursor = {"last_finished_time": max_key[0], "last_id": max_key[1]}
+        next_cursor = {"last_finished_time": confirmed[0], "last_id": confirmed[1]}
         self._write_cursor(next_cursor["last_finished_time"], next_cursor["last_id"])
         return next_cursor
 

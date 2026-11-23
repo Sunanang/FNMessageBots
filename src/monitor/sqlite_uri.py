@@ -52,14 +52,20 @@ def connect_readonly_with_fallback(
     *,
     table_probe_sql: Optional[str] = None,
     prefer_immutable: bool = False,
+    allow_immutable: bool = True,
 ) -> sqlite3.Connection:
-    """依次尝试只读连接；可选执行表级探测（WAL 库在只读挂载上常需 immutable）。"""
+    """依次尝试只读连接；可选执行表级探测（WAL 库在只读挂载上常需 immutable）。
+
+    轮询活数据时建议 ``allow_immutable=False``：immutable 看不到未 checkpoint 的 WAL 新行，
+    宁可本轮失败重试，也不要静默漏读。
+    """
     last_err: Optional[sqlite3.Error] = None
-    uri_builders = (
-        (sqlite_readonly_immutable_uri, sqlite_readonly_uri)
-        if prefer_immutable
-        else (sqlite_readonly_uri, sqlite_readonly_immutable_uri)
-    )
+    if prefer_immutable and allow_immutable:
+        uri_builders = (sqlite_readonly_immutable_uri, sqlite_readonly_uri)
+    elif allow_immutable:
+        uri_builders = (sqlite_readonly_uri, sqlite_readonly_immutable_uri)
+    else:
+        uri_builders = (sqlite_readonly_uri,)
     for make_uri in uri_builders:
         conn: Optional[sqlite3.Connection] = None
         try:
@@ -77,6 +83,8 @@ def connect_readonly_with_fallback(
                 except Exception:
                     pass
             if table_probe_sql and not _sqlite_err_retriable_with_immutable(e):
+                raise
+            if not allow_immutable:
                 raise
     if last_err:
         raise last_err

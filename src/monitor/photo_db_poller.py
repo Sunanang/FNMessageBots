@@ -199,7 +199,7 @@ class PhotoDBPoller:
 
     def _connect(self) -> sqlite3.Connection:
         # 仅做轮询读取，使用只读连接避免要求数据库目录可写（WAL/journal 权限）
-        conn = connect_readonly_with_fallback(self.db_path, timeout=10.0)
+        conn = connect_readonly_with_fallback(self.db_path, timeout=10.0, allow_immutable=False)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -557,20 +557,22 @@ class PhotoDBPoller:
                 max_s = last_s
                 for row in conn.execute(q, (last_s,)):
                     d = dict(row)
-                    max_s = max(max_s, int(d.get("id") or 0))
+                    sid = int(d.get("id") or 0)
                     oid = d.get("owner")
                     nas = d.get("nas_uid")
                     ev = {
                         "share_name": (d.get("name") or "").strip(),
                         "share_id": (d.get("share_id") or "").strip(),
-                        "share_link_id": int(d.get("id") or 0),
+                        "share_link_id": sid,
                         "owner_nas_uid": _maybe_int(nas),
                         "owner_photo_user_id": _maybe_int(oid),
                         "owner_label": self._owner_label(oid, nas),
                         "valid_to_str": _sec_to_local_str(d.get("valid_to")),
                         "album_id": d.get("album_id"),
                     }
-                    self._emit(PHOTO_SHARE_CREATED, ev, d, d.get("create_time"))
+                    if not self._emit(PHOTO_SHARE_CREATED, ev, d, d.get("create_time")):
+                        break
+                    max_s = max(max_s, sid)
                 state["last_share_link_id"] = max_s
 
             if PHOTO_SHARE_EXPIRED in self.monitor_events:
@@ -607,7 +609,7 @@ class PhotoDBPoller:
                 max_d = last_d
                 for row in conn.execute(q, (last_d,)):
                     d = dict(row)
-                    max_d = max(max_d, int(d.get("id") or 0))
+                    did = int(d.get("id") or 0)
                     name = (d.get("device_name") or d.get("device_uniq_name") or d.get("device_id") or "").strip()
                     uid = d.get("user_id")
                     nas = d.get("nas_uid")
@@ -619,7 +621,9 @@ class PhotoDBPoller:
                         "owner_photo_user_id": _maybe_int(uid),
                         "owner_label": self._owner_label(uid, nas),
                     }
-                    self._emit(PHOTO_DEVICE_REGISTERED, ev, d, d.get("created_at"))
+                    if not self._emit(PHOTO_DEVICE_REGISTERED, ev, d, d.get("created_at")):
+                        break
+                    max_d = max(max_d, did)
                 state["last_device_id"] = max_d
 
             last_f = int(state.get("last_face_task_log_id") or 0)
@@ -651,9 +655,10 @@ class PhotoDBPoller:
     def _run_loop(self) -> None:
         self._load_dedup()
         state = self._load_state()
-        # 每次启动重新建立基线；读取失败时保持未初始化，恢复后也不补历史。
+        # 每次启动重新建立基线（水位）；人脸冷却批次与音乐 pending 一样跨重启保留。
         state["initialized"] = False
-        state["face_pending"] = self._empty_face_pending()
+        if not isinstance(state.get("face_pending"), dict):
+            state["face_pending"] = self._empty_face_pending()
         self.logger.info(
             "PhotoDBPoller 启动 db=%s（人脸识别冷却汇总 %ss）",
             self.db_path or "(未配置)",
@@ -670,7 +675,7 @@ class PhotoDBPoller:
                 self.logger.error("相册轮询异常: %s", e, exc_info=True)
             for _ in range(self.poll_interval):
                 if not self.running:
-                    # 停止前若已冷却完成则补推；未冷却完保留在 state，下次启动对齐水位会清空
+                    # 停止前若已冷却完成则补推；未冷却完保留在 state，下次启动继续累计
                     try:
                         if self.db_path and FACE_RECOGNITION_UPDATED in self.monitor_events:
                             pending = state.get("face_pending") or {}

@@ -296,6 +296,8 @@ class SshJournalPoller:
         self.logger = logging.getLogger(__name__)
         self.cursor_dir.mkdir(parents=True, exist_ok=True)
         self._available: Optional[bool] = None
+        self._available_checked_at = 0.0
+        self._available_ttl_sec = 60.0
         # Stopping + signal15 + Stopped 常在同一秒内连发，合并为一次关闭推送
         self._last_disabled_push_at = 0.0
         self._disabled_coalesce_seconds = 5.0
@@ -338,8 +340,11 @@ class SshJournalPoller:
         self.summary_batch_enqueue = enqueue
 
     def is_available(self, *, force_reprobe: bool = False) -> bool:
-        if force_reprobe or self._available is None:
+        now = time.time()
+        stale = (now - float(self._available_checked_at or 0)) >= float(self._available_ttl_sec)
+        if force_reprobe or self._available is None or stale:
             self._available = self._probe()
+            self._available_checked_at = now
         return bool(self._available)
 
     def _probe(self) -> bool:

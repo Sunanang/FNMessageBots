@@ -260,6 +260,15 @@ class NotificationOutboxTests(unittest.TestCase):
         app.event_processor.process_batch_events.assert_not_called()
         self.assertFalse(app._poll_outbox().poll_items())
 
+    def test_empty_monitor_events_during_hot_reload_does_not_ack_outbox(self):
+        """热加载瞬间 monitor_events 为空时不得误 ack，否则待发会丢。"""
+        app = self.app()
+        app._enqueue_unified_batch_items([self.item()])
+        self.config.monitor_events = []
+        app._flush_unified_batch_pending_only()
+        app.event_processor.process_batch_events.assert_not_called()
+        self.assertEqual(len(app._poll_outbox().poll_items()), 1)
+
     def test_new_events_arriving_during_send_survive_acknowledgement(self):
         app = self.app()
         app._enqueue_unified_batch_items([self.item()])

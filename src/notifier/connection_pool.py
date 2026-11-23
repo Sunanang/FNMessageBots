@@ -3,7 +3,6 @@ HTTP连接池管理
 """
 
 import logging
-import re
 import threading
 import traceback
 from typing import Dict, Any, Optional, Mapping
@@ -13,8 +12,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-_QUERY_RE = re.compile(r"\?[^\s'\")]*")
-_TELEGRAM_TOKEN_RE = re.compile(r"(?i)(/bot)([0-9]+:[A-Za-z0-9_-]+)")
+from utils.secret_redact import redact_json, redact_secrets
 
 @dataclass
 class PoolStats:
@@ -119,18 +117,18 @@ class ConnectionPool:
     
     @staticmethod
     def _safe_url(url: str) -> str:
-        """日志用：去掉查询串（常含 webhook key / access_token / corpsecret）。"""
-        return _TELEGRAM_TOKEN_RE.sub(r"\1***", str(url or "").split("?", 1)[0])
+        """日志用：去掉查询串，并擦除 Telegram / 魔法推送路径中的凭据。"""
+        return redact_secrets(str(url or "").split("?", 1)[0], url)
 
     @staticmethod
     def _safe_error(value: Any, url: str) -> str:
         """Remove credentials from exception and response text before returning or logging it."""
-        message = str(value or "")
-        token_match = _TELEGRAM_TOKEN_RE.search(str(url or ""))
-        if token_match:
-            message = message.replace(token_match.group(2), "***")
-        message = _TELEGRAM_TOKEN_RE.sub(r"\1***", message)
-        return _QUERY_RE.sub("?***", message)
+        return redact_secrets(value, url)
+
+    @classmethod
+    def _safe_preview(cls, value: Any, url: str) -> str:
+        """先脱敏再截断，避免半截 token 漏出。"""
+        return cls._safe_error(value, url)[: cls._BODY_PREVIEW_CHARS]
 
     @classmethod
     def _safe_traceback(cls, exc: BaseException, url: str) -> str:
@@ -142,13 +140,7 @@ class ConnectionPool:
 
     @classmethod
     def _safe_response(cls, value: Any, url: str) -> Any:
-        if isinstance(value, str):
-            return cls._safe_error(value, url)
-        if isinstance(value, dict):
-            return {key: cls._safe_response(item, url) for key, item in value.items()}
-        if isinstance(value, list):
-            return [cls._safe_response(item, url) for item in value]
-        return value
+        return redact_json(value, url)
 
     def post(
         self,
@@ -220,7 +212,7 @@ class ConnectionPool:
             if result is None and response.content:
                 out["response"] = {
                     "status_code": response.status_code,
-                    "text_preview": self._safe_error((response.text or "")[: self._BODY_PREVIEW_CHARS], url),
+                    "text_preview": self._safe_preview(response.text, url),
                 }
             else:
                 out["response"] = self._safe_response(body_obj, url)
@@ -262,8 +254,7 @@ class ConnectionPool:
                 msg = body_dict.get("errmsg") or body_dict.get("message") or ""
                 out["error"] = f"HTTP {code}" + (f": {self._safe_error(msg, url)}" if msg else "")
             else:
-                preview = (body_text or "")[: self._BODY_PREVIEW_CHARS]
-                resp_obj["text_preview"] = self._safe_error(preview, url)
+                resp_obj["text_preview"] = self._safe_preview(body_text, url)
                 out["error"] = f"HTTP {code}"
             out["response"] = resp_obj
             return out
@@ -307,7 +298,7 @@ class ConnectionPool:
                 try:
                     out["response"] = self._safe_response(response.json(), url) if response.content else {}
                 except Exception:
-                    out["response"] = {"status_code": response.status_code, "text_preview": self._safe_error((response.text or "")[: self._BODY_PREVIEW_CHARS], url)}
+                    out["response"] = {"status_code": response.status_code, "text_preview": self._safe_preview(response.text, url)}
                 return out
             self.logger.error(f"GET请求失败: {response.status_code}")
             with self.stats_lock:
@@ -321,7 +312,7 @@ class ConnectionPool:
             if isinstance(body, dict):
                 resp_obj["json"] = self._safe_response(body, url)
             else:
-                resp_obj["text_preview"] = self._safe_error((response.text or "")[: self._BODY_PREVIEW_CHARS], url)
+                resp_obj["text_preview"] = self._safe_preview(response.text, url)
             out["response"] = resp_obj
             out["error"] = f"HTTP {response.status_code}"
             return out
@@ -355,7 +346,7 @@ class ConnectionPool:
                     resp_obj["json"] = self._safe_response(body, url)
                 else:
                     try:
-                        resp_obj["text_preview"] = self._safe_error((e.response.text or "")[: self._BODY_PREVIEW_CHARS], url)
+                        resp_obj["text_preview"] = self._safe_preview(e.response.text, url)
                     except Exception:
                         pass
                 out["response"] = resp_obj

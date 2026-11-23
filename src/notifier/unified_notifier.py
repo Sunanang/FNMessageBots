@@ -193,6 +193,12 @@ class UnifiedNotifier:
     def reload_config(self):
         """按当前 self.config 重新创建多平台通知器（保存配置后热加载用）。"""
         old = self.multi_platform_notifier
+        # 先停旧器再创建新器，避免磁盘合并定时器双跑
+        if old:
+            try:
+                old.close()
+            except Exception as e:
+                self.logger.warning("关闭旧通知器失败: %s", e)
         self.multi_platform_notifier = MultiPlatformNotifier(
             wechat_webhook_url=self.config.wechat_webhook_url,
             dingtalk_webhook_url=self.config.dingtalk_webhook_url,
@@ -216,11 +222,6 @@ class UnifiedNotifier:
             retries=self.config.http_retry_count,
             timeout=self.config.http_timeout,
         )
-        if old:
-            try:
-                old.close()
-            except Exception as e:
-                self.logger.warning("关闭旧通知器失败: %s", e)
         self.logger.info("多平台通知器已热加载配置")
         self._load_last_dnd_summary_end()
         self._handle_dnd_config_transition_after_reload()

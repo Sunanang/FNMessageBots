@@ -38,6 +38,7 @@ from web.api_helpers import build_notifier_from_raw as _build_notifier_from_raw
 from web.api_helpers import parse_success_filter as _parse_success_filter
 from web.app_paths import BASE_DIR
 from web.app_paths import ASSETS_DIR
+from utils.secret_redact import redact_json, redact_secrets
 from web.app_paths import CONFIG_FILE
 from web.app_paths import ICON_FILE
 from web.app_paths import SUPPORT_QR_DIR
@@ -824,17 +825,18 @@ def create_app(on_config_saved=None) -> Flask:
             )
             ok = out.get("success", False) if isinstance(out, dict) else bool(out)
             channel_results = out.get("channel_results") if isinstance(out, dict) else None
-            channel_results = channel_results if isinstance(channel_results, list) else []
+            channel_results = redact_json(channel_results) if isinstance(channel_results, list) else []
             if ok:
                 fail_count = out.get("fail_count", 0) if isinstance(out, dict) else 0
                 failures = [f"{cr.get('channel') or '渠道'}: {cr.get('error') or '发送失败'}"
                             for cr in channel_results if isinstance(cr, dict) and (cr.get("error") or not cr.get("success"))]
                 partial = bool(fail_count or failures)
+                message = ("测试消息部分发送成功，部分目标失败。" + "；".join(failures)
+                           if partial else "测试消息已发送，请检查各渠道是否收到。")
                 return jsonify({
                     "ok": True,
                     "partial": partial,
-                    "message": ("测试消息部分发送成功，部分目标失败。" + "；".join(failures)
-                                if partial else "测试消息已发送，请检查各渠道是否收到。"),
+                    "message": redact_secrets(message),
                     "channel_results": channel_results or [],
                 })
             # 拼出各渠道失败原因，便于排查魔法推送等自建服务
@@ -852,11 +854,11 @@ def create_app(on_config_saved=None) -> Flask:
             detail = "；".join(fail_bits) if fail_bits else "请检查配置"
             return jsonify({
                 "ok": False,
-                "message": f"所有渠道发送失败。{detail}",
+                "message": redact_secrets(f"所有渠道发送失败。{detail}"),
                 "channel_results": channel_results or [],
             }), 500
         except Exception as e:
-            return jsonify({"ok": False, "message": f"测试发送异常：{e}"}), 500
+            return jsonify({"ok": False, "message": redact_secrets(f"测试发送异常：{e}")}), 500
         finally:
             if notifier is not None:
                 try:
