@@ -30,6 +30,13 @@ class WebsiteDownloadTests(unittest.TestCase):
     def test_page_offers_direct_download_for_plain_and_root(self):
         for kind in ("plain", "root"):
             self.assertIn(f'data-dl="{kind}"', self.index, f"缺少 {kind} 下载按钮")
+        # root 版必须在首屏就能直接下载，不能只留在页面下方的安装区
+        install_at = self.index.find('id="install"')
+        self.assertGreater(install_at, 0)
+        root_links = [m.start() for m in re.finditer(r'data-dl="root"', self.index)]
+        self.assertTrue(root_links, "缺少 root 版下载入口")
+        self.assertTrue(any(pos < install_at for pos in root_links),
+                        "首屏（安装区之前）必须有 root 版下载入口")
         hrefs = re.findall(r'href="(downloads/[^"]+\.fpk)"', self.index)
         self.assertTrue(hrefs, "页面里没有本站直连的 fpk 下载链接")
         for href in hrefs:
