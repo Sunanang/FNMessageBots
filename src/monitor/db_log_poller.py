@@ -6,7 +6,9 @@
 
 import json
 import logging
+import os
 import sqlite3
+import tempfile
 import threading
 import time
 from contextlib import closing
@@ -228,24 +230,50 @@ class DBLogPoller:
             return "MEDIA_LOGOUT"
         return project_type
 
-    def _read_last_id(self) -> int:
+    def _db_identity(self) -> Dict[str, Any]:
+        path = Path(self.db_path).resolve()
+        stat = path.stat()
+        return {"path": str(path), "device": stat.st_dev, "inode": stat.st_ino}
+
+    def _read_cursor(self) -> Optional[Dict[str, Any]]:
         try:
-            if self._cursor_file.exists():
-                raw = self._cursor_file.read_text().strip()
-                if raw.isdigit():
-                    return int(raw)
+            if not self._cursor_file.exists():
+                return None
+            raw = self._cursor_file.read_text().strip()
+            if raw.isdigit():
+                return {"last_id": int(raw)}  # legacy cursor, written before database identity existed
+            state = json.loads(raw)
+            if (isinstance(state, dict) and type(state.get("last_id")) is int
+                    and state["last_id"] >= 0 and isinstance(state.get("database"), dict)):
+                return state
         except Exception as e:
             self.logger.warning("读取游标失败: %s", e)
-        return 0
+        self.logger.warning("游标无效，重新对齐当前日志末尾")
+        return None
 
-    def _write_last_id(self, last_id: int) -> None:
+    def _write_last_id(self, last_id: int) -> bool:
+        tmp = None
         try:
-            self._cursor_file.write_text(str(last_id))
+            state = {"last_id": last_id, "database": self._db_identity()}
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.cursor_dir,
+                                             prefix=".db_poller_cursor.", delete=False) as file:
+                tmp = file.name
+                json.dump(state, file)
+                file.flush()
+                os.fsync(file.fileno())
+            os.replace(tmp, self._cursor_file)
+            return True
         except Exception as e:
             self.logger.warning("写入游标失败: %s", e)
+            if tmp:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+            return False
 
     def _get_max_log_id(self) -> Optional[int]:
-        """获取 log 表当前最大 id；启动时用此值作为游标，只处理此后新写入的记录。"""
+        """获取 log 表当前最大 id，供首次启动和异常游标对齐。"""
         try:
             with closing(connect_readonly_with_fallback(self.db_path, timeout=5.0)) as conn:
                 row = conn.execute("SELECT COALESCE(MAX(id), 0) AS mx FROM log").fetchone()
@@ -253,7 +281,7 @@ class DBLogPoller:
                     raise RuntimeError("最新日志 ID 查询未返回结果")
                 return int(row[0])
         except Exception as e:
-            self.logger.warning("获取 log 表最大 id 失败: %s，等待重试对齐，不推送历史", e)
+            self.logger.warning("获取 log 表最大 id 失败: %s，等待重试", e)
             return None
 
     def _fetch_new_rows(self, after_id: int) -> List[Dict[str, Any]]:
@@ -355,19 +383,27 @@ class DBLogPoller:
                     rows[-1].get("id"),
                 )
             self._batch_fail_count = 0
-            self._write_last_id(rows[-1].get("id", last_id))
+            if not self._write_last_id(rows[-1].get("id", last_id)):
+                return last_id
         return last_id if not rows else rows[-1].get("id", last_id)
 
     def _run_loop(self) -> None:
-        # 每次启动先成功对齐当前最大 id；失败时重试，仅推送对齐之后的新增记录。
+        # 首次启动从当前末尾开始；后续从持久化游标补读停止期间的记录。
         last_id: Optional[int] = None
         while self.running:
             try:
                 if last_id is None:
-                    last_id = self._get_max_log_id()
-                    if last_id is not None:
-                        self._write_last_id(last_id)
-                        self.logger.info("数据库轮询已对齐，仅处理 id > %s 的新记录，间隔 %s 秒", last_id, self.poll_interval)
+                    maximum = self._get_max_log_id()
+                    if maximum is not None:
+                        saved = self._read_cursor()
+                        identity = self._db_identity()
+                        if (saved is not None and saved["last_id"] <= maximum
+                                and ("database" not in saved or saved["database"] == identity)):
+                            last_id = saved["last_id"]
+                            self.logger.info("数据库轮询从 id > %s 恢复，间隔 %s 秒", last_id, self.poll_interval)
+                        elif self._write_last_id(maximum):
+                            last_id = maximum
+                            self.logger.info("数据库轮询已对齐当前 id %s，间隔 %s 秒", last_id, self.poll_interval)
                 if last_id is not None:
                     last_id = self._poll_once(last_id)
             except Exception as e:

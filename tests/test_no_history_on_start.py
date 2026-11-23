@@ -32,7 +32,52 @@ class NoHistoryOnStartTests(unittest.TestCase):
         with sqlite3.connect(self.db) as writer:
             writer.execute("INSERT INTO log(id,eventId,parameter) VALUES(?,'LoginSucc','{}')", (row_id,))
 
-    def test_failed_initial_query_retries_before_polling_and_skips_waiting_history(self):
+    def run_one_poll(self):
+        self.poller.running = True
+        with patch("monitor.db_log_poller.time.sleep", side_effect=lambda _: setattr(self.poller, "running", False)):
+            self.poller._run_loop()
+
+    def test_first_run_skips_existing_rows_then_restart_replays_downtime(self):
+        handler = Mock()
+        self.poller.add_handler("LoginSucc", handler)
+        self.run_one_poll()
+        handler.assert_not_called()
+        self.assertEqual(self.poller._read_cursor()["last_id"], 42)
+        self.insert_log(43)
+        self.run_one_poll()
+        self.assertEqual([c.args[0]["_source_cursor"] for c in handler.call_args_list], ["43"])
+
+    def test_replaced_database_and_reset_ids_align_without_replaying_history(self):
+        self.assertTrue(self.poller._write_last_id(42))
+        replacement = self.db.with_suffix(".new")
+        with sqlite3.connect(replacement) as writer:
+            writer.execute("CREATE TABLE log (id INTEGER PRIMARY KEY, serviceId TEXT, uid INTEGER, uname TEXT, logtime INTEGER, loglevel INTEGER, eventId TEXT, parameter TEXT, category TEXT)")
+            writer.execute("INSERT INTO log(id,eventId,parameter) VALUES(100,'LoginSucc','{}')")
+        replacement.replace(self.db)
+        handler = Mock()
+        self.poller.add_handler("LoginSucc", handler)
+        self.run_one_poll()
+        handler.assert_not_called()
+        self.assertEqual(self.poller._read_cursor()["last_id"], 100)
+        with sqlite3.connect(self.db) as writer:
+            writer.execute("DELETE FROM log")
+            writer.execute("INSERT INTO log(id,eventId,parameter) VALUES(1,'LoginSucc','{}')")
+        self.run_one_poll()
+        handler.assert_not_called()
+        self.assertEqual(self.poller._read_cursor()["last_id"], 1)
+
+    def test_corrupt_cursor_realigns_and_failed_write_retains_watermark(self):
+        self.poller._cursor_file.write_text("invalid")
+        handler = Mock()
+        self.poller.add_handler("LoginSucc", handler)
+        self.run_one_poll()
+        handler.assert_not_called()
+        self.assertEqual(self.poller._read_cursor()["last_id"], 42)
+        self.insert_log(43)
+        with patch.object(self.poller, "_write_last_id", return_value=False):
+            self.assertEqual(self.poller._poll_once(42), 42)
+
+    def test_failed_initial_query_retries_then_resumes_saved_cursor(self):
         self.poller._cursor_file.write_text("4")
         handler = Mock()
         self.poller.add_handler("LoginSucc", handler)
@@ -51,13 +96,13 @@ class NoHistoryOnStartTests(unittest.TestCase):
             nonlocal ticks
             ticks += 1
             if ticks == 1:
-                # 对齐失败时不轮询，不覆盖旧游标；等待期间的日志也视作存量。
+                # 查询失败时不轮询，也不覆盖旧游标。
                 handler.assert_not_called()
                 self.assertEqual(self.poller._cursor_file.read_text(), "4")
                 self.insert_log(50)
             elif ticks == 2:
-                handler.assert_not_called()
-                self.assertEqual(self.poller._cursor_file.read_text(), "50")
+                self.assertEqual([c.args[0]["_source_cursor"] for c in handler.call_args_list], ["42", "50"])
+                self.assertEqual(self.poller._read_cursor()["last_id"], 50)
                 self.insert_log(51)
             else:
                 self.poller.running = False
@@ -65,9 +110,8 @@ class NoHistoryOnStartTests(unittest.TestCase):
         with patch("monitor.db_log_poller.connect_readonly_with_fallback", side_effect=connect), \
              patch("monitor.db_log_poller.time.sleep", side_effect=tick):
             self.poller._run_loop()
-        handler.assert_called_once()
-        self.assertEqual(handler.call_args.args[0]["_source_cursor"], "51")
-        self.assertEqual(self.poller._cursor_file.read_text(), "51")
+        self.assertEqual([c.args[0]["_source_cursor"] for c in handler.call_args_list], ["42", "50", "51"])
+        self.assertEqual(self.poller._read_cursor()["last_id"], 51)
 
     def test_empty_database_is_a_valid_zero_baseline(self):
         with sqlite3.connect(self.db) as writer:

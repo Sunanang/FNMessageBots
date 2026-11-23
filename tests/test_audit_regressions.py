@@ -218,4 +218,4 @@ class PollerAuditTests(unittest.TestCase):
             self.assertEqual(poller._poll_once(0), 5)
             self.assertEqual(handler.call_count, 5)
             self.assertEqual(handler.call_args_list[0].args[0]["raw"], "[]")
-            self.assertEqual(poller._cursor_file.read_text(), "5")
+            self.assertEqual(poller._read_cursor()["last_id"], 5)
