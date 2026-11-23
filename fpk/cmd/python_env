@@ -1,0 +1,156 @@
+#!/bin/bash
+### Python 运行时的解析与依赖安装，install_callback / upgrade_callback / main 共用。
+### 约定（2.9.0 起）：
+###   1. 优先用飞牛应用商店的 Python：manifest 里的 install_dep_apps=python312 会把运行时一起装好；
+###   2. 依赖优先用安装包自带的 wheels 离线安装（不联网，也就不会再出现装到一半失败）；
+###   3. 离线装不动时才退回联网 pip，行为与旧版本一致。
+
+# 商店 Python 的安装根目录（可用环境变量覆盖，便于本地回归）
+FNMB_STORE_PYTHON_PREFIX="${FNMB_STORE_PYTHON_PREFIX:-/var/apps/python312/target}"
+
+# 商店 python3 的绝对路径；装不上则返回 1
+fnmb_store_python() {
+    local candidate
+    for candidate in \
+        "${FNMB_STORE_PYTHON_PREFIX}/bin/python3" \
+        "${FNMB_STORE_PYTHON_PREFIX}/bin/python3.12" \
+        "/vol1/@appcenter/python312/bin/python3"
+    do
+        if [ -n "${candidate}" ] && [ -x "${candidate}" ]; then
+            printf '%s' "${candidate}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# 优先使用的 python3：商店 Python → 系统 python3
+fnmb_python_cmd() {
+    local candidate
+    if candidate="$(fnmb_store_python)"; then
+        printf '%s' "${candidate}"
+        return 0
+    fi
+    candidate="$(command -v python3 2>/dev/null || true)"
+    [ -n "${candidate}" ] || return 1
+    printf '%s' "${candidate}"
+    return 0
+}
+
+# 把所选 Python 的 bin 目录放到 PATH 最前，脚本里裸写的 python3 也会命中同一个解释器
+fnmb_prepend_python_path() {
+    local python dir
+    python="$(fnmb_python_cmd)" || return 0
+    dir="$(cd -P "$(dirname "${python}")" 2>/dev/null && pwd)" || return 0
+    [ -n "${dir}" ] || return 0
+    case ":${PATH:-}:" in
+        *":${dir}:"*) ;;
+        *) PATH="${dir}:${PATH:-}"; export PATH ;;
+    esac
+    return 0
+}
+
+# 安装包自带的离线 wheels 目录（由 scripts/build-fpk.sh 打进 cmd/fnmessagebots/wheels）
+fnmb_wheels_dir() {
+    local app_code_dir="${1:-}"
+    [ -n "${app_code_dir}" ] || return 1
+    [ -d "${app_code_dir}/wheels" ] || return 1
+    printf '%s' "${app_code_dir}/wheels"
+}
+
+# uv：商店 Python 自带，离线装依赖比 pip 快；没有就返回 1
+fnmb_uv_cmd() {
+    local python uv
+    if python="$(fnmb_store_python)"; then
+        uv="$(dirname "${python}")/uv"
+        if [ -x "${uv}" ]; then
+            printf '%s' "${uv}"
+            return 0
+        fi
+    fi
+    uv="$(command -v uv 2>/dev/null || true)"
+    [ -n "${uv}" ] || return 1
+    printf '%s' "${uv}"
+    return 0
+}
+
+# 已安装的 venv（2.8.0 及更早版本的装法）的 site-packages，运行时用于避免被系统 dist-packages 抢先命中
+fnmb_venv_site_packages() {
+    local venv="${1:-}" dir
+    [ -n "${venv}" ] || return 1
+    for dir in "${venv}"/lib/python*/site-packages; do
+        if [ -d "${dir}" ]; then
+            printf '%s' "${dir}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# 安装依赖
+#   用法：fnmb_install_requirements <python> <requirements 文件> [目标目录]
+#   目标目录为空：装进该 python 自己的环境（venv）；
+#   目标目录非空：用 --target 装到该目录，运行时靠 PYTHONPATH 引入。
+#   顺序：包内 wheels + uv → 包内 wheels + pip → 联网 pip。成功返回 0，并写入 FNMB_INSTALL_SOURCE。
+fnmb_install_requirements() {
+    local python="${1:-}" req="${2:-}" target="${3:-}"
+    local wheels="" uv="" log=""
+    [ -n "${python}" ] || return 1
+    [ -f "${req}" ] || return 1
+    wheels="$(fnmb_wheels_dir "${FNMB_APP_CODE_DIR:-}")" || wheels=""
+    uv="$(fnmb_uv_cmd)" || uv=""
+    log="$(mktemp 2>/dev/null || printf '/tmp/fnmb-pip.log')"
+
+    FNMB_INSTALL_SOURCE=""
+
+    # 1) 离线：uv + 包内 wheels
+    if [ -n "${uv}" ] && [ -n "${wheels}" ]; then
+        if [ -n "${target}" ]; then
+            if "${uv}" pip install --python "${python}" --target "${target}" \
+                --no-index --find-links "${wheels}" -r "${req}" >"${log}" 2>&1; then
+                rm -f "${log}"
+                FNMB_INSTALL_SOURCE="wheels+uv"
+                return 0
+            fi
+        elif "${uv}" pip install --python "${python}" \
+            --no-index --find-links "${wheels}" -r "${req}" >"${log}" 2>&1; then
+            rm -f "${log}"
+            FNMB_INSTALL_SOURCE="wheels+uv"
+            return 0
+        fi
+    fi
+
+    # 2) 离线：pip + 包内 wheels（商店 Python 自带的 pip 版本偏旧时可能不适用，失败就继续往下走）
+    if [ -n "${wheels}" ]; then
+        if [ -n "${target}" ]; then
+            if "${python}" -m pip install --no-index --find-links "${wheels}" \
+                -r "${req}" --target "${target}" >>"${log}" 2>&1; then
+                rm -f "${log}"
+                FNMB_INSTALL_SOURCE="wheels+pip"
+                return 0
+            fi
+        elif "${python}" -m pip install --no-index --find-links "${wheels}" \
+            -r "${req}" >>"${log}" 2>&1; then
+            rm -f "${log}"
+            FNMB_INSTALL_SOURCE="wheels+pip"
+            return 0
+        fi
+    fi
+
+    # 3) 兜底：联网 pip（与旧版本一致）
+    if [ -n "${target}" ]; then
+        if "${python}" -m pip install -r "${req}" --target "${target}" >>"${log}" 2>&1; then
+            rm -f "${log}"
+            FNMB_INSTALL_SOURCE="pip-online"
+            return 0
+        fi
+    elif "${python}" -m pip install -r "${req}" >>"${log}" 2>&1; then
+        rm -f "${log}"
+        FNMB_INSTALL_SOURCE="pip-online"
+        return 0
+    fi
+
+    # 全部失败：把最后一轮输出留给调用方写进用户可见的错误信息
+    FNMB_INSTALL_ERROR_LOG="${log}"
+    return 1
+}

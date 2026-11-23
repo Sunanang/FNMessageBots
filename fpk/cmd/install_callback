@@ -15,16 +15,22 @@ fail_user_visible() {
 # 安装失败时统一提示：Docker 版安装说明（飞牛社区）
 _INSTALL_FAIL_DOCKER_HINT="请前往飞牛社区按教程安装 Docker 版本FnMessageBot：https://club.fnnas.com/forum.php?mod=viewthread&tid=57252"
 
-if ! command -v python3 >/dev/null 2>&1; then
-    fail_user_visible "安装失败：未找到 python3。${_INSTALL_FAIL_DOCKER_HINT}"
+# Python 运行时：优先用飞牛应用商店的 python312（manifest 里 install_dep_apps 已声明），
+# 应用商店没装成功时退回系统 python3，保证老环境也能装。
+source "$(dirname "${BASH_SOURCE[0]}")/python_env"
+fnmb_prepend_python_path
+
+FNMB_PYTHON="$(fnmb_python_cmd || true)"
+if [ -z "${FNMB_PYTHON}" ]; then
+    fail_user_visible "安装失败：找不到可用的 Python 运行时（应用商店的 Python 与系统 python3 都不可用）。${_INSTALL_FAIL_DOCKER_HINT}"
 fi
 
-PYVER="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' || true)"
+PYVER="$("${FNMB_PYTHON}" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' || true)"
 if [ -z "${PYVER}" ]; then
     fail_user_visible "安装失败：无法获取 Python 版本。${_INSTALL_FAIL_DOCKER_HINT}"
 fi
 
-REQ_PY_OK="$(python3 -c 'import sys; print(int(sys.version_info >= (3,9)))' || true)"
+REQ_PY_OK="$("${FNMB_PYTHON}" -c 'import sys; print(int(sys.version_info >= (3,9)))' || true)"
 if [ "${REQ_PY_OK}" != "1" ]; then
     fail_user_visible "安装失败：需要 Python >= 3.9，当前为 ${PYVER}。${_INSTALL_FAIL_DOCKER_HINT}"
 fi
@@ -121,7 +127,7 @@ if [ "${FNMB_FRESH_CONFIG}" = "1" ] && [ -n "${wizard_web_password:-}" ]; then
     FNMB_PW="${wizard_web_password}" \
     FNMB_PW2="${wizard_web_password_confirm:-}" \
     FNMB_CFG="${TRIM_PKGVAR}/config/config.json" \
-    python3 - <<'PY'
+    "${FNMB_PYTHON}" - <<'PY'
 import hashlib
 import json
 import os
@@ -158,79 +164,37 @@ PY
 fi
 chmod 600 "${TRIM_PKGVAR}/config/config.json" 2>/dev/null || true
 
-# 创建 venv 并安装依赖。NAS 上部分卷不支持 venv 默认的符号链接，优先 --copies；仍失败则 pip install --target
-_append_venv_log() {
-    local f="$1"
-    if [ -n "${TRIM_TEMP_LOGFILE:-}" ] && [ -f "${f}" ]; then
-        {
-            printf "\n--- venv 命令输出（节选）---\n"
-            head -80 "${f}"
-        } >> "${TRIM_TEMP_LOGFILE}"
-    fi
-    rm -f "${f}"
-}
-
-_try_create_venv() {
-    local err
-    err="$(mktemp)"
-    rm -rf "${VENV_DIR}" 2>/dev/null || true
-    # --copies：避免 FAT/exFAT 等不支持 symlink 导致失败
-    if python3 -m venv --copies "${VENV_DIR}" 2>"${err}"; then
-        rm -f "${err}"
-        return 0
-    fi
-    rm -rf "${VENV_DIR}" 2>/dev/null || true
-    if python3 -m venv "${VENV_DIR}" 2>"${err}"; then
-        rm -f "${err}"
-        return 0
-    fi
-    _append_venv_log "${err}"
-    return 1
-}
-
-_install_with_venv() {
-    rm -f "${TRIM_PKGVAR}/.use_python_target" 2>/dev/null || true
-    if ! _try_create_venv; then
-        return 1
-    fi
-    if ! "${VENV_DIR}/bin/python" -m pip --version >/dev/null 2>&1; then
-        "${VENV_DIR}/bin/python" -m ensurepip --upgrade >/dev/null 2>&1 || true
-    fi
-    if ! "${VENV_DIR}/bin/python" -m pip --version >/dev/null 2>&1; then
-        fail_user_visible "安装失败：虚拟环境已创建但 pip 不可用（${VENV_DIR}）。${_INSTALL_FAIL_DOCKER_HINT}"
-    fi
-    "${VENV_DIR}/bin/python" -m pip install -U pip >/dev/null 2>&1 || true
-    if ! "${VENV_DIR}/bin/python" -m pip install -r "${REQ_FILE}"; then
-        fail_user_visible "安装失败：Python 依赖安装失败（venv）。${_INSTALL_FAIL_DOCKER_HINT}"
-    fi
-    return 0
-}
-
-_install_with_target() {
-    rm -rf "${PY_TARGET}" 2>/dev/null || true
-    mkdir -p "${PY_TARGET}"
-    : > "${TRIM_PKGVAR}/.use_python_target"
-    rm -rf "${VENV_DIR}" 2>/dev/null || true
-    if ! python3 -m pip install -r "${REQ_FILE}" -t "${PY_TARGET}"; then
-        fail_user_visible "安装失败：无法使用虚拟环境，且 pip 依赖安装也失败（${PY_TARGET}）。${_INSTALL_FAIL_DOCKER_HINT}"
-    fi
-}
-
-VENV_DIR="${TRIM_PKGVAR}/venv"
+# 依赖安装（2.9.0 起）：统一装到 ${TRIM_PKGVAR}/python_modules（--target 模式），
+# 不再创建 venv —— 飞牛的部分存储卷不支持 venv 的符号链接，离线 wheels 也省掉每次安装重新下载。
+# 顺序由 fnmb_install_requirements 决定：包内 wheels + uv → 包内 wheels + pip → 联网 pip。
+FNMB_APP_CODE_DIR="${APP_CODE_DIR}"
+export FNMB_APP_CODE_DIR
 PY_TARGET="${TRIM_PKGVAR}/python_modules"
+VENV_DIR="${TRIM_PKGVAR}/venv"
 
-if [ -x "${VENV_DIR}/bin/python" ] && [ ! -f "${TRIM_PKGVAR}/.use_python_target" ]; then
-    "${VENV_DIR}/bin/python" -m pip install -U pip >/dev/null 2>&1 || true
-    if ! "${VENV_DIR}/bin/python" -m pip install -r "${REQ_FILE}"; then
-        fail_user_visible "安装失败：更新 Python 依赖失败（已有 venv）。${_INSTALL_FAIL_DOCKER_HINT}"
+# 先装到临时目录，成功后再替换：装失败时上一份能跑的依赖原样留着，不会把应用装成半残
+PY_STAGE="${PY_TARGET}.new"
+rm -rf "${PY_STAGE}" 2>/dev/null || true
+mkdir -p "${PY_STAGE}" 2>/dev/null || fail_user_visible "安装失败：无法创建依赖目录（${PY_STAGE}）。${_INSTALL_FAIL_DOCKER_HINT}"
+
+if ! fnmb_install_requirements "${FNMB_PYTHON}" "${REQ_FILE}" "${PY_STAGE}"; then
+    if [ -n "${FNMB_INSTALL_ERROR_LOG:-}" ] && [ -f "${FNMB_INSTALL_ERROR_LOG}" ]; then
+        printf "\n--- 依赖安装最后一段输出（节选）---\n" >> "${TRIM_TEMP_LOGFILE:-/dev/null}"
+        tail -40 "${FNMB_INSTALL_ERROR_LOG}" >> "${TRIM_TEMP_LOGFILE:-/dev/null}" 2>/dev/null || true
+        rm -f "${FNMB_INSTALL_ERROR_LOG}"
     fi
-elif [ -f "${TRIM_PKGVAR}/.use_python_target" ] && [ -d "${PY_TARGET}" ]; then
-    if ! python3 -m pip install -r "${REQ_FILE}" -t "${PY_TARGET}"; then
-        fail_user_visible "安装失败：更新 Python 依赖失败（target 模式）。${_INSTALL_FAIL_DOCKER_HINT}"
-    fi
-elif ! _install_with_venv; then
-    _install_with_target
+    fail_user_visible "安装失败：Python 依赖安装失败（离线依赖包与联网源都没装上）。${_INSTALL_FAIL_DOCKER_HINT}"
 fi
+
+rm -rf "${PY_TARGET}" 2>/dev/null || true
+mv "${PY_STAGE}" "${PY_TARGET}" || fail_user_visible "安装失败：无法启用依赖目录（${PY_TARGET}）。${_INSTALL_FAIL_DOCKER_HINT}"
+
+# 记录本次使用的模式与解释器：main 直接照这两个文件启动，不再重新猜
+: > "${TRIM_PKGVAR}/.use_python_target"
+printf '%s\n' "${FNMB_PYTHON}" > "${TRIM_PKGVAR}/.fnmb_python"
+chmod 600 "${TRIM_PKGVAR}/.fnmb_python" 2>/dev/null || true
+# 旧版本留下的 venv 用完即弃，避免同一份依赖存两遍
+rm -rf "${VENV_DIR}" 2>/dev/null || true
 
 prepare_app_data_permissions
 

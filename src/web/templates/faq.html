@@ -197,7 +197,7 @@
 <strong>Docker：</strong>安装前在 Compose 同目录的 <code>.env</code> 中填写 <code>UI_PORT=19080</code>（示例）；不填默认 18080。访问 <code>http://NAS地址:所选端口</code>，修改端口后需重建容器。</p>
             <p><strong>旧 root 版升级普通版：</strong>若提示应用数据属主不正确，先停止应用，按安装错误中给出的命令修复后再升级。默认路径可执行：</p>
             <pre class="faq-pre">sudo chown -hR -P -- FnMessageBot:FnMessageBot "$(readlink -f /var/apps/FnMessageBot/var)"</pre>
-            <p>安装提示 Python / pip 下载失败时，检查 NAS 网络和下载源后重试；仍失败可使用 Docker 版。</p>
+            <p><strong>2.9.0 起安装包自带运行依赖</strong>，安装时会用飞牛应用商店的 Python 直接装好，不需要联网下载；只有离线依赖不适用时才会联网重试。若仍提示依赖安装失败，先在应用中心确认「Python 3.12」已安装并可启动，再重试安装；还可以改用 Docker 版。</p>
           </article>
 
           <article class="faq-item">

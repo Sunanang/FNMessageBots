@@ -38,6 +38,7 @@ class FpkBuildTests(unittest.TestCase):
             "fpk/cmd/fnmessagebots/assets/icons/app-icon.png": "obsolete icon",
             "fpk/cmd/fnmessagebots/src/local-debug.py": "preserve local work",
             "fpk/app/ui/config": '{"gatewayPrefix":"/app/FnMessageBot"}',
+            "vendor/wheels/demo-1.0-py3-none-any.whl": "wheel-bytes",
         }
         for name, text in files.items():
             target = self.repo / name
@@ -87,6 +88,16 @@ with tarfile.open('FnMessageBot.fpk', mode='w:gz') as archive:
         self.assertFalse(Path(self.capture.read_text()).parent.exists())
         with tarfile.open(package) as archive:
             self.assertNotIn("cmd/fnmessagebots/src/local-debug.py", archive.getnames())
+
+    def test_bundled_vendor_wheels_are_packaged_for_offline_install(self):
+        result = self.build()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        package = self.repo / "dist/FnMessageBot-2.6.0.fpk"
+        with tarfile.open(package) as archive:
+            names = archive.getnames()
+        self.assertIn("cmd/fnmessagebots/wheels/demo-1.0-py3-none-any.whl", names)
+        self.assertFalse((self.repo / "fpk/cmd/fnmessagebots/wheels").exists(),
+                         "离线轮子不应被复制进源码目录")
 
     def test_fnpack_failure_cleans_staging_and_keeps_local_source(self):
         result = self.build(FAIL_FNPACK="1")

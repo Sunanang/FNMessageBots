@@ -48,12 +48,26 @@ resolve_app_code_dir() {
 }
 
 
+source "$(dirname "${BASH_SOURCE[0]}")/python_env"
+fnmb_prepend_python_path
+
 fail_user_visible() {
     local msg="$1"
     if [ -n "${TRIM_TEMP_LOGFILE:-}" ]; then
         printf "%s\n" "${msg}" > "${TRIM_TEMP_LOGFILE}"
     fi
     exit 1
+}
+
+# 运行期解释器：安装时记下的那个 → 应用商店的 python312 → 系统 python3
+resolve_runtime_python() {
+    local recorded
+    recorded="$(tr -d '[:space:]' < "${TRIM_PKGVAR}/.fnmb_python" 2>/dev/null || true)"
+    if [ -n "${recorded}" ] && [ -x "${recorded}" ]; then
+        printf '%s' "${recorded}"
+        return 0
+    fi
+    fnmb_python_cmd
 }
 
 log_msg() {
@@ -72,14 +86,19 @@ start_process() {
     ui_port="$(read_fnmb_ui_port)" || return 1
     app_code_dir="$(resolve_app_code_dir)" || fail_user_visible "启动失败：未找到应用代码，请重新安装。"
     app_main="${app_code_dir}/src/main.py"
-    if [ -x "${TRIM_PKGVAR}/venv/bin/python" ] && [ ! -f "${TRIM_PKGVAR}/.use_python_target" ]; then
+    # --target 模式（2.9.0 起的装法）优先；旧版本留下的 venv 继续兼容，避免老安装升级失败后起不来。
+    local venv_site
+    if [ -f "${TRIM_PKGVAR}/.use_python_target" ] && [ -d "${TRIM_PKGVAR}/python_modules" ]; then
+        py="$(resolve_runtime_python)" || fail_user_visible "启动失败：找不到可用的 Python 运行时，请重新安装应用。"
+        pypath="${app_code_dir}:${TRIM_PKGVAR}/python_modules"
+    elif [ -x "${TRIM_PKGVAR}/venv/bin/python" ]; then
         py="${TRIM_PKGVAR}/venv/bin/python"
         pypath="${app_code_dir}"
-    elif [ -f "${TRIM_PKGVAR}/.use_python_target" ] && [ -d "${TRIM_PKGVAR}/python_modules" ]; then
-        py="python3"
-        pypath="${app_code_dir}:${TRIM_PKGVAR}/python_modules"
+        # 商店 Python 的系统 dist-packages 在 sys.path 里排在 venv 之前，显式前置，免得装好的依赖被顶掉
+        venv_site="$(fnmb_venv_site_packages "${TRIM_PKGVAR}/venv" || true)"
+        [ -z "${venv_site}" ] || pypath="${venv_site}:${pypath}"
     else
-        fail_user_visible "启动失败：未安装依赖（无 venv 且无 python_modules），请重新安装应用。"
+        fail_user_visible "启动失败：未安装依赖（既没有 python_modules，也没有旧版 venv），请重新安装应用。"
     fi
     # 在子进程中直接 exec，不拼接 shell 命令；记录的 PID 就是 Python PID。
     (

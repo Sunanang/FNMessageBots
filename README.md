@@ -202,10 +202,28 @@ PYTHONPATH=. LOGGER_DB_PATH=./logger_data.db3 WECHAT_WEBHOOK_URL=xxx python3 src
 ./scripts/build-fpk.sh root       # 单独构建 root 版
 ./scripts/build-fpk.sh all        # 同时构建普通用户版和 root 版（发布工作流使用）
 # 产物: dist/FnMessageBot-<version>.fpk、FnMessageBot-<version>-root.fpk 及各自 .sha256
-python3 scripts/verify-fpk.py dist/FnMessageBot-2.8.0.fpk dist/FnMessageBot-2.8.0-root.fpk
+python3 scripts/verify-fpk.py dist/FnMessageBot-2.9.0.fpk dist/FnMessageBot-2.9.0-root.fpk
 ```
 
 构建在独立临时目录进行，使用顶层 `src/`、`requirements.txt` 和 `assets/`，保留 `fpk/` 中的安装向导、权限与网关配置，不修改或删除工作区中的临时源码。
+
+安装包会把 `vendor/wheels/` 里的离线依赖轮子一起打进 `cmd/fnmessagebots/wheels/`。轮子按 `requirements.txt` 重新生成：
+
+```bash
+./scripts/update-fpk-wheels.sh   # 重新下载 linux x86_64 + aarch64 的 cp312 轮子到 vendor/wheels/
+```
+
+### FPK 的 Python 运行时
+
+`fpk/manifest` 用 `install_dep_apps=python312` 声明依赖飞牛应用商店的 Python，安装应用时由应用中心一并装好；`cmd/python_env` 在安装、升级、启动三处统一解析运行时，顺序是**应用商店 python312 → 系统 python3**。
+
+依赖安装顺序（`fnmb_install_requirements`）：
+
+1. 包内 `wheels/` + 商店 Python 自带的 `uv`（离线，最快）；
+2. 包内 `wheels/` + `pip --no-index`（离线兜底）；
+3. 联网 `pip install -r requirements.txt`（与旧版本一致）。
+
+依赖装在 `${TRIM_PKGVAR}/python_modules`（`--target` 模式），不再创建 venv：飞牛部分存储卷不支持 venv 的符号链接，这一层省掉后安装成功率高得多。安装先写 `python_modules.new`，成功后才替换，装失败时上一份能跑的依赖原样留着。2.9.0 之前留下的 `venv/` 会在安装或升级时被清理，运行脚本仍保留读 venv 的兼容分支。
 
 默认包以应用账号 `FnMessageBot` 运行；`-root.fpk` 的整个应用以 root 运行，应用中心名称附加“（root）”。两版共用 `FnMessageBot` 应用标识、版本和持久化目录，作为覆盖切换的两个包，不能并排安装。切回普通用户版时，root 创建的数据可能需要按安装提示将属主修复为 `FnMessageBot` 后再安装。
 
@@ -245,13 +263,15 @@ gh api --method PUT repos/Sunanang/FNMessageBots/rulesets/18157912 \
 | amd64 Docker 镜像 | `sunanang/fn-message-bots:latest-amd64` |
 | arm64 Docker 镜像 | `sunanang/fn-message-bots:latest-arm64` |
 | 自动选择架构的 Docker 镜像 | `sunanang/fn-message-bots:latest`（同时包含 amd64、arm64） |
-| FPK 普通用户版 | `FnMessageBot-{version}.fpk`，GitHub Release 标签 `v{version}`（例如 `v2.8.0`） |
+| FPK 普通用户版 | `FnMessageBot-{version}.fpk`，GitHub Release 标签 `v{version}`（例如 `v2.9.0`） |
 | FPK root 版 | 同标签下的 `FnMessageBot-{version}-root.fpk` |
 | FPK 校验文件 | 两个安装包各自对应的 `.fpk.sha256` |
 
-FPK 按 `fpk/manifest` 的 `version` 发布到标签 `v{version}`（例如 `v2.8.0`），同时上传普通用户版、root 版及各自校验和；任一包缺失或校验失败都不会执行 FPK 发布。同一版本再次合入 `main` 时覆盖该版本 Release。Docker 镜像仍使用浮动标签 `latest` / `latest-amd64` / `latest-arm64`，与 FPK 的版本标签是两套命名。包内版本以 `fpk/manifest` 为准，正式升级时需同步维护 `pyproject.toml` 与 manifest 版本。两个 FPK 也会保存为同一个 Actions Artifact。仓库里旧的固定标签 `latest` Release 不会被这次发布自动删除。
+FPK 按 `fpk/manifest` 的 `version` 发布到标签 `v{version}`（例如 `v2.9.0`），同时上传普通用户版、root 版及各自校验和；任一包缺失或校验失败都不会执行 FPK 发布。同一版本再次合入 `main` 时覆盖该版本 Release。Docker 镜像仍使用浮动标签 `latest` / `latest-amd64` / `latest-arm64`，与 FPK 的版本标签是两套命名。包内版本以 `fpk/manifest` 为准，正式升级时需同步维护 `pyproject.toml` 与 manifest 版本。两个 FPK 也会保存为同一个 Actions Artifact。仓库里旧的固定标签 `latest` Release 不会被这次发布自动删除。
 
 仓库的 **Settings → Secrets and variables → Actions** 需配置 `DOCKERHUB_USERNAME` 和 `DOCKERHUB_TOKEN`，与原有手动合并工作流使用的名称一致。Token 使用可推送 `sunanang/fn-message-bots` 的 Docker Hub Personal Access Token；FPK 发布使用工作流自带的 `GITHUB_TOKEN`，无需 NAS 凭据。发布前会核对镜像的提交与平台，再用 digest 合并，防止不同提交混入 `latest`；旧提交重跑时若 `main` 已前进，会保留构建产物并跳过覆盖最新构建。
+
+发版完成后 [Publish Docker and FPK](https://github.com/Sunanang/FNMessageBots/actions/workflows/publish.yml) 会自动执行 `scripts/sync-website-downloads.sh`，把 **普通版与 root 版两个安装包** 连同 `.sha256` 搬进 `website/downloads/`，重建 `version.json`，并把 `website/index.html` 里的静态兜底（版本号、日期、体积、校验值、下载链接）一起改好，然后对 `dev` 提一个 PR；合并后 EdgeOne 构建上线，官网 https://www.fnmb.lndo.top/ 的下载区即可直接下载这两个包。
 
 运行测试：`python -m pytest tests`
 

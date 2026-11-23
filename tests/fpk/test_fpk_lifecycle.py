@@ -23,7 +23,15 @@ class FpkLifecycleTests(unittest.TestCase):
         self.base = Path(self.temp.name)
         self.data = self.base / "FnMessageBot"
         self.data.mkdir()
-        self.env = {**os.environ, "TRIM_PKGVAR": str(self.data), "TRIM_USERNAME": getpass.getuser(), "TRIM_APPNAME": "FnMessageBot", "TRIM_APPDEST": str(self.base / "install")}
+        # 商店 Python 的替身：真的解释器照常跑，只有 pip 安装直接返回成功（测试不联网）
+        self.stub_prefix = self.base / "store-python"
+        (self.stub_prefix / "bin").mkdir(parents=True)
+        stub = self.stub_prefix / "bin/python3"
+        stub.write_text(
+            '#!/bin/sh\nif [ "$1" = "-m" ] && [ "$2" = "pip" ]; then\n    exit 0\nfi\nexec "'
+            + sys.executable + '" "$@"\n')
+        stub.chmod(0o755)
+        self.env = {**os.environ, "TRIM_PKGVAR": str(self.data), "TRIM_USERNAME": getpass.getuser(), "TRIM_APPNAME": "FnMessageBot", "TRIM_APPDEST": str(self.base / "install"), "FNMB_STORE_PYTHON_PREFIX": str(self.stub_prefix)}
 
     def test_recorded_pid_is_python_and_stop_removes_pid_file(self):
         # NAS 存储路径可能带空格或 $；这些字符必须作为路径本身传给 Python。
@@ -38,6 +46,7 @@ class FpkLifecycleTests(unittest.TestCase):
         main = install / "cmd/main"
         shutil.copy2(fpk / "cmd/main", main)
         shutil.copy2(fpk / "cmd/ui_port", main.parent / "ui_port")
+        shutil.copy2(fpk / "cmd/python_env", main.parent / "python_env")
         (self.data / "config").mkdir()
         (self.data / "config/ui_port").write_text("19080\n")
         (self.data / "venv/bin").mkdir(parents=True)
@@ -141,13 +150,9 @@ class FpkLifecycleTests(unittest.TestCase):
         (code / "src/main.py").write_text("")
         (code / "requirements.txt").write_text("")
         (code / "config/config.json").write_text("{}")
-        for name in ("install_callback", "upgrade_callback", "data_permissions", "ui_port"):
+        for name in ("install_callback", "upgrade_callback", "data_permissions", "ui_port", "python_env"):
             shutil.copy2(fpk / "cmd" / name, install / "cmd" / name)
-        # 仅跳过 pip 网络操作，其余完整运行真实安装、升级回调。
-        (self.data / "venv/bin").mkdir(parents=True)
-        python = self.data / "venv/bin/python"
-        python.write_text("#!/bin/sh\nexit 0\n")
-        python.chmod(0o755)
+        # 依赖安装走商店 Python 替身（pip 直接成功），其余完整运行真实安装、升级回调。
         result = subprocess.run(["bash", str(install / "cmd/install_callback")], env={
             **self.env, "wizard_ui_port": "19080", "wizard_web_password": "first-password-123",
             "wizard_web_password_confirm": "first-password-123",
@@ -182,7 +187,7 @@ class FpkLifecycleTests(unittest.TestCase):
         (code / "src/main.py").write_text("")
         (code / "requirements.txt").write_text("")
         (code / "config/config.json").write_text('{"monitor_events":["LoginFail"]}')
-        for name in ("install_callback", "upgrade_callback", "data_permissions", "ui_port"):
+        for name in ("install_callback", "upgrade_callback", "data_permissions", "ui_port", "python_env"):
             shutil.copy2(fpk / "cmd" / name, install / "cmd" / name)
         (self.data / "config").mkdir()
         original = {"monitor_events": ["LoginSucc"], "wechat_webhook_url": "https://example.invalid/keep",
@@ -200,11 +205,12 @@ class FpkLifecycleTests(unittest.TestCase):
         log = self.data / "data/logs/old.log"
         log.parent.mkdir()
         log.write_text("keep log\n")
-        before = {p.relative_to(self.data): p.read_bytes() for p in self.data.rglob("*") if p.is_file()}
+        # 2.9.0 起依赖统一放 python_modules，旧版 venv 会在安装/升级时被主动清掉，不计入「必须原样保留」
         (self.data / "venv/bin").mkdir(parents=True)
-        python = self.data / "venv/bin/python"
-        python.write_text("#!/bin/sh\nexit 0\n")
-        python.chmod(0o755)
+        (self.data / "venv/bin/python").write_text("#!/bin/sh\nexit 0\n")
+        (self.data / "venv/bin/python").chmod(0o755)
+        before = {p.relative_to(self.data): p.read_bytes() for p in self.data.rglob("*")
+                  if p.is_file() and "venv" not in p.parts}
         for callback in ("install_callback", "upgrade_callback"):
             with self.subTest(callback=callback):
                 result = subprocess.run(["bash", str(install / "cmd" / callback)], env={
@@ -214,6 +220,7 @@ class FpkLifecycleTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 for path, contents in before.items():
                     self.assertEqual((self.data / path).read_bytes(), contents, str(path))
+                self.assertFalse((self.data / "venv").exists(), "旧版 venv 应被清理")
 
 
 if __name__ == "__main__":
