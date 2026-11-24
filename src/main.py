@@ -980,17 +980,19 @@ class Application:
             loop_count = 0
             while self.running:
                 loop_count += 1
+                if loop_count % 10 == 0 and self.notifier:
+                    # 静默期窗口结束后尽快补发汇总，不必等满 60 秒
+                    try:
+                        self.notifier.flush_startup_quiet_if_needed()
+                    except Exception as e:
+                        if self.logger:
+                            self.logger.warning("启动静默期汇总检查异常: %s", e)
                 if loop_count % 60 == 0 and self.notifier:
                     try:
                         self.notifier.flush_dnd_buffer_if_needed()
                     except Exception as e:
                         if self.logger:
                             self.logger.warning("勿扰汇总检查异常: %s", e)
-                    try:
-                        self.notifier.flush_startup_quiet_if_needed()
-                    except Exception as e:
-                        if self.logger:
-                            self.logger.warning("启动静默期汇总检查异常: %s", e)
                 time.sleep(1)
 
         except KeyboardInterrupt:

@@ -16,6 +16,7 @@ from utils.startup_quiet import (
     MIN_SECONDS,
     StartupQuietWindow,
     clamp_seconds,
+    event_amount,
 )
 
 
@@ -244,6 +245,77 @@ class StartupQuietPeekConfirmTests(unittest.TestCase):
         window.confirm_summary()
         self.assertIsNone(window.peek_summary())
         self.assertEqual(window.status()["folded"], {})
+
+
+class StartupQuietRobustnessTests(unittest.TestCase):
+    """并发、重启、条数解析这些「不显眼但会丢数据」的点。"""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.dir = Path(temp.name)
+        self.now = 1_700_000_000.0
+
+    def window(self, uptime=5.0, **config):
+        params = {"enabled": True, "seconds": 180, "keep_urgent": True, "only_after_boot": True}
+        params.update(config)
+        window = StartupQuietWindow(
+            self.dir, clock=lambda: self.now, uptime_reader=lambda: uptime
+        )
+        window.configure(**params)
+        return window
+
+    def test_concurrent_pollers_do_not_lose_counts(self):
+        window = self.window()
+        import threading
+
+        def blast():
+            for _ in range(50):
+                window.should_suppress("APP_STARTED")
+
+        threads = [threading.Thread(target=blast) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        folded = window.status()["folded"].get("APP_STARTED")
+        self.assertEqual(folded, 400, "多线程同时折叠不该丢计数")
+
+    def test_restart_does_not_shift_window_end(self):
+        window = self.window()
+        window.should_suppress("APP_STARTED")
+        end_first = window.status()["window_end"]
+        self.now += 60
+        again = self.window()  # 模拟进程重启：新对象读同一份状态
+        self.assertEqual(again.status()["window_end"], end_first,
+                         "同一次开机内重启应用不得把窗口往后推")
+        self.assertTrue(again.in_window())
+
+    def test_config_change_reopens_window_with_carried_counts(self):
+        window = self.window()
+        window.should_suppress("APP_STARTED")
+        window.should_suppress("APP_STARTED")
+        longer = self.window(seconds=600)  # 改时长 = 配置变了
+        self.assertTrue(longer.in_window())
+        self.now += 700
+        summary = longer.take_summary()
+        self.assertIn("折叠 2 条事件", summary or "")
+        self.assertIn("10 分钟", summary or "")
+
+    def test_event_amount_reads_payload_counters(self):
+        self.assertEqual(event_amount("APP_STARTED", {}), 1)
+        self.assertEqual(event_amount("POLL_BATCH_SUMMARY", {"count": 12}), 12)
+        self.assertEqual(event_amount("MEDIA_LIBRARY_SUMMARY", {"total": 7}), 7)
+        self.assertEqual(event_amount("MEDIA_LIBRARY_SUMMARY", {"items": [1, 2, 3]}), 3)
+        self.assertEqual(event_amount("MUSIC_LIBRARY_SUMMARY", {"by_type": {"入库": 4, "移出": 2}}), 6)
+        self.assertEqual(event_amount("MUSIC_LIBRARY_SUMMARY", {"count": "bad"}), 1)
+
+    def test_media_summary_folds_full_batch_size(self):
+        window = self.window()
+        self.assertTrue(window.should_suppress("MEDIA_LIBRARY_SUMMARY", count=event_amount(
+            "MEDIA_LIBRARY_SUMMARY", {"items": [1] * 9})))
+        self.now += 200
+        self.assertIn("折叠 9 条事件", window.take_summary() or "")
 
 
 if __name__ == "__main__":
