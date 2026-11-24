@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path.cwd() / "src"))
 from notifier import multi_platform_notifier, unified_notifier
+from utils import logtime_display
 from utils.cron_util import next_cron_timestamp
 
 
@@ -33,7 +34,9 @@ def check_timezone(zone_name):
     notifier.logger = logging.getLogger("timezone-check")
     formatter = object.__new__(multi_platform_notifier.MultiPlatformNotifier)
     notifier.multi_platform_notifier = formatter
-    with patch.object(unified_notifier, "datetime", Clock), patch.object(multi_platform_notifier, "datetime", Clock):
+    with patch.object(unified_notifier, "datetime", Clock), \
+         patch.object(multi_platform_notifier, "datetime", Clock), \
+         patch.object(logtime_display, "datetime", Clock):
         for start_hour, end_hour, cross_day in [(22, 7, True), (13, 14, False)]:
             notifier.config.dnd_start_time = f"{start_hour:02}:00"
             notifier.config.dnd_end_time = f"{end_hour:02}:00"

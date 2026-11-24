@@ -372,10 +372,11 @@ class DBLogPoller:
         while self.running:
             try:
                 if last_id is None:
-                    self._seed_logtime_skew_from_db()
                     last_id = self._get_max_log_id()
                     if last_id is not None:
                         self._write_last_id(last_id)
+                        # 对齐成功后再校准，避免额外连库抢走「首次连接失败」的重试语义
+                        self._seed_logtime_skew_from_db()
                         self.logger.info("数据库轮询已对齐，仅处理 id > %s 的新记录，间隔 %s 秒", last_id, self.poll_interval)
                 if last_id is not None:
                     last_id = self._poll_once(last_id)
