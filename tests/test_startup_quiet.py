@@ -272,6 +272,25 @@ class StartupQuietContainerTests(unittest.TestCase):
         self.assertIsNone(window.status()["inactive_reason"])
         self.assertAlmostEqual(window.status()["window_end"], now + 180, delta=1)
 
+    def test_container_window_end_does_not_slide_on_each_ensure(self):
+        """无 boot_at 时若误判成「新开机」，每次 flush/suppress 都会把窗口往后推，永远结束不了。"""
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        clock = {"t": 1_700_000_000.0}
+        window = StartupQuietWindow(
+            Path(temp.name), clock=lambda: clock["t"], uptime_reader=lambda: None
+        )
+        window.configure(enabled=True, seconds=180, keep_urgent=True, only_after_boot=True)
+        end_first = window.status()["window_end"]
+        window.should_suppress("APP_STARTED")
+        clock["t"] += 30
+        window.should_suppress("APP_STARTED")
+        self.assertEqual(window.status()["window_end"], end_first)
+        self.assertEqual(window.status()["folded"].get("APP_STARTED"), 2)
+        clock["t"] += 200
+        self.assertFalse(window.in_window())
+        self.assertIn("折叠 2 条事件", window.take_summary() or "")
+
 
 class StartupQuietRobustnessTests(unittest.TestCase):
     """并发、重启、条数解析这些「不显眼但会丢数据」的点。"""
@@ -316,6 +335,27 @@ class StartupQuietRobustnessTests(unittest.TestCase):
         self.assertEqual(again.status()["window_end"], end_first,
                          "同一次开机内重启应用不得把窗口往后推")
         self.assertTrue(again.in_window())
+
+    def test_early_reboot_opens_fresh_window(self):
+        """短 uptime 内再开机：uptime 倒退应识别为新开机，不能因 ±300 漂移被误判成同一次。"""
+        uptime = {"v": 50.0}
+        window = StartupQuietWindow(
+            self.dir, clock=lambda: self.now, uptime_reader=lambda: uptime["v"]
+        )
+        window.configure(enabled=True, seconds=180, keep_urgent=True, only_after_boot=True)
+        window.should_suppress("APP_STARTED")
+        end_first = window.status()["window_end"]
+
+        self.now += 120
+        uptime["v"] = 10.0  # 真正重启后 uptime 归零再涨
+        again = StartupQuietWindow(
+            self.dir, clock=lambda: self.now, uptime_reader=lambda: uptime["v"]
+        )
+        again.configure(enabled=True, seconds=180, keep_urgent=True, only_after_boot=True)
+        self.assertNotEqual(again.status()["window_end"], end_first,
+                            "早重启必须重开窗口，不能沿用上一次开机的 window_end")
+        self.assertTrue(again.in_window())
+        self.assertAlmostEqual(again.status()["window_end"], self.now - 10.0 + 180, delta=1)
 
     def test_config_change_reopens_window_with_carried_counts(self):
         window = self.window()

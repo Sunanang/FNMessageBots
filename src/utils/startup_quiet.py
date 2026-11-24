@@ -4,8 +4,9 @@ NAS 重启后本应用先起来，其它应用与容器陆续启动会把通知�
 窗口内的事件只计数、不发送；窗口结束时补一条汇总。登录、SSH、UPS、磁盘错误、应用崩溃
 这类安全事件按白名单照常实时推送。
 
-状态落盘到 cursor_dir/startup_quiet.json。窗口用「配置指纹 + 开机时刻」判定是否延续，
-所以重启进程不会把窗口往后推；汇总走 peek + confirm，推送成功后才清空计数，失败可重试。
+状态落盘到 cursor_dir/startup_quiet.json。窗口用「配置指纹 + 开机秒数/时刻」判定是否延续，
+所以重启进程不会把窗口往后推；容器内无开机信息时沿用已有窗口，避免 window_end 被反复顺延。
+汇总走 peek + confirm，推送成功后才清空计数，失败可重试。
 
 线程安全：通知路径会被多个轮询线程并发调用，内部状态统一在 self._lock 下读写。
 """
@@ -24,8 +25,12 @@ DEFAULT_SECONDS = 180
 MIN_SECONDS = 30
 MAX_SECONDS = 1800
 
-# 判断「是不是同一次开机」时允许的开机时刻漂移（秒）
+# 判断「是不是同一次开机」时允许的开机时刻漂移（秒）；仅用于没有 uptime 字段的老状态文件
 BOOT_DRIFT_SECONDS = 300
+
+# /proc/uptime 读数抖动容忍（秒）。倒退超过此值视为真正重启；
+# 不能用 BOOT_DRIFT_SECONDS：短 uptime 时 ±300 会把「早重启」误判成同一次开机。
+UPTIME_JITTER_SECONDS = 2.0
 
 # 静默期内仍然实时推送的安全类事件（白名单）
 URGENT_EVENT_TYPES = frozenset({
@@ -234,17 +239,21 @@ class StartupQuietWindow:
                    uptime: Optional[float] = None) -> bool:
         """判断是否还是同一次开机。
 
-        首选「开机秒数没有倒退」（时钟被校正、应用重启都不会误判），
+        首选「开机秒数没有倒退」（时钟被校正、应用重启都不会误判）；
+        容器 / 无 /proc/uptime 时双方都没有开机信息，无法识别新开机，沿用已有窗口
+        （否则每次 _ensure_window 都会把 window_end 往后推，静默期永远结束不了）；
         老状态文件没有 uptime 字段时退回比较开机时刻（±BOOT_DRIFT_SECONDS）。
         """
-        if state.get("boot_at") is None:
-            return False
+        stored_boot = state.get("boot_at")
         stored_uptime = state.get("uptime")
+        if (uptime is None and boot_at is None
+                and stored_uptime is None and stored_boot is None):
+            return True
         if uptime is not None and isinstance(stored_uptime, (int, float)):
-            return float(uptime) >= float(stored_uptime) - BOOT_DRIFT_SECONDS
-        if boot_at is None:
+            return float(uptime) + UPTIME_JITTER_SECONDS >= float(stored_uptime)
+        if stored_boot is None or boot_at is None:
             return False
-        return abs(float(boot_at) - float(state["boot_at"])) <= BOOT_DRIFT_SECONDS
+        return abs(float(boot_at) - float(stored_boot)) <= BOOT_DRIFT_SECONDS
 
     def _carry_unsent(self, state: Dict[str, Any]) -> None:
         """把上一次没来得及汇总的计数带到 carry，等本轮窗口结束时一起发。"""
