@@ -284,12 +284,19 @@ class StartupQuietWindow:
             uptime = self._uptime()
             boot_at = (now - uptime) if uptime is not None else None
             fingerprint = self._fingerprint()
-            if (state.get("config_fingerprint") == fingerprint
-                    and "window_end" in state
-                    and self._same_boot(state, boot_at, uptime)):
+            same_boot = self._same_boot(state, boot_at, uptime)
+            same_config = state.get("config_fingerprint") == fingerprint
+            if same_config and "window_end" in state and same_boot:
                 # 同一次开机 + 同一套配置（含进程重启）：沿用原窗口，不重复计时、不重复汇总
                 return state
-            self._carry_unsent(state)
+            if same_boot:
+                # 仅配置变更时把未汇总计数带到新窗口；真开机不掺上一段
+                self._carry_unsent(state)
+            else:
+                state["folded"] = {}
+                state["folded_categories"] = {}
+                state["carry"] = {}
+                state["carry_categories"] = {}
             state["config_fingerprint"] = fingerprint
             state["boot_at"] = boot_at
             state["uptime"] = uptime
