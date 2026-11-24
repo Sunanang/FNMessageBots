@@ -247,6 +247,32 @@ class StartupQuietPeekConfirmTests(unittest.TestCase):
         self.assertEqual(window.status()["folded"], {})
 
 
+class StartupQuietContainerTests(unittest.TestCase):
+    """Docker 部署：/proc/uptime 是宿主机的，不能拿来判断开机首启。"""
+
+    def test_read_system_uptime_returns_none_in_container(self):
+        import utils.startup_quiet as module
+
+        with patch.object(module, "in_container", return_value=True):
+            self.assertIsNone(module.read_system_uptime(), "容器内不能返回宿主机开机秒数")
+        # 不在容器里：能读就读，读不到（macOS）返回 None，都不该抛异常
+        with patch.object(module, "in_container", return_value=False):
+            value = module.read_system_uptime()
+            self.assertTrue(value is None or value >= 0)
+
+    def test_container_falls_back_to_app_start_anchor(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        now = 1_700_000_000.0
+        window = StartupQuietWindow(
+            Path(temp.name), clock=lambda: now, uptime_reader=lambda: None
+        )
+        window.configure(enabled=True, seconds=180, keep_urgent=True, only_after_boot=True)
+        self.assertTrue(window.in_window(), "容器内只有应用启动时刻，应当照样静默")
+        self.assertIsNone(window.status()["inactive_reason"])
+        self.assertAlmostEqual(window.status()["window_end"], now + 180, delta=1)
+
+
 class StartupQuietRobustnessTests(unittest.TestCase):
     """并发、重启、条数解析这些「不显眼但会丢数据」的点。"""
 

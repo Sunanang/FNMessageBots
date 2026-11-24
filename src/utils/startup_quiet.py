@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from pathlib import Path
@@ -85,8 +86,20 @@ def clamp_seconds(value: Any) -> int:
     return max(MIN_SECONDS, min(seconds, MAX_SECONDS))
 
 
+# 容器里 /proc/uptime 是宿主机的开机秒数，拿它判断「是不是开机首启」会永远判成不是，
+# 于是 Docker 部署打开开关也永远不生效 —— 容器内一律按「应用启动」计。
+_CONTAINER_MARKERS = ("/.dockerenv", "/run/.containerenv")
+
+
+def in_container() -> bool:
+    """是否跑在容器里（Docker / Podman）。"""
+    return any(os.path.exists(marker) for marker in _CONTAINER_MARKERS)
+
+
 def read_system_uptime(path: str = "/proc/uptime") -> Optional[float]:
-    """读系统已开机秒数；读不到返回 None（容器没挂 /proc 时也会是 None）。"""
+    """读系统已开机秒数；容器内或读不到时返回 None（调用方按应用启动时间计窗口）。"""
+    if in_container():
+        return None
     try:
         with open(path, "r", encoding="utf-8") as f:
             return float(str(f.read()).split()[0])
