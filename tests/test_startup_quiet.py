@@ -16,6 +16,7 @@ from utils.startup_quiet import (
     MIN_SECONDS,
     StartupQuietWindow,
     clamp_seconds,
+    event_amount,
 )
 
 
@@ -244,6 +245,215 @@ class StartupQuietPeekConfirmTests(unittest.TestCase):
         window.confirm_summary()
         self.assertIsNone(window.peek_summary())
         self.assertEqual(window.status()["folded"], {})
+
+
+class StartupQuietContainerTests(unittest.TestCase):
+    """Docker 部署：/proc/uptime 是宿主机的，不能拿来判断开机首启。"""
+
+    def test_read_system_uptime_returns_none_in_container(self):
+        import utils.startup_quiet as module
+
+        with patch.object(module, "in_container", return_value=True):
+            self.assertIsNone(module.read_system_uptime(), "容器内不能返回宿主机开机秒数")
+        # 不在容器里：能读就读，读不到（macOS）返回 None，都不该抛异常
+        with patch.object(module, "in_container", return_value=False):
+            value = module.read_system_uptime()
+            self.assertTrue(value is None or value >= 0)
+
+    def test_container_falls_back_to_app_start_anchor(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        now = 1_700_000_000.0
+        window = StartupQuietWindow(
+            Path(temp.name), clock=lambda: now, uptime_reader=lambda: None
+        )
+        window.configure(enabled=True, seconds=180, keep_urgent=True, only_after_boot=True)
+        self.assertTrue(window.in_window(), "容器内只有应用启动时刻，应当照样静默")
+        self.assertIsNone(window.status()["inactive_reason"])
+        self.assertAlmostEqual(window.status()["window_end"], now + 180, delta=1)
+
+    def test_container_window_end_does_not_slide_on_each_ensure(self):
+        """无 boot_at 时若误判成「新开机」，每次 flush/suppress 都会把窗口往后推，永远结束不了。"""
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        clock = {"t": 1_700_000_000.0}
+        window = StartupQuietWindow(
+            Path(temp.name), clock=lambda: clock["t"], uptime_reader=lambda: None
+        )
+        window.configure(enabled=True, seconds=180, keep_urgent=True, only_after_boot=True)
+        end_first = window.status()["window_end"]
+        window.should_suppress("APP_STARTED")
+        clock["t"] += 30
+        window.should_suppress("APP_STARTED")
+        self.assertEqual(window.status()["window_end"], end_first)
+        self.assertEqual(window.status()["folded"].get("APP_STARTED"), 2)
+        clock["t"] += 200
+        self.assertFalse(window.in_window())
+        self.assertIn("折叠 2 条事件", window.take_summary() or "")
+
+
+class StartupQuietRobustnessTests(unittest.TestCase):
+    """并发、重启、条数解析这些「不显眼但会丢数据」的点。"""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.dir = Path(temp.name)
+        self.now = 1_700_000_000.0
+
+    def window(self, uptime=5.0, **config):
+        params = {"enabled": True, "seconds": 180, "keep_urgent": True, "only_after_boot": True}
+        params.update(config)
+        window = StartupQuietWindow(
+            self.dir, clock=lambda: self.now, uptime_reader=lambda: uptime
+        )
+        window.configure(**params)
+        return window
+
+    def test_concurrent_pollers_do_not_lose_counts(self):
+        window = self.window()
+        import threading
+
+        def blast():
+            for _ in range(50):
+                window.should_suppress("APP_STARTED")
+
+        threads = [threading.Thread(target=blast) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        folded = window.status()["folded"].get("APP_STARTED")
+        self.assertEqual(folded, 400, "多线程同时折叠不该丢计数")
+
+    def test_restart_does_not_shift_window_end(self):
+        window = self.window()
+        window.should_suppress("APP_STARTED")
+        end_first = window.status()["window_end"]
+        self.now += 60
+        again = self.window()  # 模拟进程重启：新对象读同一份状态
+        self.assertEqual(again.status()["window_end"], end_first,
+                         "同一次开机内重启应用不得把窗口往后推")
+        self.assertTrue(again.in_window())
+
+    def test_early_reboot_opens_fresh_window(self):
+        """短 uptime 内再开机：uptime 倒退应识别为新开机，不能因 ±300 漂移被误判成同一次。"""
+        uptime = {"v": 50.0}
+        window = StartupQuietWindow(
+            self.dir, clock=lambda: self.now, uptime_reader=lambda: uptime["v"]
+        )
+        window.configure(enabled=True, seconds=180, keep_urgent=True, only_after_boot=True)
+        window.should_suppress("APP_STARTED")
+        end_first = window.status()["window_end"]
+
+        self.now += 120
+        uptime["v"] = 10.0  # 真正重启后 uptime 归零再涨
+        again = StartupQuietWindow(
+            self.dir, clock=lambda: self.now, uptime_reader=lambda: uptime["v"]
+        )
+        again.configure(enabled=True, seconds=180, keep_urgent=True, only_after_boot=True)
+        self.assertNotEqual(again.status()["window_end"], end_first,
+                            "早重启必须重开窗口，不能沿用上一次开机的 window_end")
+        self.assertTrue(again.in_window())
+        self.assertAlmostEqual(again.status()["window_end"], self.now - 10.0 + 180, delta=1)
+
+    def test_new_boot_does_not_carry_previous_fold_counts(self):
+        """真开机重开窗口时丢掉上一段未汇总计数，避免汇总掺进上一次开机的条数。"""
+        uptime = {"v": 40.0}
+        window = StartupQuietWindow(
+            self.dir, clock=lambda: self.now, uptime_reader=lambda: uptime["v"]
+        )
+        window.configure(enabled=True, seconds=180, keep_urgent=True, only_after_boot=True)
+        for _ in range(5):
+            window.should_suppress("APP_STARTED")
+        self.assertEqual(window.status()["folded"].get("APP_STARTED"), 5)
+
+        self.now += 90
+        uptime["v"] = 8.0
+        again = StartupQuietWindow(
+            self.dir, clock=lambda: self.now, uptime_reader=lambda: uptime["v"]
+        )
+        again.configure(enabled=True, seconds=180, keep_urgent=True, only_after_boot=True)
+        again.should_suppress("DOCKER_CONTAINER_START")
+        self.now += 200
+        summary = again.take_summary() or ""
+        self.assertIn("折叠 1 条事件", summary)
+        self.assertNotIn("应用启动", summary)
+        self.assertIn("容器 1", summary)
+
+    def test_config_change_reopens_window_with_carried_counts(self):
+        window = self.window()
+        window.should_suppress("APP_STARTED")
+        window.should_suppress("APP_STARTED")
+        longer = self.window(seconds=600)  # 改时长 = 配置变了
+        self.assertTrue(longer.in_window())
+        self.now += 700
+        summary = longer.take_summary()
+        self.assertIn("折叠 2 条事件", summary or "")
+        self.assertIn("10 分钟", summary or "")
+
+    def test_event_amount_reads_payload_counters(self):
+        self.assertEqual(event_amount("APP_STARTED", {}), 1)
+        self.assertEqual(event_amount("POLL_BATCH_SUMMARY", {"count": 12}), 12)
+        self.assertEqual(event_amount("MEDIA_LIBRARY_SUMMARY", {"total": 7}), 7)
+        self.assertEqual(event_amount("MEDIA_LIBRARY_SUMMARY", {"items": [1, 2, 3]}), 3)
+        self.assertEqual(event_amount("MUSIC_LIBRARY_SUMMARY", {"by_type": {"入库": 4, "移出": 2}}), 6)
+        self.assertEqual(event_amount("MUSIC_LIBRARY_SUMMARY", {"count": "bad"}), 1)
+
+    def test_media_summary_folds_full_batch_size(self):
+        window = self.window()
+        self.assertTrue(window.should_suppress("MEDIA_LIBRARY_SUMMARY", count=event_amount(
+            "MEDIA_LIBRARY_SUMMARY", {"items": [1] * 9})))
+        self.now += 200
+        self.assertIn("折叠 9 条事件", window.take_summary() or "")
+
+
+class StartupQuietAcceptanceTests(unittest.TestCase):
+    """对齐真实开机暴涨验收口径：折叠条数、白名单、peek/confirm、容器、早重启。"""
+
+    def test_boot_storm_end_to_end(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        now = {"t": 1_700_000_000.0}
+        uptime = {"v": 5.0}
+        window = StartupQuietWindow(
+            Path(temp.name), clock=lambda: now["t"], uptime_reader=lambda: uptime["v"]
+        )
+        window.configure(enabled=True, seconds=180, keep_urgent=True, only_after_boot=True)
+
+        for _ in range(18):
+            self.assertTrue(window.should_suppress("APP_STARTED"))
+        for _ in range(11):
+            self.assertTrue(window.should_suppress("DOCKER_CONTAINER_START"))
+        for _ in range(4):
+            self.assertTrue(window.should_suppress("DiskWakeup"))
+        self.assertTrue(window.should_suppress(
+            "POLL_BATCH_SUMMARY", count=event_amount("POLL_BATCH_SUMMARY", {"count": 27})))
+        self.assertTrue(window.should_suppress(
+            "MEDIA_LIBRARY_SUMMARY", count=event_amount("MEDIA_LIBRARY_SUMMARY", {"items": [1] * 6})))
+        for event in ("LoginFail", "SSH_LOGIN_SUCCESS", "UPS_ONBATT"):
+            self.assertFalse(window.should_suppress(event), event)
+
+        now["t"] += 200
+        summary = window.peek_summary()
+        self.assertIsNotNone(summary)
+        self.assertIn("折叠 66 条事件", summary)
+        self.assertIn("合并通知 33", summary)
+        self.assertIn("应用启动 18", summary)
+        self.assertIn("容器 11", summary)
+        self.assertIn("磁盘存储 4", summary)
+        self.assertEqual(window.peek_summary(), summary)
+        window.confirm_summary()
+        self.assertIsNone(window.peek_summary())
+
+        now["t"] += 10
+        uptime["v"] = 215.0
+        again = StartupQuietWindow(
+            Path(temp.name), clock=lambda: now["t"], uptime_reader=lambda: uptime["v"]
+        )
+        again.configure(enabled=True, seconds=180, keep_urgent=True, only_after_boot=True)
+        self.assertIsNone(again.peek_summary())
+        self.assertFalse(again.in_window())
 
 
 if __name__ == "__main__":

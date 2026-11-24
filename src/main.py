@@ -916,7 +916,7 @@ class Application:
                     self.notifier.send_system_notification(
                         'APP_ERROR',
                         '应用初始化失败: 未知错误',
-                        {'hostname': socket.gethostname(), 'version': '2.10.0'}
+                        {'hostname': socket.gethostname(), 'version': '2.10.1'}
                     )
                 sys.exit(1)
             
@@ -953,7 +953,7 @@ class Application:
                     self.notifier.send_system_notification(
                         'APP_START',
                         '飞牛NAS日志监控系统已启动，开始监控系统事件',
-                        {'hostname': socket.gethostname(), 'version': '2.10.0'}
+                        {'hostname': socket.gethostname(), 'version': '2.10.1'}
                     )
                 else:
                     print("距上次启动通知不足 10 分钟，跳过本次启动通知（避免频繁重启刷屏）")
@@ -980,17 +980,19 @@ class Application:
             loop_count = 0
             while self.running:
                 loop_count += 1
+                if loop_count % 10 == 0 and self.notifier:
+                    # 静默期窗口结束后尽快补发汇总，不必等满 60 秒
+                    try:
+                        self.notifier.flush_startup_quiet_if_needed()
+                    except Exception as e:
+                        if self.logger:
+                            self.logger.warning("启动静默期汇总检查异常: %s", e)
                 if loop_count % 60 == 0 and self.notifier:
                     try:
                         self.notifier.flush_dnd_buffer_if_needed()
                     except Exception as e:
                         if self.logger:
                             self.logger.warning("勿扰汇总检查异常: %s", e)
-                    try:
-                        self.notifier.flush_startup_quiet_if_needed()
-                    except Exception as e:
-                        if self.logger:
-                            self.logger.warning("启动静默期汇总检查异常: %s", e)
                 time.sleep(1)
 
         except KeyboardInterrupt:
@@ -1115,7 +1117,7 @@ class Application:
                 self.notifier.send_system_notification(
                     'APP_ERROR',
                     f'触发自动重启: {reason}',
-                    {'hostname': socket.gethostname(), 'version': '2.10.0'}
+                    {'hostname': socket.gethostname(), 'version': '2.10.1'}
                 )
         except Exception:
             pass
@@ -1139,7 +1141,7 @@ class Application:
             self.notifier.send_system_notification(
                 'APP_STOP',
                 '飞牛NAS日志监控系统已停止，监控服务暂停',
-                {'hostname': socket.gethostname(), 'version': '2.10.0'}
+                {'hostname': socket.gethostname(), 'version': '2.10.1'}
             )
 
         # 停止数据库轮询器

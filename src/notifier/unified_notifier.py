@@ -21,7 +21,7 @@ from typing import Dict, Any, List, Optional, Set, Tuple
 from config import TITLE_PREFIX_DEFAULT
 from utils.logtime_display import get_logtime_display_offset_seconds
 from utils.notification_outbox import NotificationOutbox, OutboxWriteError, RETRY_SECONDS
-from utils.startup_quiet import SUMMARY_EVENT_TYPES, StartupQuietWindow
+from utils.startup_quiet import SUMMARY_EVENT_TYPES, StartupQuietWindow, event_amount
 from .multi_platform_notifier import DOCKER_CONTAINER_EVENT_TYPES, MultiPlatformNotifier
 from monitor.db_log_poller import DB_EVENT_ID_TO_PROJECT
 from monitor.sqlite_uri import connect_readonly_with_fallback
@@ -256,13 +256,8 @@ class UnifiedNotifier:
 
     @staticmethod
     def _startup_quiet_event_count(event_type: str, event_data: Dict[str, Any]) -> int:
-        """汇总类事件按自带条数折叠，其余算一条。"""
-        if str(event_type) in SUMMARY_EVENT_TYPES and isinstance(event_data, dict):
-            try:
-                return max(1, int(event_data.get("count") or 1))
-            except (TypeError, ValueError):
-                return 1
-        return 1
+        """汇总类事件按自带条数折叠（count / total / items / by_type），其余算一条。"""
+        return event_amount(event_type, event_data)
 
     def flush_startup_quiet_if_needed(self, *, force: bool = False) -> None:
         """静默期结束后补一条「折叠 N 条」汇总；仅推送成功后才清空计数。"""
