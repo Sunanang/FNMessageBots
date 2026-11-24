@@ -10,12 +10,14 @@ import sqlite3
 import threading
 import time
 from contextlib import closing
-from datetime import datetime
 from pathlib import Path
-from zoneinfo import ZoneInfo
 from typing import Callable, Dict, List, Optional, Any, Sequence
 
-from utils.logtime_display import get_logtime_display_offset_seconds
+from utils.logtime_display import (
+    extract_parameter_datetime_seconds,
+    format_logger_row_time,
+    note_logtime_datetime_pair,
+)
 
 from .models import JournalEntry
 from utils.notification_outbox import OutboxWriteError
@@ -95,14 +97,9 @@ DB_EVENT_ID_TO_PROJECT: Dict[str, str] = {
     "MEDIA_USER_CREATE": "MEDIA_USER_CREATED",
 }
 
-def _logtime_to_datetime(logtime: int) -> str:
-    """10 位 Unix 时间戳转 YYYY-MM-DD HH:MM:SS（Asia/Shanghai）。可设 LOGTIME_DISPLAY_OFFSET_SECONDS 修正存库偏差（如 28800=+8h）。"""
-    try:
-        ts = int(logtime) + get_logtime_display_offset_seconds()
-        dt = datetime.fromtimestamp(ts, tz=ZoneInfo("Asia/Shanghai"))
-        return dt.strftime("%Y-%m-%d %H:%M:%S")
-    except (ValueError, TypeError, OSError):
-        return datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
+def _logtime_to_datetime(logtime: int, parameter: Any = None) -> str:
+    """主日志库展示时间：优先 parameter.datetime，否则 logtime（可经库内字段差值校准）。"""
+    return format_logger_row_time(logtime, parameter)
 
 
 def _parse_parameter(parameter: Optional[str], uname: Optional[str], uid: Optional[int]) -> Dict[str, Any]:
@@ -131,8 +128,8 @@ def _parse_parameter(parameter: Optional[str], uname: Optional[str], uid: Option
 def _row_to_entry(row: Dict[str, Any]) -> JournalEntry:
     """将数据库一行转为 JournalEntry（供现有 event_processor 使用）。"""
     logtime = row.get("logtime") or 0
-    ts = _logtime_to_datetime(logtime)
     parameter = row.get("parameter") or "{}"
+    ts = _logtime_to_datetime(logtime, parameter)
     return JournalEntry(
         cursor=str(row.get("id", "")),
         timestamp=ts,
@@ -245,6 +242,22 @@ class DBLogPoller:
             self._cursor_file.write_text(str(last_id))
         except Exception as e:
             self.logger.warning("写入游标失败: %s", e)
+
+    def _seed_logtime_skew_from_db(self) -> None:
+        """从近期同时带 logtime 与 parameter.datetime 的行学习差值，供 LoginSucc 等无 datetime 的事件使用。"""
+        try:
+            with closing(connect_readonly_with_fallback(self.db_path, timeout=5.0, allow_immutable=False)) as conn:
+                rows = conn.execute(
+                    "SELECT logtime, parameter FROM log ORDER BY id DESC LIMIT 80"
+                ).fetchall()
+            for logtime, parameter in rows:
+                param_dt = extract_parameter_datetime_seconds(parameter)
+                if param_dt is None:
+                    continue
+                note_logtime_datetime_pair(logtime, param_dt)
+                break
+        except Exception as e:
+            self.logger.debug("校准 logtime 与 parameter.datetime 失败: %s", e)
 
     def _get_max_log_id(self) -> Optional[int]:
         """获取 log 表当前最大 id；启动时用此值作为游标，只处理此后新写入的记录。"""
@@ -359,6 +372,7 @@ class DBLogPoller:
         while self.running:
             try:
                 if last_id is None:
+                    self._seed_logtime_skew_from_db()
                     last_id = self._get_max_log_id()
                     if last_id is not None:
                         self._write_last_id(last_id)

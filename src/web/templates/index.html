@@ -226,6 +226,228 @@
       padding: 4px 8px;
       font-size: 13px;
     }
+    .event-item-main {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .event-item-top {
+      display: flex;
+      align-items: center;
+      justify-content: flex-start;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .event-tpl-actions {
+      display: inline-flex;
+      flex-direction: row;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+    .event-tpl-btn {
+      border: none;
+      background: transparent;
+      color: #2563eb;
+      padding: 2px;
+      margin: -2px;
+      cursor: pointer;
+      line-height: 0;
+      border-radius: 6px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .event-tpl-btn:hover { background: rgba(37, 99, 235, 0.1); }
+    .event-tpl-btn:focus-visible {
+      outline: 2px solid rgba(37, 99, 235, 0.45);
+      outline-offset: 1px;
+    }
+    .event-tpl-btn svg {
+      width: 15px;
+      height: 15px;
+      display: block;
+    }
+    .event-tpl-badge {
+      font-size: 11px;
+      color: #6b7280;
+      line-height: 1.2;
+    }
+    .event-tpl-badge.is-event { color: #b45309; }
+    .event-tpl-badge.is-family { color: #0369a1; }
+    .event-category-title-left {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+    }
+    .cat-tpl-btn {
+      border: none;
+      background: transparent;
+      color: #2563eb;
+      padding: 2px;
+      margin: 0;
+      cursor: pointer;
+      line-height: 0;
+      border-radius: 6px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .cat-tpl-btn:hover { background: rgba(37, 99, 235, 0.1); }
+    .cat-tpl-btn:focus-visible {
+      outline: 2px solid rgba(37, 99, 235, 0.45);
+      outline-offset: 1px;
+    }
+    .cat-tpl-btn svg {
+      width: 15px;
+      height: 15px;
+      display: block;
+    }
+    .cat-tpl-btn.has-custom { color: #1d4ed8; }
+    .tpl-drawer-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(15, 23, 42, 0.45);
+      z-index: 90;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s ease;
+    }
+    .tpl-drawer-backdrop.open {
+      opacity: 1;
+      pointer-events: auto;
+    }
+    .tpl-drawer {
+      position: fixed;
+      z-index: 91;
+      background: #fff;
+      box-shadow: -12px 0 40px rgba(15, 23, 42, 0.18);
+      display: flex;
+      flex-direction: column;
+      transition: transform 0.22s ease;
+    }
+    .tpl-drawer.side {
+      top: 0;
+      right: 0;
+      width: min(440px, 100vw);
+      height: 100vh;
+      transform: translateX(100%);
+    }
+    .tpl-drawer.side.open { transform: translateX(0); }
+    .tpl-drawer.sheet {
+      left: 0;
+      right: 0;
+      bottom: 0;
+      max-height: min(92vh, 720px);
+      border-radius: 16px 16px 0 0;
+      transform: translateY(100%);
+    }
+    .tpl-drawer.sheet.open { transform: translateY(0); }
+    .tpl-drawer-header {
+      padding: 14px 16px 10px;
+      border-bottom: 1px solid #e5e7eb;
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .tpl-drawer-title {
+      font-size: 16px;
+      font-weight: 600;
+      color: #111827;
+    }
+    .tpl-drawer-sub {
+      font-size: 12px;
+      color: #6b7280;
+      margin-top: 4px;
+    }
+    .tpl-drawer-close {
+      border: none;
+      background: transparent;
+      font-size: 22px;
+      line-height: 1;
+      color: #6b7280;
+      cursor: pointer;
+      padding: 0 4px;
+    }
+    .tpl-drawer-body {
+      padding: 12px 16px 20px;
+      overflow: auto;
+      flex: 1;
+    }
+    .tpl-banner {
+      font-size: 12px;
+      color: #92400e;
+      background: #fffbeb;
+      border: 1px solid #fde68a;
+      border-radius: 8px;
+      padding: 8px 10px;
+      margin-bottom: 12px;
+      display: none;
+    }
+    .tpl-banner.show { display: block; }
+    .tpl-scope-row {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+    }
+    .tpl-scope-row label {
+      font-size: 13px;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      color: #374151;
+    }
+    .tpl-vars {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin: 0 0 12px;
+    }
+    .tpl-chip {
+      border: 1px solid #d1d5db;
+      background: #f9fafb;
+      color: #374151;
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 12px;
+      cursor: pointer;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+    .tpl-chip:hover { border-color: #93c5fd; color: #1d4ed8; background: #eff6ff; }
+    .tpl-chip.empty { opacity: 0.45; }
+    .tpl-preview {
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-size: 13px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      min-height: 72px;
+      color: #111827;
+      margin-top: 6px;
+    }
+    .tpl-preview-title {
+      font-weight: 600;
+      margin-bottom: 6px;
+      padding-bottom: 6px;
+      border-bottom: 1px dashed #e2e8f0;
+    }
+    .tpl-drawer-footer {
+      padding: 10px 16px 14px;
+      border-top: 1px solid #e5e7eb;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: flex-end;
+    }
+    .tpl-drawer-footer .btn { min-width: 0; }
     .tag {
       display: inline-flex;
       align-items: center;
@@ -507,6 +729,21 @@
       margin: 0 0 12px 0;
       line-height: 1.5;
     }
+    .warning-panel-hint {
+      margin: -4px 0 14px 0;
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: 1px solid rgba(185, 28, 28, 0.22);
+      background: rgba(255, 255, 255, 0.55);
+      color: inherit;
+      font-size: 12px;
+      line-height: 1.7;
+    }
+    .warning-panel-hint a {
+      color: #2563eb;
+      text-decoration: underline;
+      font-weight: 600;
+    }
     .warning-panel-item {
       word-break: break-word;
       white-space: pre-wrap;
@@ -679,6 +916,40 @@
     }
     html[data-theme="dark"] .stats-label { color: #d1d5db; }
     html[data-theme="dark"] .event-item span { color: #e5e7eb; }
+    html[data-theme="dark"] .event-tpl-btn { color: #93c5fd; }
+    html[data-theme="dark"] .event-tpl-btn:hover { background: rgba(147, 197, 253, 0.12); }
+    html[data-theme="dark"] .event-tpl-badge { color: #9ca3af; }
+    html[data-theme="dark"] .event-tpl-badge.is-event { color: #fbbf24; }
+    html[data-theme="dark"] .event-tpl-badge.is-family { color: #7dd3fc; }
+    html[data-theme="dark"] .cat-tpl-btn { color: #93c5fd; }
+    html[data-theme="dark"] .cat-tpl-btn:hover { background: rgba(147, 197, 253, 0.12); }
+    html[data-theme="dark"] .cat-tpl-btn.has-custom { color: #93c5fd; }
+    html[data-theme="dark"] .tpl-drawer { background: #111827; }
+    html[data-theme="dark"] .tpl-drawer-header,
+    html[data-theme="dark"] .tpl-drawer-footer { border-color: #374151; }
+    html[data-theme="dark"] .tpl-drawer-title { color: #f9fafb; }
+    html[data-theme="dark"] .tpl-drawer-sub,
+    html[data-theme="dark"] .tpl-scope-row label { color: #9ca3af; }
+    html[data-theme="dark"] .tpl-chip {
+      background: #1f2937;
+      border-color: #4b5563;
+      color: #e5e7eb;
+    }
+    html[data-theme="dark"] .tpl-preview {
+      background: #0f172a;
+      border-color: #334155;
+      color: #e5e7eb;
+    }
+    html[data-theme="dark"] .tpl-preview-title { border-bottom-color: #334155; }
+    html[data-theme="dark"] .tpl-banner {
+      background: #422006;
+      border-color: #854d0e;
+      color: #fde68a;
+    }
+    html[data-theme="dark"] .event-item {
+      background: #0f172a;
+      border-color: #374151;
+    }
     html[data-theme="dark"] .header-sub,
     html[data-theme="dark"] .header-ver,
     html[data-theme="dark"] .field-label,
@@ -753,6 +1024,11 @@
       background: rgba(127, 29, 29, 0.25);
       color: #fecaca;
     }
+    html[data-theme="dark"] .warning-panel-hint {
+      background: rgba(15, 23, 42, 0.35);
+      border-color: rgba(248, 113, 113, 0.35);
+    }
+    html[data-theme="dark"] .warning-panel-hint a,
     html[data-theme="dark"] .warning-panel-faq-link a {
       color: #93c5fd;
     }
@@ -832,6 +1108,7 @@
     }
   </style>
   <script src="{{ url_for('session_guard_js') }}"></script>
+  <script src="{{ url_for('app_dialog_js') }}"></script>
 </head>
 <body>
   <div id="auth-gate" class="auth-page" style="display:none;">
@@ -948,7 +1225,7 @@
         </div>
         <div class="field-helper" style="margin-top: 10px;">
           渠道配置教程：
-          <a href="https://github.com/Sunanang/FNMessageBots/blob/main/docs/notification-channels.md" target="_blank" rel="noopener noreferrer">
+          <a href="https://www.lndo.top/blog/fn-message-bots-channels" target="_blank" rel="noopener noreferrer">
             推送渠道配置教程
           </a>
         </div>
@@ -1106,6 +1383,42 @@
     </div>
   </div>
   <div id="toast-container" class="toast-container"></div>
+  <div id="tpl-drawer-backdrop" class="tpl-drawer-backdrop" aria-hidden="true"></div>
+  <aside id="tpl-drawer" class="tpl-drawer side" aria-hidden="true" role="dialog" aria-labelledby="tpl-drawer-heading">
+    <div class="tpl-drawer-header">
+      <div>
+        <div class="tpl-drawer-title" id="tpl-drawer-heading">自定义消息</div>
+        <div class="tpl-drawer-sub" id="tpl-drawer-sub"></div>
+      </div>
+      <button type="button" class="tpl-drawer-close" id="tpl-drawer-close" aria-label="关闭">×</button>
+    </div>
+    <div class="tpl-drawer-body">
+      <div class="tpl-banner" id="tpl-minimal-banner">当前已开启极简推送：自定义模板不会生效，保存后仍可编辑，关闭极简后才会按模板推送。</div>
+      <div class="tpl-scope-row" id="tpl-scope-row">
+        <label><input type="radio" name="tpl-scope" value="event" checked /> 仅本事件</label>
+        <label><input type="radio" name="tpl-scope" value="family" /> 本类全部事件</label>
+      </div>
+      <div class="field-label">标题模板</div>
+      <input id="tpl-title-input" type="text" autocomplete="off" placeholder="{% raw %}{{event_icon}} {{prefix}}-{{event_title}}{% endraw %}" />
+      <div class="field-label" style="margin-top:10px;">正文模板</div>
+      <textarea id="tpl-body-input" rows="8" placeholder="一行一个字段；空值整行会自动省略"></textarea>
+      <div class="field-label" style="margin-top:10px;">可插入变量 <small>点击插入到光标处</small></div>
+      <div class="tpl-vars" id="tpl-vars"></div>
+      <div class="field-label">预览（样例数据）</div>
+      <div class="tpl-preview" id="tpl-preview">
+        <div class="tpl-preview-title" id="tpl-preview-title"></div>
+        <div id="tpl-preview-body"></div>
+      </div>
+      <div class="field-helper" id="tpl-preview-warn" style="color:#b45309;"></div>
+    </div>
+    <div class="tpl-drawer-footer">
+      <button type="button" class="btn btn-ghost" id="tpl-copy-family-btn">复制组通知样式</button>
+      <button type="button" class="btn btn-ghost" id="tpl-reset-btn">恢复默认</button>
+      <button type="button" class="btn btn-ghost" id="tpl-test-btn">试发</button>
+      <button type="button" class="btn btn-ghost" id="tpl-cancel-btn">取消</button>
+      <button type="button" class="btn btn-primary" id="tpl-save-btn">保存</button>
+    </div>
+  </aside>
 
   <script>
     function initTheme() {
@@ -1125,6 +1438,10 @@
     const warningPanel = document.getElementById("warning-panel");
 
     let channelOptions = [];
+    let messageTemplates = { version: 1, families: {}, events: {} };
+    let messageTemplateMeta = { families: [], event_family: {}, blacklist: [], title_soft_warn_chars: 80 };
+    let tplDrawerState = null;
+    let tplPreviewTimer = null;
     const fetchOpts = { credentials: "include" };
 
     let setupRequiresCode = false;
@@ -1201,6 +1518,21 @@
       secretDrafts.set(document.getElementById("login-password"), "");
       renderPersistentWarnings([]);
       setStatus(false, "");
+      if (typeof finishAppConfirm === "function" && isAppConfirmOpen()) finishAppConfirm(false);
+      // 抽屉挂在 app-main 外，锁屏时必须强制收起，避免浮在登录页上
+      if (typeof closeTplDrawer === "function") closeTplDrawer({ force: true });
+      else {
+        const drawer = document.getElementById("tpl-drawer");
+        const backdrop = document.getElementById("tpl-drawer-backdrop");
+        if (drawer) {
+          drawer.classList.remove("open");
+          drawer.setAttribute("aria-hidden", "true");
+        }
+        if (backdrop) {
+          backdrop.classList.remove("open");
+          backdrop.setAttribute("aria-hidden", "true");
+        }
+      }
     });
 
     async function initAuth() {
@@ -1356,6 +1688,20 @@
       }, 3200);
     }
 
+    function isAppConfirmOpen() {
+      return !!(window.fnmbDialog && window.fnmbDialog.isOpen());
+    }
+
+    function finishAppConfirm(ok) {
+      if (window.fnmbDialog) window.fnmbDialog.dismiss(!!ok);
+    }
+
+    function showAppConfirm(opts) {
+      if (window.fnmbDialog && window.fnmbDialog.confirm) return window.fnmbDialog.confirm(opts);
+      console.error("[FnMessageBot] app-dialog.js 未加载");
+      return Promise.resolve(false);
+    }
+
     function renderPersistentWarnings(warnings) {
       if (!warningPanel) return;
       const list = Array.isArray(warnings) ? warnings.filter(Boolean) : [];
@@ -1366,7 +1712,25 @@
       title.className = "warning-panel-title";
       title.textContent = "功能检查结果：以下问题需要处理";
       warningPanel.appendChild(title);
-      const faqAnchors = new Set(["faq-external-db", "faq-ssh-journal", "faq-docker-sock", "faq-patrol"]);
+      const hint = document.createElement("div");
+      hint.className = "warning-panel-hint";
+      hint.appendChild(document.createTextNode("权限类问题较多时，也可安装 root 版（整个应用以 root 运行，可减少这类读写限制）。请到 "));
+      const site = document.createElement("a");
+      site.href = "https://www.fnmb.lndo.top/";
+      site.target = "_blank";
+      site.rel = "noopener noreferrer";
+      site.textContent = "官网";
+      hint.appendChild(site);
+      hint.appendChild(document.createTextNode(" 下载 root 版；说明见 "));
+      const faqLink = document.createElement("a");
+      faqLink.href = "faq#faq-root-edition";
+      faqLink.target = "_blank";
+      faqLink.rel = "noopener noreferrer";
+      faqLink.textContent = "常见问题 1.6";
+      hint.appendChild(faqLink);
+      hint.appendChild(document.createTextNode("。仍可按下方命令为普通版授权。"));
+      warningPanel.appendChild(hint);
+      const faqAnchors = new Set(["faq-external-db", "faq-ssh-journal", "faq-docker-sock", "faq-patrol", "faq-root-edition"]);
       list.forEach(item => {
         const info = typeof item === "string" ? {message: item} : item;
         const row = document.createElement("div");
@@ -1989,6 +2353,589 @@
       channelsBody.appendChild(tr);
     }
 
+    function eventTemplateStatus(eventType) {
+      const store = messageTemplates || { families: {}, events: {} };
+      if ((store.events || {})[eventType]) return "event";
+      const fid = (messageTemplateMeta.event_family || {})[eventType];
+      if (fid && (store.families || {})[fid]) return "family";
+      return "default";
+    }
+
+    /** 编辑文档图标（折角纸 + 斜笔） */
+    function tplEditDocIconSvg() {
+      return '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">'
+        + '<path d="M7 3.75h7.2L18.25 7.8V20.25H7V3.75z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>'
+        + '<path d="M14.2 3.75V7.8h4.05" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>'
+        + '<path d="M12.2 16.6l5.35-5.35 1.55 1.55-5.35 5.35-1.95.4.4-1.95z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>'
+        + '<path d="M16.7 12.05l1.55 1.55" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>'
+        + '</svg>';
+    }
+
+    /** 拼成双花括号变量名；勿在本文件直接写双花括号字面量，会被 Jinja 吃掉 */
+    function tplMustache(varName) {
+      return "{" + "{" + varName + "}" + "}";
+    }
+
+    function familyMeta(familyId) {
+      return (messageTemplateMeta.families || []).find(f => f.id === familyId) || null;
+    }
+
+    function cloneTemplates(src) {
+      return JSON.parse(JSON.stringify(src || { version: 1, families: {}, events: {} }));
+    }
+
+    function insertAtCursor(el, text) {
+      if (!el) return;
+      const start = el.selectionStart || 0;
+      const end = el.selectionEnd || 0;
+      const val = el.value || "";
+      el.value = val.slice(0, start) + text + val.slice(end);
+      const pos = start + text.length;
+      el.focus();
+      try { el.setSelectionRange(pos, pos); } catch (e) { /* ignore */ }
+      scheduleTplPreview();
+    }
+
+    function updateTplDrawerLayout() {
+      const drawer = document.getElementById("tpl-drawer");
+      if (!drawer) return;
+      const narrow = window.matchMedia("(max-width: 720px)").matches;
+      drawer.classList.toggle("side", !narrow);
+      drawer.classList.toggle("sheet", narrow);
+    }
+
+    function tplDrawerIsDirty() {
+      if (!tplDrawerState) return false;
+      const titleEl = document.getElementById("tpl-title-input");
+      const bodyEl = document.getElementById("tpl-body-input");
+      const beforeTitle = titleEl ? titleEl.value : "";
+      const beforeBody = bodyEl ? bodyEl.value : "";
+      fillTplInputsForScope(tplDrawerState.scope);
+      const baselineTitle = titleEl ? titleEl.value : "";
+      const baselineBody = bodyEl ? bodyEl.value : "";
+      if (titleEl) titleEl.value = beforeTitle;
+      if (bodyEl) bodyEl.value = beforeBody;
+      return beforeTitle !== baselineTitle || beforeBody !== baselineBody;
+    }
+
+    async function closeTplDrawer(opts) {
+      const options = (opts && typeof opts === "object" && !("target" in opts)) ? opts : {};
+      if (tplDrawerState && !options.force && tplDrawerIsDirty()) {
+        const ok = await showAppConfirm({
+          title: "未保存的修改",
+          message: "有修改的模板未保存，确认关闭吗？",
+          confirmText: "关闭",
+          cancelText: "继续编辑",
+        });
+        if (!ok) return false;
+      }
+      const drawer = document.getElementById("tpl-drawer");
+      const backdrop = document.getElementById("tpl-drawer-backdrop");
+      if (drawer) {
+        drawer.classList.remove("open");
+        drawer.setAttribute("aria-hidden", "true");
+      }
+      if (backdrop) {
+        backdrop.classList.remove("open");
+        backdrop.setAttribute("aria-hidden", "true");
+      }
+      tplDrawerState = null;
+      if (tplPreviewTimer) {
+        clearTimeout(tplPreviewTimer);
+        tplPreviewTimer = null;
+      }
+      return true;
+    }
+
+    function renderTplVarChips() {
+      const wrap = document.getElementById("tpl-vars");
+      if (!wrap || !tplDrawerState) return;
+      wrap.innerHTML = "";
+      const meta = familyMeta(tplDrawerState.familyId) || {};
+      const globals = meta.vars_global || ["prefix", "event_type", "event_title", "event_icon", "time", "note"];
+      const familyVars = meta.vars_family || [];
+      const vars = [...globals, ...familyVars.filter(v => !globals.includes(v))];
+      for (const name of vars) {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "tpl-chip";
+        const token = tplMustache(name);
+        chip.textContent = token;
+        chip.title = "插入 " + token;
+        chip.addEventListener("click", () => {
+          const active = document.activeElement;
+          const target = (active === document.getElementById("tpl-title-input") ||
+            active === document.getElementById("tpl-body-input"))
+            ? active
+            : document.getElementById("tpl-body-input");
+          insertAtCursor(target, token);
+        });
+        wrap.appendChild(chip);
+      }
+    }
+
+    async function refreshTplPreview() {
+      if (!tplDrawerState) return;
+      const reqEvent = tplDrawerState.eventType;
+      const titleEl = document.getElementById("tpl-title-input");
+      const bodyEl = document.getElementById("tpl-body-input");
+      const warnEl = document.getElementById("tpl-preview-warn");
+      try {
+        const res = await fetch("api/message-template/preview", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({
+            event_type: reqEvent,
+            scope: tplDrawerState.scope,
+            title: titleEl ? titleEl.value : "",
+            body: bodyEl ? bodyEl.value : "",
+          }),
+        });
+        const json = await res.json();
+        if (!tplDrawerState || tplDrawerState.eventType !== reqEvent) return;
+        if (!json.ok || !json.data) {
+          if (warnEl) warnEl.textContent = (json && json.message) || "预览失败";
+          return;
+        }
+        const pt = document.getElementById("tpl-preview-title");
+        const pb = document.getElementById("tpl-preview-body");
+        if (pt) pt.textContent = json.data.title || "(无标题)";
+        if (pb) pb.textContent = json.data.body || "";
+        if (warnEl) warnEl.textContent = (json.data.warnings || []).join(" ");
+        const chips = document.querySelectorAll("#tpl-vars .tpl-chip");
+        const sample = json.data.sample_vars || {};
+        chips.forEach(chip => {
+          const m = (chip.textContent || "").match(/\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/);
+          if (!m) return;
+          const key = m[1];
+          const val = sample[key];
+          chip.classList.toggle("empty", !String(val == null ? "" : val).trim());
+        });
+      } catch (e) {
+        if (warnEl) warnEl.textContent = "预览请求失败";
+      }
+    }
+
+    function scheduleTplPreview() {
+      if (tplPreviewTimer) clearTimeout(tplPreviewTimer);
+      tplPreviewTimer = setTimeout(refreshTplPreview, 280);
+    }
+
+    function openTplDrawer(opts) {
+      const familyId = opts.familyId || (messageTemplateMeta.event_family || {})[opts.eventType] || "";
+      const meta = familyMeta(familyId);
+      if (!meta && !opts.eventType) {
+        showToast(false, "该事件不支持自定义模板");
+        return;
+      }
+      const scope = opts.scope === "family" ? "family" : "event";
+      const eventType = opts.eventType || "";
+      if (!eventType) {
+        showToast(false, "无法打开：缺少示例事件");
+        return;
+      }
+      tplDrawerState = {
+        scope,
+        familyId: familyId || (messageTemplateMeta.event_family || {})[eventType] || "",
+        eventType,
+        eventTitle: opts.eventTitle || eventType,
+      };
+      updateTplDrawerLayout();
+      fillTplInputsForScope(scope);
+      document.querySelectorAll('input[name="tpl-scope"]').forEach(r => {
+        r.checked = r.value === scope;
+      });
+      document.getElementById("tpl-drawer-heading").textContent =
+        scope === "family" ? "组通知样式定义" : "单通知样式定义";
+      document.getElementById("tpl-drawer-sub").textContent =
+        (scope === "family"
+          ? ("类别：" + (meta ? meta.name : tplDrawerState.familyId))
+          : ("事件：" + tplDrawerState.eventTitle)) +
+        " · 优先级：单事件 > 本类 > 官方默认";
+      const banner = document.getElementById("tpl-minimal-banner");
+      const minimalOn = !!document.getElementById("input-minimal-push-enabled").checked;
+      const batchOn = !!document.getElementById("input-poll-batch-summary").checked;
+      if (banner) banner.classList.toggle("show", minimalOn && !batchOn);
+      renderTplVarChips();
+      const drawer = document.getElementById("tpl-drawer");
+      const backdrop = document.getElementById("tpl-drawer-backdrop");
+      if (drawer) {
+        drawer.classList.add("open");
+        drawer.setAttribute("aria-hidden", "false");
+      }
+      if (backdrop) {
+        backdrop.classList.add("open");
+        backdrop.setAttribute("aria-hidden", "false");
+      }
+      scheduleTplPreview();
+    }
+
+    function collectFormPayload(extra) {
+      const events = [];
+      [eventsContainer, thirdPartyEventsContainer].forEach(el => {
+        if (!el) return;
+        // 只收集事件勾选，排除分类「全选」等无 value 的复选框
+        el.querySelectorAll("input[type=checkbox][value]").forEach(cb => {
+          if (cb.checked && cb.value) events.push(cb.value);
+        });
+      });
+      const channels = [];
+      channelsBody.querySelectorAll("tr").forEach(tr => {
+        const sel = tr.querySelector("select");
+        if (!sel) return;
+        const type = sel.value;
+        let url = "";
+        if (type === "magic_push") {
+          const wrap = tr.querySelector(".magic-push-fields");
+          url = serializeMagicPushFromInputs(wrap);
+          if (!url) return;
+        } else if (type === "smtp") {
+          const wrap = tr.querySelector(".smtp-fields");
+          url = serializeSmtpFromInputs(wrap);
+          if (!url) return;
+        } else if (type === "wecom_app") {
+          url = serializeWecomAppFromInputs(tr.querySelector(".wecom-app-fields"));
+          if (!url) return;
+        } else if (type === "webhook") {
+          url = serializeWebhookFromInputs(tr.querySelector(".webhook-fields"));
+          if (!url) return;
+        } else if (type === "meow") {
+          url = serializeMeowFromInputs(tr.querySelector(".meow-fields"));
+          if (!url) return;
+        } else if (type === "bark") {
+          const inp = tr.querySelector(".bark-channel-fields input.channel-url-input");
+          if (!inp) return;
+          url = inp.value.trim();
+          if (!url) return;
+        } else {
+          const inp = tr.querySelector("input.channel-url-input");
+          const ta = tr.querySelector("textarea");
+          const urlEl = ta || inp;
+          if (!urlEl) return;
+          url = urlEl.value.trim();
+          if (!url) return;
+        }
+        const enableInp = tr.querySelector("input.channel-enabled-input");
+        const enabled = enableInp ? !!enableInp.checked : true;
+        channels.push({ type, url, enabled });
+      });
+      const payload = {
+        events,
+        channels,
+        web_password_enabled: document.getElementById("input-web-password-enabled").checked,
+        log_retention_days: document.getElementById("input-log-days").value,
+        logger_poll_interval: document.getElementById("input-poll-interval").value,
+        title_prefix: (document.getElementById("input-title-prefix").value || "").trim(),
+        poll_batch_summary_enabled: document.getElementById("input-poll-batch-summary").checked,
+        minimal_push_enabled: document.getElementById("input-minimal-push-enabled").checked,
+        ssh_ignore_loopback: document.getElementById("input-ssh-ignore-loopback").checked,
+        ssh_ignore_lan: (function () {
+          const el = document.getElementById("input-ssh-ignore-lan");
+          return !!(el && el.checked);
+        })(),
+        ssh_open_remind_minutes: (function () {
+          const el = document.getElementById("input-ssh-open-remind-minutes");
+          const n = parseInt(el && el.value, 10);
+          if (!Number.isFinite(n) || n < 1) return 30;
+          return Math.min(n, 10080);
+        })(),
+        dnd_enabled: document.getElementById("input-dnd-enabled").checked,
+        dnd_start_time: document.getElementById("input-dnd-start").value || "22:00",
+        dnd_end_time: document.getElementById("input-dnd-end").value || "07:00",
+        startup_quiet_enabled: document.getElementById("input-startup-quiet-enabled").checked,
+        startup_quiet_seconds: (function () {
+          const n = parseInt(document.getElementById("input-startup-quiet-seconds").value, 10);
+          if (!Number.isFinite(n)) return 180;
+          return Math.min(Math.max(n, 30), 1800);
+        })(),
+        startup_quiet_only_after_boot: document.getElementById("input-startup-quiet-only-after-boot").checked,
+        startup_quiet_keep_urgent: document.getElementById("input-startup-quiet-keep-urgent").checked,
+        nas_patrol_enabled: document.getElementById("input-nas-patrol-enabled").checked,
+        nas_patrol_cron: (document.getElementById("input-nas-patrol-cron").value || "").trim(),
+        bark_icon: (document.getElementById("input-bark-icon").value || "").trim(),
+        message_templates: cloneTemplates(messageTemplates),
+      };
+      if (extra && typeof extra === "object") Object.assign(payload, extra);
+      return payload;
+    }
+
+    async function saveConfigPayload(payload, opts) {
+      opts = opts || {};
+      const res = await fetch("api/save-config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(payload),
+      });
+      const json = await res.json();
+      if (res.ok && json.ok) {
+        if (!opts.silent) showToast(true, json.message || "配置已保存");
+        // 有检查项时绿色 toast 已说明「仍需处理」，明细在保存按钮下方，不再叠一条红 toast
+        renderPersistentWarnings(json.warning_details || json.warnings || []);
+        testBtn.disabled = false;
+        if (payload.web_password_enabled !== loadedPasswordEnabled) {
+          window.fnmbSession.start({authenticated: !payload.web_password_enabled,
+            password_enabled: payload.web_password_enabled});
+          await initAuth();
+        } else if (!opts.skipReload) {
+          await loadConfig(false);
+        }
+        return true;
+      }
+      showToast(false, (json && json.message) || "保存失败");
+      return false;
+    }
+
+    function tplIsBuiltinDefault(title, body, familyId) {
+      const meta = familyMeta(familyId);
+      if (!meta) return false;
+      return (title || "") === (meta.default_title || "")
+        && (body || "") === (meta.default_body || "");
+    }
+
+    async function saveTplFromDrawer() {
+      if (!tplDrawerState) return;
+      const scopeRadio = document.querySelector('input[name="tpl-scope"]:checked');
+      const scope = scopeRadio ? scopeRadio.value : tplDrawerState.scope;
+      const title = (document.getElementById("tpl-title-input").value || "");
+      const body = (document.getElementById("tpl-body-input").value || "");
+      if (!title.trim() && !body.trim()) {
+        showToast(false, "标题与正文不能同时为空");
+        return;
+      }
+      const next = cloneTemplates(messageTemplates);
+      next.version = 1;
+      next.families = next.families || {};
+      next.events = next.events || {};
+      const entry = { title, body, updated_at: new Date().toISOString() };
+      // 内容与官方预填完全一致时，视为「不自定义」，删除对应 key，避免误覆盖官方正文路径
+      const asDefault = tplIsBuiltinDefault(title, body, tplDrawerState.familyId);
+      if (scope === "family") {
+        const fid = tplDrawerState.familyId;
+        if (!fid) {
+          showToast(false, "无法保存：缺少事件族");
+          return;
+        }
+        if (asDefault) {
+          if (!next.families[fid]) {
+            showToast(true, "仍是默认模板，未写入自定义");
+            closeTplDrawer({ force: true });
+            return;
+          }
+          if (!(await showAppConfirm({
+            title: "恢复官方格式",
+            message: "内容与默认模板相同，将清除本类自定义并恢复官方格式。确定？",
+            confirmText: "清除并保存",
+            cancelText: "取消",
+          }))) return;
+          delete next.families[fid];
+        } else {
+          const overrides = Object.keys(next.events).filter(eid =>
+            (messageTemplateMeta.event_family || {})[eid] === fid
+          );
+          if (overrides.length) {
+            const ok = await showAppConfirm({
+              title: "继续保存本类？",
+              message: "本类下已有 " + overrides.length + " 个单事件覆盖，保存本类后这些单事件仍优先生效。是否继续保存本类模板？",
+              confirmText: "继续保存",
+              cancelText: "取消",
+            });
+            if (!ok) return;
+          }
+          next.families[fid] = entry;
+        }
+      } else {
+        const eid = tplDrawerState.eventType;
+        if (asDefault) {
+          if (!next.events[eid]) {
+            showToast(true, "仍是默认模板，未写入自定义");
+            closeTplDrawer({ force: true });
+            return;
+          }
+          if (!(await showAppConfirm({
+            title: "恢复默认格式",
+            message: "内容与默认模板相同，将清除本事件自定义并恢复官方/本类格式。确定？",
+            confirmText: "清除并保存",
+            cancelText: "取消",
+          }))) return;
+          delete next.events[eid];
+        } else {
+          next.events[eid] = entry;
+        }
+      }
+      const payload = collectFormPayload({ message_templates: next });
+      const ok = await saveConfigPayload(payload);
+      if (ok) closeTplDrawer({ force: true });
+    }
+
+    async function resetTplFromDrawer() {
+      if (!tplDrawerState) return;
+      const scopeRadio = document.querySelector('input[name="tpl-scope"]:checked');
+      const scope = scopeRadio ? scopeRadio.value : tplDrawerState.scope;
+      const next = cloneTemplates(messageTemplates);
+      next.families = next.families || {};
+      next.events = next.events || {};
+      if (scope === "family") {
+        if (!(await showAppConfirm({
+          title: "恢复本类默认",
+          message: "恢复本类默认将删除本类自定义模板（单事件覆盖保留）。确定？",
+          confirmText: "恢复默认",
+          cancelText: "取消",
+        }))) return;
+        delete next.families[tplDrawerState.familyId];
+      } else {
+        if (!(await showAppConfirm({
+          title: "恢复本事件默认",
+          message: "恢复本事件默认将删除该事件的单独自定义。确定？",
+          confirmText: "恢复默认",
+          cancelText: "取消",
+        }))) return;
+        delete next.events[tplDrawerState.eventType];
+      }
+      const payload = collectFormPayload({ message_templates: next });
+      const ok = await saveConfigPayload(payload);
+      if (ok) closeTplDrawer({ force: true });
+    }
+
+    async function testTplFromDrawer() {
+      if (!tplDrawerState) return;
+      const scopeRadio = document.querySelector('input[name="tpl-scope"]:checked');
+      const scope = scopeRadio ? scopeRadio.value : tplDrawerState.scope;
+      const btn = document.getElementById("tpl-test-btn");
+      const old = btn ? btn.textContent : "";
+      if (btn) { btn.disabled = true; btn.textContent = "试发中…"; }
+      try {
+        const res = await fetch("api/message-template/test", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({
+            event_type: tplDrawerState.eventType,
+            scope,
+            title: document.getElementById("tpl-title-input").value || "",
+            body: document.getElementById("tpl-body-input").value || "",
+          }),
+        });
+        const json = await res.json();
+        if (res.ok && json.ok) showToast(!json.partial, json.message || "试发已发送");
+        else showToast(false, (json && json.message) || "试发失败");
+      } catch (e) {
+        showToast(false, "试发请求失败");
+      } finally {
+        if (btn) { btn.disabled = false; btn.textContent = old; }
+      }
+    }
+
+    function fillTplInputsForScope(scope) {
+      if (!tplDrawerState) return;
+      const store = messageTemplates || { families: {}, events: {} };
+      const meta = familyMeta(tplDrawerState.familyId);
+      const eventType = tplDrawerState.eventType;
+      let title = "";
+      let body = "";
+      if (scope === "event" && store.events && store.events[eventType]) {
+        title = store.events[eventType].title || "";
+        body = store.events[eventType].body || "";
+      } else if (store.families && store.families[tplDrawerState.familyId]) {
+        title = store.families[tplDrawerState.familyId].title || "";
+        body = store.families[tplDrawerState.familyId].body || "";
+      } else if (meta) {
+        title = meta.default_title || "";
+        body = meta.default_body || "";
+      }
+      document.getElementById("tpl-title-input").value = title;
+      document.getElementById("tpl-body-input").value = body;
+    }
+
+    function copyFamilyToEventInDrawer() {
+      if (!tplDrawerState) return;
+      const fid = tplDrawerState.familyId;
+      const store = messageTemplates || {};
+      const meta = familyMeta(fid);
+      let title = "";
+      let body = "";
+      if (store.families && store.families[fid]) {
+        title = store.families[fid].title || "";
+        body = store.families[fid].body || "";
+      } else if (meta) {
+        title = meta.default_title || "";
+        body = meta.default_body || "";
+      }
+      document.getElementById("tpl-title-input").value = title;
+      document.getElementById("tpl-body-input").value = body;
+      const eventRadio = document.querySelector('input[name="tpl-scope"][value="event"]');
+      if (eventRadio) eventRadio.checked = true;
+      tplDrawerState.scope = "event";
+      document.getElementById("tpl-drawer-heading").textContent = "单通知样式定义";
+      scheduleTplPreview();
+      showToast(true, "已填入本类模板，保存后仅作用于本事件");
+    }
+
+    (function bindTplDrawer() {
+      const backdrop = document.getElementById("tpl-drawer-backdrop");
+      const closeBtn = document.getElementById("tpl-drawer-close");
+      const cancelBtn = document.getElementById("tpl-cancel-btn");
+      const saveBtnTpl = document.getElementById("tpl-save-btn");
+      const resetBtn = document.getElementById("tpl-reset-btn");
+      const testBtnTpl = document.getElementById("tpl-test-btn");
+      const copyBtn = document.getElementById("tpl-copy-family-btn");
+      // 勿直接传 closeTplDrawer：否则会把 MouseEvent 当成 opts
+      if (backdrop) backdrop.addEventListener("click", () => { closeTplDrawer(); });
+      if (closeBtn) closeBtn.addEventListener("click", () => { closeTplDrawer(); });
+      if (cancelBtn) cancelBtn.addEventListener("click", () => { closeTplDrawer(); });
+      if (saveBtnTpl) saveBtnTpl.addEventListener("click", () => { saveTplFromDrawer(); });
+      if (resetBtn) resetBtn.addEventListener("click", () => { resetTplFromDrawer(); });
+      if (testBtnTpl) testBtnTpl.addEventListener("click", () => { testTplFromDrawer(); });
+      if (copyBtn) copyBtn.addEventListener("click", copyFamilyToEventInDrawer);
+      ["tpl-title-input", "tpl-body-input"].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener("input", scheduleTplPreview);
+      });
+      document.querySelectorAll('input[name="tpl-scope"]').forEach(r => {
+        r.addEventListener("change", async () => {
+          if (!tplDrawerState || !r.checked) return;
+          if (tplDrawerState.scope === r.value) return;
+          const titleEl = document.getElementById("tpl-title-input");
+          const bodyEl = document.getElementById("tpl-body-input");
+          const beforeTitle = titleEl ? titleEl.value : "";
+          const beforeBody = bodyEl ? bodyEl.value : "";
+          // 先按原作用域取一份基准，判断当前是否有未保存修改
+          fillTplInputsForScope(tplDrawerState.scope);
+          const baselineTitle = titleEl ? titleEl.value : "";
+          const baselineBody = bodyEl ? bodyEl.value : "";
+          if (titleEl) titleEl.value = beforeTitle;
+          if (bodyEl) bodyEl.value = beforeBody;
+          const dirty = beforeTitle !== baselineTitle || beforeBody !== baselineBody;
+          if (dirty) {
+            const ok = await showAppConfirm({
+              title: "切换作用域",
+              message: "切换作用域将重新加载对应模板，当前未保存的修改会丢失。继续？",
+              confirmText: "继续切换",
+              cancelText: "取消",
+            });
+            if (!ok) {
+              const revert = document.querySelector('input[name="tpl-scope"][value="' + tplDrawerState.scope + '"]');
+              if (revert) revert.checked = true;
+              return;
+            }
+          }
+          tplDrawerState.scope = r.value;
+          document.getElementById("tpl-drawer-heading").textContent =
+            r.value === "family" ? "组通知样式定义" : "单通知样式定义";
+          fillTplInputsForScope(r.value);
+          scheduleTplPreview();
+        });
+      });
+      window.addEventListener("resize", () => {
+        if (tplDrawerState) updateTplDrawerLayout();
+      });
+      document.addEventListener("keydown", (e) => {
+        if (e.key !== "Escape" || !tplDrawerState || isAppConfirmOpen()) return;
+        closeTplDrawer();
+      });
+    })();
+
     function renderEventCategories(container, categories, selected, opts) {
       if (!container) return;
       container.innerHTML = "";
@@ -2001,9 +2948,38 @@
 
         const catHeader = document.createElement("div");
         catHeader.className = "event-category-title";
+        const catLeft = document.createElement("div");
+        catLeft.className = "event-category-title-left";
         const catTitleSpan = document.createElement("span");
         catTitleSpan.textContent = cat.name || "";
-        catHeader.appendChild(catTitleSpan);
+        catLeft.appendChild(catTitleSpan);
+
+        const familyId = cat.id || "";
+        if (familyId && !(messageTemplateMeta.blacklist || []).includes(familyId)) {
+          const famMeta = (messageTemplateMeta.families || []).find(f => f.id === familyId);
+          if (famMeta) {
+            const hasCustom = !!(messageTemplates.families || {})[familyId];
+            const catTplBtn = document.createElement("button");
+            catTplBtn.type = "button";
+            catTplBtn.className = "cat-tpl-btn" + (hasCustom ? " has-custom" : "");
+            catTplBtn.title = hasCustom ? "本类已自定义" : "自定义本类";
+            catTplBtn.setAttribute("aria-label", catTplBtn.title);
+            catTplBtn.innerHTML = tplEditDocIconSvg();
+            catTplBtn.addEventListener("click", (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              const firstEv = (cat.events || [])[0];
+              openTplDrawer({
+                scope: "family",
+                familyId,
+                eventType: firstEv ? firstEv.id : "",
+                eventTitle: cat.name || familyId,
+              });
+            });
+            catLeft.appendChild(catTplBtn);
+          }
+        }
+        catHeader.appendChild(catLeft);
 
         const catToggleLabel = document.createElement("label");
         catToggleLabel.style.fontSize = "13px";
@@ -2042,9 +3018,42 @@
           cb.addEventListener("change", () => updateCatToggle());
 
           const label = document.createElement("div");
+          label.className = "event-item-main";
+          const top = document.createElement("div");
+          top.className = "event-item-top";
           const title = document.createElement("span");
           title.textContent = ev.title || ev.id;
-          label.appendChild(title);
+          top.appendChild(title);
+
+          const evFamily = (messageTemplateMeta.event_family || {})[ev.id] || familyId;
+          const canTpl = evFamily && !(messageTemplateMeta.blacklist || []).includes(ev.id);
+          if (canTpl) {
+            const status = eventTemplateStatus(ev.id);
+            const tplBtn = document.createElement("button");
+            tplBtn.type = "button";
+            tplBtn.className = "event-tpl-btn";
+            tplBtn.title = "自定义消息";
+            tplBtn.setAttribute("aria-label", "自定义消息");
+            tplBtn.innerHTML = tplEditDocIconSvg();
+            tplBtn.addEventListener("click", (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              openTplDrawer({
+                scope: "event",
+                familyId: evFamily,
+                eventType: ev.id,
+                eventTitle: ev.title || ev.id,
+              });
+            });
+            top.appendChild(tplBtn);
+            if (status === "event" || status === "family") {
+              const badge = document.createElement("span");
+              badge.className = "event-tpl-badge" + (status === "event" ? " is-event" : " is-family");
+              badge.textContent = status === "event" ? "已单独自定义" : "跟随本类";
+              top.appendChild(badge);
+            }
+          }
+          label.appendChild(top);
           if (ev.id === "SSH_OPEN_TIMEOUT") {
             const row = document.createElement("div");
             row.className = "ssh-timeout-minutes-row";
@@ -2121,6 +3130,12 @@
         document.getElementById("app-version").textContent = data.version || "";
 
         channelOptions = data.channel_options || [];
+        messageTemplates = data.message_templates && typeof data.message_templates === "object"
+          ? data.message_templates
+          : { version: 1, families: {}, events: {} };
+        messageTemplateMeta = data.message_template_meta && typeof data.message_template_meta === "object"
+          ? data.message_template_meta
+          : { families: [], event_family: {}, blacklist: [], title_soft_warn_chars: 80 };
 
         document.getElementById("input-bark-icon").value =
           typeof data.bark_icon === "string" ? data.bark_icon : "";
@@ -2233,119 +3248,22 @@
 
     saveBtn.addEventListener("click", async () => {
       setStatus(false, "");
-      const events = [];
-      [eventsContainer, thirdPartyEventsContainer].forEach(el => {
-        if (!el) return;
-        el.querySelectorAll("input[type=checkbox]").forEach(cb => {
-          if (cb.checked) events.push(cb.value);
+      if (tplDrawerState) {
+        const keep = await showAppConfirm({
+          title: "抽屉仍打开",
+          message: "消息模板抽屉仍打开，页面「保存配置」不会写入抽屉内未点「保存」的修改。\n\n确定继续保存其它配置并关闭抽屉？",
+          confirmText: "继续保存",
+          cancelText: "留在抽屉",
         });
-      });
-
-      const channels = [];
-      channelsBody.querySelectorAll("tr").forEach(tr => {
-        const sel = tr.querySelector("select");
-        if (!sel) return;
-        const type = sel.value;
-        let url = "";
-        if (type === "magic_push") {
-          const wrap = tr.querySelector(".magic-push-fields");
-          url = serializeMagicPushFromInputs(wrap);
-          if (!url) return;
-        } else if (type === "smtp") {
-          const wrap = tr.querySelector(".smtp-fields");
-          url = serializeSmtpFromInputs(wrap);
-          if (!url) return;
-        } else if (type === "wecom_app") {
-          url = serializeWecomAppFromInputs(tr.querySelector(".wecom-app-fields"));
-          if (!url) return;
-        } else if (type === "webhook") {
-          url = serializeWebhookFromInputs(tr.querySelector(".webhook-fields"));
-          if (!url) return;
-        } else if (type === "meow") {
-          url = serializeMeowFromInputs(tr.querySelector(".meow-fields"));
-          if (!url) return;
-        } else if (type === "bark") {
-          const inp = tr.querySelector(".bark-channel-fields input.channel-url-input");
-          if (!inp) return;
-          url = inp.value.trim();
-          if (!url) return;
-        } else {
-          const inp = tr.querySelector("input.channel-url-input");
-          const ta = tr.querySelector("textarea");
-          const urlEl = ta || inp;
-          if (!urlEl) return;
-          url = urlEl.value.trim();
-          if (!url) return;
-        }
-        const enableInp = tr.querySelector("input.channel-enabled-input");
-        const enabled = enableInp ? !!enableInp.checked : true;
-        channels.push({ type, url, enabled });
-      });
-
-      const payload = {
-        events,
-        channels,
-        web_password_enabled: document.getElementById("input-web-password-enabled").checked,
-        log_retention_days: document.getElementById("input-log-days").value,
-        logger_poll_interval: document.getElementById("input-poll-interval").value,
-        title_prefix: (document.getElementById("input-title-prefix").value || "").trim(),
-        poll_batch_summary_enabled: document.getElementById("input-poll-batch-summary").checked,
-        minimal_push_enabled: document.getElementById("input-minimal-push-enabled").checked,
-        ssh_ignore_loopback: document.getElementById("input-ssh-ignore-loopback").checked,
-        ssh_ignore_lan: (function () {
-          const el = document.getElementById("input-ssh-ignore-lan");
-          return !!(el && el.checked);
-        })(),
-        ssh_open_remind_minutes: (function () {
-          const el = document.getElementById("input-ssh-open-remind-minutes");
-          const n = parseInt(el && el.value, 10);
-          if (!Number.isFinite(n) || n < 1) return 30;
-          return Math.min(n, 10080);
-        })(),
-        dnd_enabled: document.getElementById("input-dnd-enabled").checked,
-        dnd_start_time: document.getElementById("input-dnd-start").value || "22:00",
-        dnd_end_time: document.getElementById("input-dnd-end").value || "07:00",
-        startup_quiet_enabled: document.getElementById("input-startup-quiet-enabled").checked,
-        startup_quiet_seconds: (function () {
-          const n = parseInt(document.getElementById("input-startup-quiet-seconds").value, 10);
-          if (!Number.isFinite(n)) return 180;
-          return Math.min(Math.max(n, 30), 1800);
-        })(),
-        startup_quiet_only_after_boot: document.getElementById("input-startup-quiet-only-after-boot").checked,
-        startup_quiet_keep_urgent: document.getElementById("input-startup-quiet-keep-urgent").checked,
-        nas_patrol_enabled: document.getElementById("input-nas-patrol-enabled").checked,
-        nas_patrol_cron: (document.getElementById("input-nas-patrol-cron").value || "").trim(),
-        bark_icon: (document.getElementById("input-bark-icon").value || "").trim(),
-      };
-
+        if (!keep) return;
+        closeTplDrawer({ force: true });
+      }
+      const payload = collectFormPayload();
       const saveText = saveBtn.textContent;
       saveBtn.disabled = true;
       saveBtn.textContent = "正在保存并检查...";
       try {
-        const res = await fetch("api/save-config", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          credentials: "include",
-          body: JSON.stringify(payload),
-        });
-        const json = await res.json();
-        if (res.ok && json.ok) {
-          showToast(true, json.message || "配置已保存");
-          if (Array.isArray(json.warnings) && json.warnings.length) {
-            showToast(false, "部分功能仍有问题，请查看保存按钮下方的检查结果");
-          }
-          renderPersistentWarnings(json.warning_details || json.warnings || []);
-          testBtn.disabled = false;
-          if (payload.web_password_enabled !== loadedPasswordEnabled) {
-            window.fnmbSession.start({authenticated: !payload.web_password_enabled,
-              password_enabled: payload.web_password_enabled});
-            await initAuth();
-          } else {
-            loadConfig(false);
-          }
-        } else {
-          showToast(false, json.message || "保存失败");
-        }
+        await saveConfigPayload(payload);
       } catch (e) {
         console.error(e);
         showToast(false, "保存失败，请检查网络或稍后再试");

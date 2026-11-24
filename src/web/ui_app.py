@@ -39,6 +39,19 @@ from web.api_helpers import parse_success_filter as _parse_success_filter
 from web.app_paths import BASE_DIR
 from web.app_paths import ASSETS_DIR
 from utils.secret_redact import redact_json, redact_secrets
+from utils.message_template import (
+    TITLE_SOFT_WARN_CHARS,
+    build_context,
+    builtin_template,
+    family_id_for_event,
+    is_template_allowed,
+    normalize_message_templates,
+    now_iso,
+    render_message,
+    sample_event_data,
+    template_status_for_event,
+    ui_catalog_meta,
+)
 from utils.startup_quiet import MAX_SECONDS as STARTUP_QUIET_MAX_SECONDS
 from utils.startup_quiet import MIN_SECONDS as STARTUP_QUIET_MIN_SECONDS
 from utils.startup_quiet import clamp_seconds as clamp_startup_quiet_seconds
@@ -320,6 +333,7 @@ def create_app(on_config_saved=None) -> Flask:
         "/api/auth/logout",
         "/session-guard.js",
         "/theme.js",
+        "/app-dialog.js",
     }
     PUBLIC_PREFIXES = ("/assets/",)
 
@@ -434,6 +448,10 @@ def create_app(on_config_saved=None) -> Flask:
     @app.get("/session-guard.js")
     def session_guard_js():
         return send_from_directory(str(_TEMPLATE_DIR.parent / "static"), "session-guard.js")
+
+    @app.get("/app-dialog.js")
+    def app_dialog_js():
+        return send_from_directory(str(_TEMPLATE_DIR.parent / "static"), "app-dialog.js")
 
     @app.post("/api/auth/set-password")
     @_config_transaction
@@ -593,6 +611,8 @@ def create_app(on_config_saved=None) -> Flask:
             "nas_patrol_enabled": as_bool(raw.get("nas_patrol_enabled", False), False),
             "nas_patrol_cron": _cron,
             "channel_options": CHANNEL_OPTIONS,
+            "message_templates": normalize_message_templates(raw.get("message_templates")),
+            "message_template_meta": ui_catalog_meta(),
         }
         # 保存后刷新表单无需重复探测设备，保留保存响应中的检查结果。
         db_access_warnings = (_collect_external_db_access_warnings(raw, monitor_events)
@@ -655,6 +675,13 @@ def create_app(on_config_saved=None) -> Flask:
         if title_prefix and len(title_prefix) > 20:
             return jsonify({"ok": False, "message": "标题前缀过长（最多 20 个字符）。"}), 400
         bark_icon = (payload.get("bark_icon") or "").strip()
+        # message_templates：缺省则保留原配置；显式传入则规范化（非法结构丢弃后仍可存）
+        if "message_templates" in payload:
+            if payload.get("message_templates") is not None and not isinstance(payload.get("message_templates"), dict):
+                return jsonify({"ok": False, "message": "message_templates 必须为对象。"}), 400
+            message_templates = normalize_message_templates(payload.get("message_templates"))
+        else:
+            message_templates = None
 
         if dnd_enabled:
             if not dnd_start_time or not dnd_end_time:
@@ -797,6 +824,8 @@ def create_app(on_config_saved=None) -> Flask:
                 "web_password_enabled": password_enabled,
             }
         )
+        if message_templates is not None:
+            raw["message_templates"] = message_templates
 
         try:
             _save_raw_config(raw)
@@ -823,6 +852,173 @@ def create_app(on_config_saved=None) -> Flask:
             "message": "配置已保存，以下数据源仍需处理。" if db_access_warnings else "配置已保存，监控已热加载生效。",
             "warnings": warning_messages(db_access_warnings), "warning_details": db_access_warnings,
         })
+
+    @app.post("/api/message-template/preview")
+    def message_template_preview():
+        """抽屉实时预览：用样例数据渲染草稿或已存模板。"""
+        payload = request.get_json(silent=True) or {}
+        event_type = str(payload.get("event_type") or "").strip()
+        if not event_type:
+            return jsonify({"ok": False, "message": "缺少 event_type。"}), 400
+        if not is_template_allowed(event_type):
+            return jsonify({"ok": False, "message": "该事件不支持自定义模板。"}), 400
+        raw = _load_raw_config()
+        prefix = _title_prefix_from_dict(raw)
+        official_title = MultiPlatformNotifier.EVENT_TITLES.get(
+            event_type, f"📋 飞牛NAS-系统事件: {event_type}"
+        )
+        official_note = MultiPlatformNotifier.EVENT_NOTES.get(event_type, "") or ""
+        sample = sample_event_data(event_type)
+        ts = "2026-11-23 12:00:00"
+        title_override = payload.get("title")
+        body_override = payload.get("body")
+        has_draft = "title" in payload or "body" in payload
+        rendered = render_message(
+            event_type,
+            sample,
+            timestamp=ts,
+            prefix=prefix,
+            templates=normalize_message_templates(raw.get("message_templates")),
+            official_title=official_title,
+            official_note=official_note,
+            title_override=str(title_override) if has_draft else None,
+            body_override=str(body_override) if has_draft else None,
+        )
+        if rendered is None:
+            # 无自定义时预览官方默认模板文案（抽屉预填）
+            fid = family_id_for_event(event_type) or ""
+            def_title, def_body = builtin_template(fid)
+            rendered = render_message(
+                event_type,
+                sample,
+                timestamp=ts,
+                prefix=prefix,
+                official_title=official_title,
+                official_note=official_note,
+                title_override=def_title,
+                body_override=def_body,
+            )
+        if rendered is None:
+            return jsonify({"ok": False, "message": "预览渲染失败。"}), 400
+        scope, title, body = rendered
+        warnings = []
+        if len(title) > TITLE_SOFT_WARN_CHARS:
+            warnings.append(f"标题约 {len(title)} 字，部分渠道可能截断（建议 ≤{TITLE_SOFT_WARN_CHARS}）。")
+        # 返回渲染上下文（含别名规范化后的 ip/threshold 等），供芯片灰显判断
+        sample_vars = build_context(
+            event_type,
+            sample,
+            prefix=prefix,
+            timestamp=ts,
+            official_title=official_title,
+            official_note=official_note,
+        )
+        return jsonify({
+            "ok": True,
+            "data": {
+                "scope": scope,
+                "title": title,
+                "body": body,
+                "sample_vars": sample_vars,
+                "warnings": warnings,
+                "status": template_status_for_event(
+                    event_type, normalize_message_templates(raw.get("message_templates"))
+                ),
+            },
+        })
+
+    @app.post("/api/message-template/test")
+    def message_template_test():
+        """用草稿或已存模板构造样例事件并试发到已配置渠道。"""
+        notifier = None
+        try:
+            payload = request.get_json(silent=True) or {}
+            event_type = str(payload.get("event_type") or "").strip()
+            if not event_type:
+                return jsonify({"ok": False, "message": "缺少 event_type。"}), 400
+            if not is_template_allowed(event_type):
+                return jsonify({"ok": False, "message": "该事件不支持自定义模板。"}), 400
+            raw = _load_raw_config()
+            if as_bool(raw.get("minimal_push_enabled"), False) and not as_bool(
+                raw.get("poll_batch_summary_enabled"), False
+            ):
+                return jsonify({
+                    "ok": False,
+                    "message": "当前已开启极简推送，自定义模板不会生效；请先关闭极简后再试发。",
+                }), 400
+            templates = normalize_message_templates(raw.get("message_templates"))
+            scope = str(payload.get("scope") or "event").strip()
+            if "title" in payload or "body" in payload:
+                entry = {
+                    "title": str(payload.get("title") or ""),
+                    "body": str(payload.get("body") or ""),
+                    "updated_at": now_iso(),
+                }
+                if not entry["title"].strip() and not entry["body"].strip():
+                    return jsonify({"ok": False, "message": "标题与正文不能同时为空。"}), 400
+                if scope == "family":
+                    fid = family_id_for_event(event_type)
+                    if not fid:
+                        return jsonify({"ok": False, "message": "无法解析事件族。"}), 400
+                    templates["families"][fid] = entry
+                    # 试发时去掉该事件覆盖，确保能看到族模板效果
+                    templates["events"].pop(event_type, None)
+                else:
+                    templates["events"][event_type] = entry
+            raw_for_send = dict(raw)
+            raw_for_send["message_templates"] = templates
+            # 试发时关闭极简，确保走模板路径
+            raw_for_send["minimal_push_enabled"] = False
+            notifier = _build_notifier_from_raw(raw_for_send)
+            sample = sample_event_data(event_type)
+            sample["_template_test"] = secrets.token_hex(6)
+            ts = now_iso().replace("T", " ").replace("Z", "")
+            ok, channel_results = notifier.send_notification(
+                event_type, sample, "", ts
+            )
+            channel_results = redact_json(channel_results) if isinstance(channel_results, list) else []
+            if ok:
+                failures = [
+                    f"{cr.get('channel') or '渠道'}: {cr.get('error') or '发送失败'}"
+                    for cr in channel_results
+                    if isinstance(cr, dict) and (cr.get("error") or not cr.get("success"))
+                ]
+                partial = bool(failures)
+                message = (
+                    "试发部分成功。" + "；".join(failures)
+                    if partial
+                    else "试发已发送，请检查各渠道是否收到样例消息。"
+                )
+                return jsonify({
+                    "ok": True,
+                    "partial": partial,
+                    "message": redact_secrets(message),
+                    "channel_results": channel_results or [],
+                })
+            fail_bits = []
+            for cr in channel_results or []:
+                if not isinstance(cr, dict):
+                    continue
+                name = str(cr.get("channel") or "渠道")
+                err = cr.get("error")
+                if err:
+                    fail_bits.append(f"{name}: {err}")
+                elif not cr.get("success"):
+                    fail_bits.append(f"{name}: 发送失败")
+            detail = "；".join(fail_bits) if fail_bits else "请检查渠道配置"
+            return jsonify({
+                "ok": False,
+                "message": redact_secrets(f"试发失败。{detail}"),
+                "channel_results": channel_results or [],
+            }), 500
+        except Exception as e:
+            return jsonify({"ok": False, "message": redact_secrets(f"试发异常：{e}")}), 500
+        finally:
+            if notifier is not None:
+                try:
+                    notifier.close()
+                except Exception:
+                    app.logger.warning("关闭模板试发通知器失败", exc_info=True)
 
     @app.post("/api/test")
     def test_push():

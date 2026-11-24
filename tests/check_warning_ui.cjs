@@ -8,6 +8,7 @@ const root = path.resolve(__dirname, '..');
 const source = fs.existsSync(path.join(root, 'src')) ? path.join(root, 'src') : path.join(root, 'cmd/fnmessagebots/src');
 const html = fs.readFileSync(path.join(source, 'web/templates/index.html'), 'utf8')
   .replace("{{ url_for('session_guard_js') }}", 'session-guard.js')
+  .replace("{{ url_for('app_dialog_js') }}", 'app-dialog.js')
   .replace(/\{%[\s\S]*?%\}/g, '').replace(/\{\{[\s\S]*?\}\}/g, '');
 const commands = "sudo setfacl -m u:FnMessageBot:r '/path with spaces/db'\necho '<script>unsafe</script>'";
 const fixture = process.env.FNMB_WARNING_FIXTURE
@@ -42,6 +43,10 @@ const data = fixture ? fixture.data : {title: 'FnMessageBot', selected_events: [
         await route.fulfill({contentType: 'application/javascript', body: fs.readFileSync(path.join(source, 'web/static/session-guard.js'), 'utf8')});
         return;
       }
+      if (url.pathname.endsWith('/app-dialog.js')) {
+        await route.fulfill({contentType: 'application/javascript', body: fs.readFileSync(path.join(source, 'web/static/app-dialog.js'), 'utf8')});
+        return;
+      }
       if (url.pathname.endsWith('/api/auth/status')) response = {ok: true, authenticated: true, remaining_seconds: 900};
       else if (url.pathname.endsWith('/api/config')) {
         refreshWithoutCheck ||= url.searchParams.get('check_access') === '0';
@@ -68,7 +73,9 @@ const data = fixture ? fixture.data : {title: 'FnMessageBot', selected_events: [
     await page.locator('#warning-panel.show').waitFor();
     assert.equal(await page.locator('#warning-panel img').count(), 0);
     assert.equal(await page.evaluate(() => window.fnmbXss), undefined);
-    assert.equal(await page.locator('#warning-panel a').getAttribute('href'), 'faq#' + details[0].faq);
+    assert.ok((await page.locator('#warning-panel .warning-panel-hint').textContent()).includes('root 版'));
+    assert.equal(await page.locator('#warning-panel .warning-panel-hint a').getAttribute('href'), 'https://www.fnmb.lndo.top/');
+    assert.equal(await page.locator('#warning-panel .warning-panel-item a').getAttribute('href'), 'faq#' + details[0].faq);
     await page.locator('#warning-panel summary').click();
     assert.equal(await page.locator('#warning-panel pre').textContent(), warningCommands);
     await page.evaluate(() => {

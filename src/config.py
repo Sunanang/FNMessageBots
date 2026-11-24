@@ -9,6 +9,7 @@ from typing import List, Dict, Any
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from notifier.channel_params import validate_channel_json
+from utils.message_template import empty_templates, normalize_message_templates
 from utils.startup_quiet import DEFAULT_SECONDS as STARTUP_QUIET_DEFAULT_SECONDS, clamp_seconds as clamp_startup_quiet_seconds
 from utils.value_parser import as_bool
 from valid_event_ids import filter_monitor_events
@@ -38,6 +39,8 @@ class Config:
     title_prefix: str = field(default=TITLE_PREFIX_DEFAULT)
     # 极简推送：开启后所有渠道仅推送一行关键信息（默认关闭）
     minimal_push_enabled: bool = False
+    # 消息标题/正文自定义（事件族 + 单事件）；结构见 utils.message_template
+    message_templates: Dict[str, Any] = field(default_factory=empty_templates)
     # 忽略本机回环（127.0.0.1 / ::1）的 SSH 登录成功与断开；SSH 经内网穿透接入时来源同为回环，勿开启
     ssh_ignore_loopback: bool = False
     # 忽略局域网（私网）来源的 SSH 登录成功 / 断开；失败与无效用户仍推送
@@ -134,6 +137,9 @@ class Config:
         self._load_from_file_skip_if_set()
         self._apply_discovered_db_paths()
         self.title_prefix = (self.title_prefix or "").strip()
+        self.message_templates = normalize_message_templates(
+            getattr(self, "message_templates", None)
+        )
         self._validate()
         self._ensure_directories()
     
@@ -245,6 +251,8 @@ class Config:
                 setattr(self, key, data[key])
         if "title_prefix" in data and isinstance(data["title_prefix"], str):
             self.title_prefix = (data["title_prefix"] or "").strip()
+        if "message_templates" in data:
+            self.message_templates = normalize_message_templates(data.get("message_templates"))
         if not env_skip("log_retention_days") and "log_retention_days" in data and data["log_retention_days"] is not None:
             try:
                 self.log_retention_days = int(data["log_retention_days"])
@@ -304,6 +312,9 @@ class Config:
             self.docker_socket_path = (data["docker_socket_path"] or "").strip() or "/var/run/docker.sock"
         self._apply_discovered_db_paths()
         self.title_prefix = (self.title_prefix or "").strip()
+        self.message_templates = normalize_message_templates(
+            getattr(self, "message_templates", None)
+        )
         try:
             self._validate()
         except ValueError as e:
@@ -607,6 +618,9 @@ class Config:
         self.nas_patrol_cron = resolve_nas_patrol_cron(
             getattr(self, "nas_patrol_cron", "") or "",
             self.nas_patrol_interval_minutes,
+        )
+        self.message_templates = normalize_message_templates(
+            getattr(self, "message_templates", None)
         )
 
     def _ensure_directories(self):
