@@ -12,11 +12,14 @@ import requests
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from notifier.connection_pool import ConnectionPool
+from utils.secret_redact import redact_secrets
 from web.config_store import load_raw_config, mask_channels, restore_masked_channels, save_raw_config
 
 
 TOKEN = "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi"
 URL = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+MAGIC_TOKEN = "mp_live_super_secret_token_xyz"
+MAGIC_URL = f"https://push.example.com/api/push/{MAGIC_TOKEN}"
 
 
 class TelegramTokenRedactionTests(unittest.TestCase):
@@ -45,7 +48,11 @@ class TelegramTokenRedactionTests(unittest.TestCase):
                 with patch.object(pool.session, "request", side_effect=failure):
                     with self.assertLogs("notifier.connection_pool", logging.ERROR) as logs:
                         result = pool.post(URL, {"text": "test"})
-                self.assertNotIn(TOKEN, " ".join(logs.output) + str(result))
+                joined = " ".join(logs.output) + str(result)
+                self.assertNotIn(TOKEN, joined)
+                if isinstance(failure, RuntimeError):
+                    self.assertIn("Traceback (most recent call last):", joined)
+                    self.assertIn("RuntimeError", joined)
         pool.close()
 
     def test_proxy_url_with_port_is_also_redacted(self):
@@ -78,3 +85,12 @@ class TelegramTokenRedactionTests(unittest.TestCase):
         self.assertTrue(result["success"])
         self.assertNotIn(TOKEN, str(result))
         pool.close()
+
+    def test_encoded_token_and_magic_push_path_are_redacted(self):
+        encoded = URL.replace(":", "%3A")
+        self.assertNotIn(TOKEN, redact_secrets(encoded))
+        self.assertNotIn(TOKEN, ConnectionPool._safe_preview("err " + encoded, encoded))
+        self.assertNotIn(MAGIC_TOKEN, redact_secrets(MAGIC_URL + "?x=1"))
+        self.assertNotIn(MAGIC_TOKEN, ConnectionPool._safe_url(MAGIC_URL + "?x=1"))
+        displayed = mask_channels([{"type": "webhook", "url": MAGIC_URL, "enabled": True}])
+        self.assertNotIn(MAGIC_TOKEN, str(displayed))

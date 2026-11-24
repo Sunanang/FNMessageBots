@@ -260,6 +260,22 @@ class NotificationOutboxTests(unittest.TestCase):
         app.event_processor.process_batch_events.assert_not_called()
         self.assertFalse(app._poll_outbox().poll_items())
 
+    def test_empty_monitor_events_during_hot_reload_does_not_ack_outbox(self):
+        """热加载瞬间 monitor_events 为空时不得误 ack，也不得 claim（避免 60s 节流卡住）。"""
+        app = self.app()
+        app._enqueue_unified_batch_items([self.item()])
+        self.config.monitor_events = []
+        with patch.object(app._poll_outbox(), "claim_poll", wraps=app._poll_outbox().claim_poll) as claim:
+            app._flush_unified_batch_pending_only()
+            claim.assert_not_called()
+        app.event_processor.process_batch_events.assert_not_called()
+        self.assertEqual(len(app._poll_outbox().poll_items()), 1)
+        # 恢复勾选后应立刻能 claim 投递，而不是被空窗 claim 的 last_attempt 卡住
+        self.config.monitor_events = ["MUSIC_FAVORITED"]
+        app._flush_unified_batch_pending_only()
+        app.event_processor.process_batch_events.assert_called_once()
+        self.assertEqual(app._poll_outbox().poll_items(), [])
+
     def test_new_events_arriving_during_send_survive_acknowledgement(self):
         app = self.app()
         app._enqueue_unified_batch_items([self.item()])

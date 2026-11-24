@@ -167,12 +167,19 @@ class Application:
         try:
             outbox = self._poll_outbox()
             if outbox is not None:
+                selected = set(getattr(self.config, "monitor_events", []) or [])
+                # 热加载瞬间 monitor_events 为空：不要 claim（否则会写入 last_attempt，卡住队列约 60s），也不要 ack
+                if not selected:
+                    return
                 job = outbox.claim_poll(time.time())
                 if job is None:
                     return
-                selected = set(getattr(self.config, "monitor_events", []) or [])
                 buf = [item for item in job["items"] if item.get("event_type") in selected]
-                result = self.event_processor.process_batch_events(buf) if buf else True
+                if not buf:
+                    # 批次里全是已取消勾选的类型：按文档不再投递，确认删除
+                    outbox.ack_poll(job["ids"])
+                    return
+                result = self.event_processor.process_batch_events(buf)
                 if result is not False and getattr(result, "success", None) is not False:
                     outbox.ack_poll(job["ids"])
                 return
@@ -639,12 +646,17 @@ class Application:
             if self.ssh_open_watch is not None:
                 self.ssh_journal_poller.add_service_hook(self.ssh_open_watch.on_service_event)
 
-        # journal 可用时跳过 logger_data 中的 Sshd*，避免双推；不可用则回退库表
+        # journal 可用时跳过 logger_data 中的 Sshd*，避免双推；不可用则回退库表。
+        # 挂上动态检查，journal 稍后就绪时不必等下次热加载。
         if self.log_poller is not None:
-            journal_ok = bool(
-                self.ssh_journal_poller is not None and self.ssh_journal_poller.is_available()
-            )
-            self.log_poller.skip_ssh_events = journal_ok
+            def _journal_ok() -> bool:
+                return bool(
+                    self.ssh_journal_poller is not None
+                    and self.ssh_journal_poller.is_available()
+                )
+
+            self.log_poller.journal_available_checker = _journal_ok
+            self.log_poller.skip_ssh_events = _journal_ok()
             self.log_poller.ignore_ssh_loopback = ssh_ignore_loopback
             self.log_poller.ignore_ssh_lan = ssh_ignore_lan
 
@@ -828,8 +840,14 @@ class Application:
         elif self.notifier is not None:
             self.notifier.reload_config()
             logger_db_path = (getattr(self.config, "logger_db_path", "") or "").strip()
-            log_poller_should_run = bool(logger_db_path) and self._probe_db_readable("主日志库 logger_data.db3", logger_db_path)
-            if log_poller_should_run:
+            log_readable = bool(logger_db_path) and self._probe_db_readable("主日志库 logger_data.db3", logger_db_path)
+            if not logger_db_path:
+                # 用户清空路径：停止轮询。冷启动对齐 MAX(id) 仅发生在真正新建 poller 时。
+                if self.log_poller is not None:
+                    self.log_poller.stop()
+                    self.log_poller = None
+                    print("主日志库路径已清空，已停止主日志库轮询器。")
+            elif log_readable:
                 if self.log_poller is not None:
                     self.log_poller.update_config(
                         monitor_events=self.config.monitor_events,
@@ -846,10 +864,11 @@ class Application:
                     # 允许配置热加载后补齐 logger_db_path 并启用主日志轮询器
                     self.log_poller = self._build_log_poller()
             else:
+                # 路径仍在但短暂不可读：保留已有 poller，避免销毁后重建对齐 MAX(id) 丢窗口事件
                 if self.log_poller is not None:
-                    self.log_poller.stop()
-                    self.log_poller = None
-                    print("主日志库配置不可用，已停止主日志库轮询器。")
+                    print("主日志库暂时不可读，保留现有轮询器水位，不重新对齐。")
+                else:
+                    print("主日志库配置不可用，暂不创建主日志库轮询器。")
             self._sync_optional_pollers()
             self._register_db_event_handlers()
             if self.log_poller:
@@ -897,7 +916,7 @@ class Application:
                     self.notifier.send_system_notification(
                         'APP_ERROR',
                         '应用初始化失败: 未知错误',
-                        {'hostname': socket.gethostname(), 'version': '2.9.0'}
+                        {'hostname': socket.gethostname(), 'version': '2.10.0'}
                     )
                 sys.exit(1)
             
@@ -934,7 +953,7 @@ class Application:
                     self.notifier.send_system_notification(
                         'APP_START',
                         '飞牛NAS日志监控系统已启动，开始监控系统事件',
-                        {'hostname': socket.gethostname(), 'version': '2.9.0'}
+                        {'hostname': socket.gethostname(), 'version': '2.10.0'}
                     )
                 else:
                     print("距上次启动通知不足 10 分钟，跳过本次启动通知（避免频繁重启刷屏）")
@@ -967,6 +986,11 @@ class Application:
                     except Exception as e:
                         if self.logger:
                             self.logger.warning("勿扰汇总检查异常: %s", e)
+                    try:
+                        self.notifier.flush_startup_quiet_if_needed()
+                    except Exception as e:
+                        if self.logger:
+                            self.logger.warning("启动静默期汇总检查异常: %s", e)
                 time.sleep(1)
 
         except KeyboardInterrupt:
@@ -1091,7 +1115,7 @@ class Application:
                 self.notifier.send_system_notification(
                     'APP_ERROR',
                     f'触发自动重启: {reason}',
-                    {'hostname': socket.gethostname(), 'version': '2.9.0'}
+                    {'hostname': socket.gethostname(), 'version': '2.10.0'}
                 )
         except Exception:
             pass
@@ -1115,7 +1139,7 @@ class Application:
             self.notifier.send_system_notification(
                 'APP_STOP',
                 '飞牛NAS日志监控系统已停止，监控服务暂停',
-                {'hostname': socket.gethostname(), 'version': '2.9.0'}
+                {'hostname': socket.gethostname(), 'version': '2.10.0'}
             )
 
         # 停止数据库轮询器

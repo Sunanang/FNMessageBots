@@ -105,6 +105,8 @@ start_process() {
         export APP_HOME="${TRIM_PKGVAR}" UI_HOST="127.0.0.1" UI_PORT="${ui_port}"
         export FNMB_GATEWAY_SOCKET="${GATEWAY_SOCKET}" FNMB_GATEWAY_PREFIX="${GATEWAY_PREFIX}"
         export PYTHONUNBUFFERED=1 PYTHONPATH="${pypath}"
+        # 与 Docker 镜像一致，勿扰/展示默认按上海墙钟，避免宿主 TZ 干扰
+        export TZ="${TZ:-Asia/Shanghai}"
         cd "${TRIM_PKGVAR}" || exit 1
         exec "${py}" -u "${app_main}"
     ) >> "${LOG_FILE}" 2>&1 &

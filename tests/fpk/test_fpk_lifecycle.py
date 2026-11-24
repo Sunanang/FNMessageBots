@@ -178,7 +178,8 @@ class FpkLifecycleTests(unittest.TestCase):
         for value in ("", "1023", "0", "65536", "99999", "18080.0", "port"):
             self.assertIsNone(re.fullmatch(pattern, value), value)
 
-    def test_reinstall_preserves_configuration_password_port_and_runtime_data(self):
+    def test_reinstall_preserves_config_and_port_but_applies_wizard_password(self):
+        import hashlib
         import sqlite3
         install = self.base / "install"
         code = install / "cmd/fnmessagebots"
@@ -209,19 +210,44 @@ class FpkLifecycleTests(unittest.TestCase):
         (self.data / "venv/bin").mkdir(parents=True)
         (self.data / "venv/bin/python").write_text("#!/bin/sh\nexit 0\n")
         (self.data / "venv/bin/python").chmod(0o755)
-        before = {p.relative_to(self.data): p.read_bytes() for p in self.data.rglob("*")
-                  if p.is_file() and "venv" not in p.parts}
-        for callback in ("install_callback", "upgrade_callback"):
-            with self.subTest(callback=callback):
-                result = subprocess.run(["bash", str(install / "cmd" / callback)], env={
-                    **self.env, "wizard_ui_port": "18230", "wizard_web_password": "new-password-123",
-                    "wizard_web_password_confirm": "new-password-123",
-                }, capture_output=True, text=True, timeout=10)
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                for path, contents in before.items():
-                    self.assertEqual((self.data / path).read_bytes(), contents, str(path))
-                self.assertFalse((self.data / "venv").exists(), "旧版 venv 应被清理")
+        preserve = {
+            p.relative_to(self.data): p.read_bytes()
+            for p in self.data.rglob("*")
+            if p.is_file() and "venv" not in p.parts and p.name != "config.json"
+        }
 
+        # 覆盖安装：向导密码必须写入；端口与推送配置保留
+        result = subprocess.run(["bash", str(install / "cmd/install_callback")], env={
+            **self.env, "wizard_ui_port": "18230", "wizard_web_password": "new-password-123",
+            "wizard_web_password_confirm": "new-password-123",
+        }, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for path, contents in preserve.items():
+            self.assertEqual((self.data / path).read_bytes(), contents, str(path))
+        self.assertEqual((self.data / "config/ui_port").read_text(), "19080\n")
+        configured = json.loads((self.data / "config/config.json").read_text())
+        self.assertEqual(configured["monitor_events"], ["LoginSucc"])
+        self.assertEqual(configured["wechat_webhook_url"], "https://example.invalid/keep")
+        self.assertTrue(configured["web_password_enabled"])
+        self.assertEqual(
+            configured["web_password_hash"],
+            hashlib.pbkdf2_hmac(
+                "sha256", b"new-password-123", bytes.fromhex(configured["web_password_salt"]), 100000
+            ).hex(),
+        )
+        self.assertNotEqual(configured["web_password_hash"], "old-hash")
+        self.assertNotIn("new-password-123", (self.data / "config/config.json").read_text())
+        self.assertFalse((self.data / "venv").exists(), "旧版 venv 应被清理")
+
+        # 升级回调：即使环境里有向导密码变量，也不改密码（升级向导不收集密码）
+        before_upgrade = (self.data / "config/config.json").read_bytes()
+        result = subprocess.run(["bash", str(install / "cmd/upgrade_callback")], env={
+            **self.env, "wizard_ui_port": "18230", "wizard_web_password": "another-password-999",
+            "wizard_web_password_confirm": "another-password-999",
+        }, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.data / "config/config.json").read_bytes(), before_upgrade)
+        self.assertEqual((self.data / "config/ui_port").read_text(), "19080\n")
 
 if __name__ == "__main__":
     unittest.main()

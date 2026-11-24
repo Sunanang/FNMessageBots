@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 from zoneinfo import ZoneInfo
 
+from utils.secret_redact import redact_json, redact_secrets
+
 _lock = threading.Lock()
 _db_path: str = ""
 MAX_RECORDS = 10000
@@ -20,7 +22,8 @@ MAX_DETAIL_CHARS = 5000
 
 
 def _truncate_text(value: Any, max_chars: int) -> str:
-    text = str(value or "")
+    # 先脱敏再截断，避免半截 token 落库或返回
+    text = redact_secrets(value)
     if len(text) <= max_chars:
         return text
     return text[: max(0, max_chars - 3)] + "..."
@@ -165,17 +168,18 @@ def _minimal_detail(detail: Any) -> Dict[str, Any]:
 def _serialize_detail(detail: Optional[Dict[str, Any]]) -> Optional[str]:
     if detail is None:
         return None
+    safe = redact_json(detail) if isinstance(detail, (dict, list)) else detail
     candidates = [
-        detail,
-        _compact_detail(detail, response_chars=800, include_event_data=True),
-        _compact_detail(detail, response_chars=500, include_event_data=False),
-        _minimal_detail(detail),
+        safe,
+        _compact_detail(safe, response_chars=800, include_event_data=True),
+        _compact_detail(safe, response_chars=500, include_event_data=False),
+        _minimal_detail(safe),
     ]
     for candidate in candidates:
         detail_str = json.dumps(candidate, ensure_ascii=False, default=str, separators=(",", ":"))
         if len(detail_str) <= MAX_DETAIL_CHARS:
             return detail_str
-    minimal = _minimal_detail(detail)
+    minimal = _minimal_detail(safe)
     for row in minimal.get("channel_results", []):
         if isinstance(row, dict) and "response" in row:
             row["response"] = _truncate_text(json.dumps(row["response"], ensure_ascii=False, default=str), 120)
@@ -201,7 +205,7 @@ def _serialize_detail(detail: Optional[Dict[str, Any]]) -> Optional[str]:
         {
             "storage_note": "detail_compacted",
             "failure_summary": _truncate_text(
-                detail.get("failure_summary") if isinstance(detail, dict) else detail,
+                safe.get("failure_summary") if isinstance(safe, dict) else safe,
                 1000,
             ),
         },
@@ -209,6 +213,26 @@ def _serialize_detail(detail: Optional[Dict[str, Any]]) -> Optional[str]:
         default=str,
         separators=(",", ":"),
     )
+
+
+def _public_row(r: sqlite3.Row) -> Dict[str, Any]:
+    """读出记录时再脱敏一次，兼容历史明文落库。"""
+    summary = redact_secrets(r["summary"] or "")
+    detail = r["detail"]
+    if isinstance(detail, str) and detail:
+        try:
+            parsed = json.loads(detail)
+            detail = json.dumps(redact_json(parsed), ensure_ascii=False, default=str, separators=(",", ":"))
+        except (json.JSONDecodeError, TypeError):
+            detail = redact_secrets(detail)
+    return {
+        "id": r["id"],
+        "created_at": r["created_at"],
+        "event_type": r["event_type"],
+        "success": bool(r["success"]),
+        "summary": summary,
+        "detail": detail,
+    }
 
 
 def init(cursor_dir: str) -> None:
@@ -261,14 +285,15 @@ def add_record(
         return
     created_at = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
     detail_str = _serialize_detail(detail)
-    if summary and len(summary) > 500:
+    summary = redact_secrets(summary or "")
+    if len(summary) > 500:
         summary = summary[:497] + "..."
     with _lock:
         conn = _conn()
         try:
             conn.execute(
                 "INSERT INTO push_history (created_at, event_type, success, summary, detail) VALUES (?, ?, ?, ?, ?)",
-                (created_at, event_type, 1 if success else 0, summary or "", detail_str),
+                (created_at, event_type, 1 if success else 0, summary, detail_str),
             )
             conn.commit()
             cur = conn.execute("SELECT COUNT(*) FROM push_history")
@@ -296,8 +321,8 @@ def bulk_insert(records: List[Dict[str, Any]]) -> None:
         created_at = str(r.get("created_at", ""))[:19]
         event_type = str(r.get("event_type", "")) or "Unknown"
         success = 1 if r.get("success", True) else 0
-        summary = str(r.get("summary", ""))[:500]
-        if len(str(r.get("summary", ""))) > 500:
+        summary = redact_secrets(r.get("summary", ""))
+        if len(summary) > 500:
             summary = summary[:497] + "..."
         detail = r.get("detail")
         detail_str = _serialize_detail(detail)
@@ -345,18 +370,7 @@ def get_records(
             sql += " ORDER BY id DESC LIMIT ? OFFSET ?"
             params.extend([limit, offset])
             cur = conn.execute(sql, params)
-            rows = cur.fetchall()
-            return [
-                {
-                    "id": r["id"],
-                    "created_at": r["created_at"],
-                    "event_type": r["event_type"],
-                    "success": bool(r["success"]),
-                    "summary": r["summary"] or "",
-                    "detail": r["detail"],
-                }
-                for r in rows
-            ]
+            return [_public_row(r) for r in cur.fetchall()]
         finally:
             conn.close()
 
@@ -376,14 +390,7 @@ def get_record(record_id: int) -> Optional[Dict[str, Any]]:
             r = cur.fetchone()
             if r is None:
                 return None
-            return {
-                "id": r["id"],
-                "created_at": r["created_at"],
-                "event_type": r["event_type"],
-                "success": bool(r["success"]),
-                "summary": r["summary"] or "",
-                "detail": r["detail"],
-            }
+            return _public_row(r)
         finally:
             conn.close()
 

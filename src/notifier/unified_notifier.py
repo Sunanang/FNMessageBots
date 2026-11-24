@@ -21,6 +21,7 @@ from typing import Dict, Any, List, Optional, Set, Tuple
 from config import TITLE_PREFIX_DEFAULT
 from utils.logtime_display import get_logtime_display_offset_seconds
 from utils.notification_outbox import NotificationOutbox, OutboxWriteError, RETRY_SECONDS
+from utils.startup_quiet import SUMMARY_EVENT_TYPES, StartupQuietWindow
 from .multi_platform_notifier import DOCKER_CONTAINER_EVENT_TYPES, MultiPlatformNotifier
 from monitor.db_log_poller import DB_EVENT_ID_TO_PROJECT
 from monitor.sqlite_uri import connect_readonly_with_fallback
@@ -157,6 +158,7 @@ class UnifiedNotifier:
         self._dnd_delivery_lock = threading.RLock()
         self._dnd_outbox: Optional[NotificationOutbox] = None
         self._dnd_memory_state: Dict[str, Any] = {}
+        self._startup_quiet = self._build_startup_quiet_window()
         self._load_last_dnd_summary_end()
         dnd_state = self._read_dnd_state()
         self._sync_dnd_counts(dnd_state)
@@ -180,6 +182,7 @@ class UnifiedNotifier:
             title_prefix=getattr(config, "title_prefix", TITLE_PREFIX_DEFAULT),
             minimal_push_enabled=bool(getattr(config, "minimal_push_enabled", False)),
             poll_batch_summary_enabled=bool(getattr(config, "poll_batch_summary_enabled", False)),
+            message_templates=getattr(config, "message_templates", None),
             user_lookup_db_path=getattr(config, "trim_media_db_path", "") or "",
             activity_user_lookup_db_path=getattr(config, "trim_activity_db_path", "") or "",
             logger_user_lookup_db_path=getattr(config, "logger_db_path", "") or "",
@@ -193,6 +196,12 @@ class UnifiedNotifier:
     def reload_config(self):
         """按当前 self.config 重新创建多平台通知器（保存配置后热加载用）。"""
         old = self.multi_platform_notifier
+        # 先停旧器再创建新器，避免磁盘合并定时器双跑
+        if old:
+            try:
+                old.close()
+            except Exception as e:
+                self.logger.warning("关闭旧通知器失败: %s", e)
         self.multi_platform_notifier = MultiPlatformNotifier(
             wechat_webhook_url=self.config.wechat_webhook_url,
             dingtalk_webhook_url=self.config.dingtalk_webhook_url,
@@ -208,6 +217,7 @@ class UnifiedNotifier:
             title_prefix=getattr(self.config, "title_prefix", TITLE_PREFIX_DEFAULT),
             minimal_push_enabled=bool(getattr(self.config, "minimal_push_enabled", False)),
             poll_batch_summary_enabled=bool(getattr(self.config, "poll_batch_summary_enabled", False)),
+            message_templates=getattr(self.config, "message_templates", None),
             user_lookup_db_path=getattr(self.config, "trim_media_db_path", "") or "",
             activity_user_lookup_db_path=getattr(self.config, "trim_activity_db_path", "") or "",
             logger_user_lookup_db_path=getattr(self.config, "logger_db_path", "") or "",
@@ -216,14 +226,79 @@ class UnifiedNotifier:
             retries=self.config.http_retry_count,
             timeout=self.config.http_timeout,
         )
-        if old:
-            try:
-                old.close()
-            except Exception as e:
-                self.logger.warning("关闭旧通知器失败: %s", e)
         self.logger.info("多平台通知器已热加载配置")
+        window = getattr(self, "_startup_quiet", None)
+        if window is None:
+            self._startup_quiet = self._build_startup_quiet_window()
+        else:
+            self._configure_startup_quiet(window)
         self._load_last_dnd_summary_end()
         self._handle_dnd_config_transition_after_reload()
+
+    def _build_startup_quiet_window(self) -> StartupQuietWindow:
+        """按当前配置创建启动静默期窗口（状态落盘在 cursor_dir）。"""
+        cursor_dir = str(getattr(self.config, "cursor_dir", "") or "").strip() or "./data/cursor"
+        window = StartupQuietWindow(cursor_dir, logger=self.logger)
+        self._configure_startup_quiet(window)
+        return window
+
+    def _configure_startup_quiet(self, window: StartupQuietWindow) -> None:
+        was_enabled = bool(window.enabled)
+        window.configure(
+            enabled=bool(getattr(self.config, "startup_quiet_enabled", False)),
+            seconds=getattr(self.config, "startup_quiet_seconds", 180),
+            keep_urgent=bool(getattr(self.config, "startup_quiet_keep_urgent", True)),
+            only_after_boot=bool(getattr(self.config, "startup_quiet_only_after_boot", True)),
+        )
+        # 热加载关闭静默期：立刻补发已折叠计数，避免永远留在磁盘里
+        if was_enabled and not window.enabled:
+            self.flush_startup_quiet_if_needed(force=True)
+
+    @staticmethod
+    def _startup_quiet_event_count(event_type: str, event_data: Dict[str, Any]) -> int:
+        """汇总类事件按自带条数折叠，其余算一条。"""
+        if str(event_type) in SUMMARY_EVENT_TYPES and isinstance(event_data, dict):
+            try:
+                return max(1, int(event_data.get("count") or 1))
+            except (TypeError, ValueError):
+                return 1
+        return 1
+
+    def flush_startup_quiet_if_needed(self, *, force: bool = False) -> None:
+        """静默期结束后补一条「折叠 N 条」汇总；仅推送成功后才清空计数。"""
+        window = getattr(self, "_startup_quiet", None)
+        if window is None:
+            return
+        if not force and not window.enabled:
+            return
+        try:
+            summary = window.peek_summary(force=force)
+        except Exception as e:
+            self.logger.warning("启动静默期汇总生成失败: %s", e)
+            return
+        if not summary:
+            return
+        try:
+            out = self.multi_platform_notifier.send_system_notification(
+                "STARTUP_QUIET_SUMMARY", summary, {"hostname": "", "version": ""}
+            )
+        except Exception as e:
+            self.logger.warning("启动静默期汇总推送失败: %s", e)
+            return
+        success = out.get("success", False) if isinstance(out, dict) else bool(out)
+        if not success:
+            channel_results = out.get("channel_results") if isinstance(out, dict) else []
+            self._record_system_notification_failure(
+                "STARTUP_QUIET_SUMMARY", summary, {"hostname": "", "version": ""},
+                channel_results if isinstance(channel_results, list) else [],
+            )
+            return
+        try:
+            window.confirm_summary()
+        except Exception as e:
+            self.logger.warning("启动静默期汇总确认落盘失败: %s", e)
+            return
+        self.logger.info("启动静默期汇总已发送：%s", summary)
 
     def _handle_dnd_config_transition_after_reload(self) -> None:
         """
@@ -770,6 +845,17 @@ class UnifiedNotifier:
         Returns:
             通知发送结果
         """
+        # 启动静默期：窗口内只记录不推送（安全类事件按白名单放行），窗口结束后由
+        # flush_startup_quiet_if_needed 补一条汇总。
+        window = getattr(self, "_startup_quiet", None)
+        if window is not None and window.should_suppress(
+            event_type, count=self._startup_quiet_event_count(event_type, event_data)
+        ):
+            return NotificationResult(
+                success=True,
+                method="startup_quiet_skipped",
+                details={"event_type": event_type, "startup_quiet": True},
+            )
         fingerprint = self._dnd_fingerprint(event_type, event_data)
         if fingerprint and getattr(self.config, "dnd_enabled", False):
             accepted_at = self._read_dnd_state().get("receipts", {}).get(fingerprint)

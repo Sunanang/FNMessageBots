@@ -6,13 +6,13 @@
   "assets": [
     {
       "name": "FnMessageBot-2.9.0-root.fpk",
-      "size": 3103482,
-      "sha256": "ff14ddc74670f56e6d6089c94ce17f430c48d05e919f85c85f072f2e5760deb4"
+      "size": 3103860,
+      "sha256": "397408e83d1bbb3e4560f3ea3779609d2d3fd32cf2baea8c4abb5101ae4a3a04"
     },
     {
       "name": "FnMessageBot-2.9.0.fpk",
-      "size": 3103536,
-      "sha256": "ca892b6e4da31444b487587f7cca89a4c6da0b8705a094ca24ff43ee791f5afa"
+      "size": 3103934,
+      "sha256": "d498b706dc21f62aef0dad5bf0a36eee1137d9cf9392c00ae51661d7f708d973"
     }
   ]
 }

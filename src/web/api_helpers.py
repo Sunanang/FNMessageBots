@@ -26,6 +26,7 @@ def build_notifier_from_raw(raw: dict) -> MultiPlatformNotifier:
         title_prefix=title_prefix_from_dict(raw),
         minimal_push_enabled=bool(raw.get("minimal_push_enabled", False)),
         poll_batch_summary_enabled=bool(raw.get("poll_batch_summary_enabled", False)),
+        message_templates=raw.get("message_templates"),
         user_lookup_db_path=str(raw.get("trim_media_db_path", "") or ""),
         activity_user_lookup_db_path=str(raw.get("trim_activity_db_path", "") or ""),
         logger_user_lookup_db_path=str(raw.get("logger_db_path", "") or ""),

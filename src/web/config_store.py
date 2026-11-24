@@ -162,7 +162,9 @@ def normalize_push_channels(channels: Any) -> List[Dict[str, Any]]:
 SECRET_MASK = "******"
 _URL_SECRET_QUERY_KEYS = frozenset({"key", "access_token", "token", "secret", "sign"})
 _URL_SECRET_SEGMENT = re.compile(r"^[A-Za-z0-9_\-]{16,}$")
-_TELEGRAM_BOT_SEGMENT = re.compile(r"^bot[0-9]+:[A-Za-z0-9_-]+$", re.I)
+# 支持字面量冒号与 %3A 编码（urlsplit 后可能仍保留编码形态）
+_TELEGRAM_BOT_SEGMENT = re.compile(r"^bot[0-9]+(?::|%3[aA])[A-Za-z0-9_-]+$", re.I)
+_MAGIC_PUSH_PATH_SEGMENT = re.compile(r"^(?:push|inbound)$", re.I)
 _SECRET_HEADER_NAME = re.compile(r"auth|token|key|secret|sign|cookie|password", re.I)
 
 
@@ -190,11 +192,24 @@ def _mask_url(url: str) -> str:
         parts = urllib.parse.urlsplit(url)
     except ValueError:
         return mask_secret(url)
-    segments = [
-        "bot" + SECRET_MASK if _TELEGRAM_BOT_SEGMENT.match(s) else
-        mask_secret(s) if _URL_SECRET_SEGMENT.match(s) else s
-        for s in parts.path.split("/")
-    ]
+    raw_segments = parts.path.split("/")
+    segments = []
+    for index, segment in enumerate(raw_segments):
+        decoded = urllib.parse.unquote(segment)
+        if _TELEGRAM_BOT_SEGMENT.match(segment) or _TELEGRAM_BOT_SEGMENT.match(decoded):
+            segments.append("bot" + SECRET_MASK)
+            continue
+        # 魔法推送 /api/push/<token>、/api/inbound/<token>
+        prev = raw_segments[index - 1] if index > 0 else ""
+        if _MAGIC_PUSH_PATH_SEGMENT.match(prev) and segment and (
+            _URL_SECRET_SEGMENT.match(segment) or len(segment) >= 8
+        ):
+            segments.append(mask_secret(segment))
+            continue
+        if _URL_SECRET_SEGMENT.match(segment) or _URL_SECRET_SEGMENT.match(decoded):
+            segments.append(mask_secret(decoded if _URL_SECRET_SEGMENT.match(decoded) else segment))
+            continue
+        segments.append(segment)
     query = [
         (k, mask_secret(v) if k.lower() in _URL_SECRET_QUERY_KEYS else v)
         for k, v in urllib.parse.parse_qsl(parts.query, keep_blank_values=True)

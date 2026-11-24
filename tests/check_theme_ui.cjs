@@ -25,7 +25,7 @@ const shots = process.env.FNMB_THEME_SCREENSHOTS || '/private/tmp/fnmb-theme-sho
         await page.route('**/*', async route => {
           const url = new URL(route.request().url());
           const target = url.pathname.slice(prefix.length);
-          if (target === '/theme.js' || target === '/session-guard.js') {
+          if (target === '/theme.js' || target === '/session-guard.js' || target === '/app-dialog.js') {
             return route.fulfill({contentType: 'application/javascript', body: read(`src/web/static${target}`)});
           }
           if (target === '/assets/icons/app-icon.png') {
@@ -37,6 +37,7 @@ const shots = process.env.FNMB_THEME_SCREENSHOTS || '/private/tmp/fnmb-theme-sho
               .replace('{{ saved_theme }}', saved)
               .replace('{{ icon_url }}', 'assets/icons/app-icon.png')
               .replaceAll("{{ url_for('session_guard_js') }}", 'session-guard.js')
+              .replaceAll("{{ url_for('app_dialog_js') }}", 'app-dialog.js')
               .replace(/\{%[\s\S]*?%\}/g, '').replace(/\{\{[\s\S]*?\}\}/g, '');
             return route.fulfill({contentType: 'text/html', body: html});
           }

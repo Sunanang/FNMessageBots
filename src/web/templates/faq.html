@@ -89,7 +89,7 @@
       display: grid;
       gap: 12px;
     }
-    #faq-external-db, #faq-docker-sock, #faq-ssh-journal, #faq-patrol {
+    #faq-external-db, #faq-docker-sock, #faq-ssh-journal, #faq-patrol, #faq-root-edition {
       scroll-margin-top: 72px;
     }
     .faq-item {
@@ -178,6 +178,7 @@
     }
   </style>
   <script src="{{ url_for('session_guard_js') }}"></script>
+  <script src="{{ url_for('app_dialog_js') }}"></script>
 </head>
 <body>
   <div class="page">
@@ -201,6 +202,18 @@
           </article>
 
           <article class="faq-item">
+            <h2>1.5 NAS 重启后一堆「应用已启动」通知怎么关？</h2>
+            <p>打开配置页的「启动静默期」（默认关闭）：应用刚起来的一段时间内，事件只记录不推送，窗口结束补一条「折叠 X 条」汇总。时长可设 30–1800 秒（默认 180 秒）。<strong>登录、SSH、UPS、磁盘错误、应用崩溃</strong>这类安全事件仍会在静默期内实时推送，可在同一处关掉这个白名单。勾选「只在真开机时静默」时，只是手动重启应用不会静默。</p>
+          </article>
+
+          <article id="faq-root-edition" class="faq-item">
+            <h2>1.6 如何安装 root 版日志推送？</h2>
+            <p>普通用户版以 <code>FnMessageBot</code> 账号运行，读影视 / 相册 / 音乐 / 任务计划库、硬盘 SMART 等时常需按配置页提示做 ACL 或组授权。若这类权限问题较多、不想逐项授权，可改装 <strong>root 版</strong>（整个应用以 root 运行，可减少这类读写限制）。</p>
+            <p>请到官网下载 root 版 FPK：<a href="https://www.fnmb.lndo.top/" target="_blank" rel="noopener noreferrer">https://www.fnmb.lndo.top/</a>（页面提供普通版与 root 版两个包）。两版共用同一应用标识与数据目录，不能并排安装；从 root 版切回普通版时，若提示数据属主不正确，先按第 1 条中的 <code>chown</code> 命令修复再安装。</p>
+            <p>仍想继续用普通版时，按配置页「功能检查结果」里的命令授权即可，不必强制换 root 版。</p>
+          </article>
+
+          <article class="faq-item">
             <h2>2. 密码、登录过期与重置</h2>
             <p>FPK 使用安装时设置的应用密码；Docker 首次访问时设置密码（至少 8 位）。登录后连续 <strong>15 分钟无操作</strong>才需重新输入，未过期时打开或刷新可直接进入。后台刷新不会续期，过期后未保存的修改不会自动提交。</p>
             <p><strong>首次设置需要初始化码：</strong>从应用运行日志或配置目录的 <code>.setup_code</code> 查看；Docker 可执行 <code>docker logs 容器名</code>（替换为实际名称）。FPK 从飞牛桌面以管理员身份设置时无需初始化码。Docker 也可用 <code>FNMB_WEB_PASSWORD</code> 预置初始密码。本机或反向代理访问也需要初始化码。</p>
@@ -210,7 +223,7 @@
 
           <article class="faq-item">
             <h2>3. 如何配置推送渠道？</h2>
-            <p>按 <a href="https://github.com/Sunanang/FNMessageBots/blob/main/docs/notification-channels.md" target="_blank" rel="noopener noreferrer">渠道配置说明</a> 填写，保存后发送测试消息。</p>
+            <p>按 <a href="https://www.lndo.top/blog/fn-message-bots-channels" target="_blank" rel="noopener noreferrer">渠道配置说明</a> 填写，保存后发送测试消息。</p>
             <p><strong>企业微信自建应用提示 60020 / 可信 IP：</strong>在企业微信管理后台「应用管理 → 你的应用 → 企业可信IP」添加 NAS 的出口公网 IP。公网 IP 经常变化时，可用固定 IP 的代理：将代理 IP 加入白名单，并在渠道「API 地址」填写代理地址。只需群通知也可改用企业微信群机器人 Webhook。</p>
           </article>
 

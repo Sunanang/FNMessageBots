@@ -6,6 +6,7 @@ const { chromium } = require(process.env.FNMB_PLAYWRIGHT_MODULE || 'playwright')
 const root = path.resolve(__dirname, '..');
 const html = fs.readFileSync(path.join(root, 'src/web/templates/index.html'), 'utf8')
   .replace("{{ url_for('session_guard_js') }}", 'session-guard.js')
+  .replace("{{ url_for('app_dialog_js') }}", 'app-dialog.js')
   .replace(/\{%[\s\S]*?%\}/g, '').replace(/\{\{[\s\S]*?\}\}/g, '');
 
 (async () => {
@@ -29,6 +30,11 @@ const html = fs.readFileSync(path.join(root, 'src/web/templates/index.html'), 'u
         if (url.pathname.endsWith('/session-guard.js')) {
           await route.fulfill({contentType: 'application/javascript',
             body: fs.readFileSync(path.join(root, 'src/web/static/session-guard.js'), 'utf8')});
+          return;
+        }
+        if (url.pathname.endsWith('/app-dialog.js')) {
+          await route.fulfill({contentType: 'application/javascript',
+            body: fs.readFileSync(path.join(root, 'src/web/static/app-dialog.js'), 'utf8')});
           return;
         }
         if (url.pathname.endsWith('/api/auth/status') || url.pathname.endsWith('/api/auth/activity')) {

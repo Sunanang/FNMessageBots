@@ -10,12 +10,14 @@ import sqlite3
 import threading
 import time
 from contextlib import closing
-from datetime import datetime
 from pathlib import Path
-from zoneinfo import ZoneInfo
 from typing import Callable, Dict, List, Optional, Any, Sequence
 
-from utils.logtime_display import get_logtime_display_offset_seconds
+from utils.logtime_display import (
+    extract_parameter_datetime_seconds,
+    format_logger_row_time,
+    note_logtime_datetime_pair,
+)
 
 from .models import JournalEntry
 from utils.notification_outbox import OutboxWriteError
@@ -95,14 +97,9 @@ DB_EVENT_ID_TO_PROJECT: Dict[str, str] = {
     "MEDIA_USER_CREATE": "MEDIA_USER_CREATED",
 }
 
-def _logtime_to_datetime(logtime: int) -> str:
-    """10 位 Unix 时间戳转 YYYY-MM-DD HH:MM:SS（Asia/Shanghai）。可设 LOGTIME_DISPLAY_OFFSET_SECONDS 修正存库偏差（如 28800=+8h）。"""
-    try:
-        ts = int(logtime) + get_logtime_display_offset_seconds()
-        dt = datetime.fromtimestamp(ts, tz=ZoneInfo("Asia/Shanghai"))
-        return dt.strftime("%Y-%m-%d %H:%M:%S")
-    except (ValueError, TypeError, OSError):
-        return datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
+def _logtime_to_datetime(logtime: int, parameter: Any = None) -> str:
+    """主日志库展示时间：优先 parameter.datetime，否则 logtime（可经库内字段差值校准）。"""
+    return format_logger_row_time(logtime, parameter)
 
 
 def _parse_parameter(parameter: Optional[str], uname: Optional[str], uid: Optional[int]) -> Dict[str, Any]:
@@ -131,8 +128,8 @@ def _parse_parameter(parameter: Optional[str], uname: Optional[str], uid: Option
 def _row_to_entry(row: Dict[str, Any]) -> JournalEntry:
     """将数据库一行转为 JournalEntry（供现有 event_processor 使用）。"""
     logtime = row.get("logtime") or 0
-    ts = _logtime_to_datetime(logtime)
     parameter = row.get("parameter") or "{}"
+    ts = _logtime_to_datetime(logtime, parameter)
     return JournalEntry(
         cursor=str(row.get("id", "")),
         timestamp=ts,
@@ -170,6 +167,8 @@ class DBLogPoller:
         self.batch_handler: Optional[Callable[[List[Dict[str, Any]]], None]] = None
         # 当 SSH journal 轮询可用时，跳过库内 Sshd*，避免双推
         self.skip_ssh_events = False
+        # 可选：每轮轮询动态刷新 skip_ssh_events（journal 稍后就绪时无需热加载）
+        self.journal_available_checker: Optional[Callable[[], bool]] = None
         # 与 SshJournalPoller 一致：忽略本机回环 / 局域网的 SSH 登录成功 / 断开
         self.ignore_ssh_loopback = False
         self.ignore_ssh_lan = False
@@ -244,10 +243,26 @@ class DBLogPoller:
         except Exception as e:
             self.logger.warning("写入游标失败: %s", e)
 
+    def _seed_logtime_skew_from_db(self) -> None:
+        """从近期同时带 logtime 与 parameter.datetime 的行学习差值，供 LoginSucc 等无 datetime 的事件使用。"""
+        try:
+            with closing(connect_readonly_with_fallback(self.db_path, timeout=5.0, allow_immutable=False)) as conn:
+                rows = conn.execute(
+                    "SELECT logtime, parameter FROM log ORDER BY id DESC LIMIT 80"
+                ).fetchall()
+            for logtime, parameter in rows:
+                param_dt = extract_parameter_datetime_seconds(parameter)
+                if param_dt is None:
+                    continue
+                note_logtime_datetime_pair(logtime, param_dt)
+                break
+        except Exception as e:
+            self.logger.debug("校准 logtime 与 parameter.datetime 失败: %s", e)
+
     def _get_max_log_id(self) -> Optional[int]:
         """获取 log 表当前最大 id；启动时用此值作为游标，只处理此后新写入的记录。"""
         try:
-            with closing(connect_readonly_with_fallback(self.db_path, timeout=5.0)) as conn:
+            with closing(connect_readonly_with_fallback(self.db_path, timeout=5.0, allow_immutable=False)) as conn:
                 row = conn.execute("SELECT COALESCE(MAX(id), 0) AS mx FROM log").fetchone()
                 if row is None:
                     raise RuntimeError("最新日志 ID 查询未返回结果")
@@ -259,7 +274,7 @@ class DBLogPoller:
     def _fetch_new_rows(self, after_id: int) -> List[Dict[str, Any]]:
         """查询 id > after_id 的记录，按 id 升序。"""
         try:
-            with closing(connect_readonly_with_fallback(self.db_path, timeout=5.0)) as conn:
+            with closing(connect_readonly_with_fallback(self.db_path, timeout=5.0, allow_immutable=False)) as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.execute(
                     "SELECT id, serviceId, uid, uname, logtime, loglevel, eventId, parameter, category FROM log WHERE id > ? ORDER BY id ASC",
@@ -271,6 +286,11 @@ class DBLogPoller:
             return []
 
     def _poll_once(self, last_id: int) -> int:
+        if self.journal_available_checker is not None:
+            try:
+                self.skip_ssh_events = bool(self.journal_available_checker())
+            except Exception as e:
+                self.logger.debug("刷新 SSH journal 可用性失败: %s", e)
         rows = self._fetch_new_rows(last_id)
         batch_events: List[Dict[str, Any]] = []
         for row in rows:
@@ -320,21 +340,19 @@ class DBLogPoller:
                 "entry": entry,
                 "handler": handler,
             })
-        batch_delivery_failed = False
-        persistence_failed = False
         if batch_events:
             if self.batch_handler:
                 try:
                     self.batch_handler(batch_events)
                 except OutboxWriteError as e:
                     self.logger.error("批次尚未持久化，保留水位: %s", e)
-                    batch_delivery_failed = True
-                    persistence_failed = True
+                    return last_id
                 except Exception as e:
                     self.logger.error("批量处理事件失败（count=%s）: %s", len(batch_events), e, exc_info=True)
-                    batch_delivery_failed = True
+                    # 未入队成功前不推进游标，也不因次数上限丢弃（与 notification-delivery.md 一致）
+                    return last_id
             else:
-                # 兼容旧逻辑：未注册批处理时按条处理
+                # 兼容旧逻辑：未注册批处理时按条处理；任一条失败则停在原水位，下轮重试
                 for item in batch_events:
                     try:
                         item["handler"](item["event_data"], item["entry"])
@@ -342,18 +360,8 @@ class DBLogPoller:
                         return last_id
                     except Exception as e:
                         self.logger.error("处理事件失败 eventId=%s: %s", item["db_event_id"], e)
+                        return last_id
         if rows:
-            # 汇总投递异常时同批最多重试 BATCH_MAX_ATTEMPTS 次，之后推进游标，避免无限重发
-            if self.batch_handler and batch_events and batch_delivery_failed:
-                self._batch_fail_count += 1
-                if persistence_failed or self._batch_fail_count < self.BATCH_MAX_ATTEMPTS:
-                    return last_id
-                self.logger.warning(
-                    "批量处理连续失败 %s 次，放弃本批（id %s–%s）",
-                    self._batch_fail_count,
-                    rows[0].get("id"),
-                    rows[-1].get("id"),
-                )
             self._batch_fail_count = 0
             self._write_last_id(rows[-1].get("id", last_id))
         return last_id if not rows else rows[-1].get("id", last_id)
@@ -367,6 +375,8 @@ class DBLogPoller:
                     last_id = self._get_max_log_id()
                     if last_id is not None:
                         self._write_last_id(last_id)
+                        # 对齐成功后再校准，避免额外连库抢走「首次连接失败」的重试语义
+                        self._seed_logtime_skew_from_db()
                         self.logger.info("数据库轮询已对齐，仅处理 id > %s 的新记录，间隔 %s 秒", last_id, self.poll_interval)
                 if last_id is not None:
                     last_id = self._poll_once(last_id)

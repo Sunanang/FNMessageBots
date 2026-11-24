@@ -38,6 +38,23 @@ from web.api_helpers import build_notifier_from_raw as _build_notifier_from_raw
 from web.api_helpers import parse_success_filter as _parse_success_filter
 from web.app_paths import BASE_DIR
 from web.app_paths import ASSETS_DIR
+from utils.secret_redact import redact_json, redact_secrets
+from utils.message_template import (
+    TITLE_SOFT_WARN_CHARS,
+    build_context,
+    builtin_template,
+    family_id_for_event,
+    is_template_allowed,
+    normalize_message_templates,
+    now_iso,
+    render_message,
+    sample_event_data,
+    template_status_for_event,
+    ui_catalog_meta,
+)
+from utils.startup_quiet import MAX_SECONDS as STARTUP_QUIET_MAX_SECONDS
+from utils.startup_quiet import MIN_SECONDS as STARTUP_QUIET_MIN_SECONDS
+from utils.startup_quiet import clamp_seconds as clamp_startup_quiet_seconds
 from web.app_paths import CONFIG_FILE
 from web.app_paths import ICON_FILE
 from web.app_paths import SUPPORT_QR_DIR
@@ -316,6 +333,7 @@ def create_app(on_config_saved=None) -> Flask:
         "/api/auth/logout",
         "/session-guard.js",
         "/theme.js",
+        "/app-dialog.js",
     }
     PUBLIC_PREFIXES = ("/assets/",)
 
@@ -430,6 +448,10 @@ def create_app(on_config_saved=None) -> Flask:
     @app.get("/session-guard.js")
     def session_guard_js():
         return send_from_directory(str(_TEMPLATE_DIR.parent / "static"), "session-guard.js")
+
+    @app.get("/app-dialog.js")
+    def app_dialog_js():
+        return send_from_directory(str(_TEMPLATE_DIR.parent / "static"), "app-dialog.js")
 
     @app.post("/api/auth/set-password")
     @_config_transaction
@@ -564,7 +586,7 @@ def create_app(on_config_saved=None) -> Flask:
         data = {
             "title": "FnMessageBot",
             "subtitle": "飞牛日志消息推送机器人",
-            "version": "2.9.0",
+            "version": "2.10.0",
             "web_password_enabled": _password_enabled(),
             "events_by_category": events_by_category,
             "third_party_events_by_category": third_party_events_by_category,
@@ -577,6 +599,10 @@ def create_app(on_config_saved=None) -> Flask:
             "dnd_enabled": as_bool(raw.get("dnd_enabled", False), False),
             "dnd_start_time": (raw.get("dnd_start_time") or "22:00").strip(),
             "dnd_end_time": (raw.get("dnd_end_time") or "07:00").strip(),
+            "startup_quiet_enabled": as_bool(raw.get("startup_quiet_enabled", False), False),
+            "startup_quiet_seconds": clamp_startup_quiet_seconds(raw.get("startup_quiet_seconds", 180)),
+            "startup_quiet_keep_urgent": as_bool(raw.get("startup_quiet_keep_urgent", True), True),
+            "startup_quiet_only_after_boot": as_bool(raw.get("startup_quiet_only_after_boot", True), True),
             "poll_batch_summary_enabled": as_bool(raw.get("poll_batch_summary_enabled", False), False),
             "minimal_push_enabled": as_bool(raw.get("minimal_push_enabled", False), False),
             "ssh_ignore_loopback": as_bool(raw.get("ssh_ignore_loopback", False), False),
@@ -585,6 +611,8 @@ def create_app(on_config_saved=None) -> Flask:
             "nas_patrol_enabled": as_bool(raw.get("nas_patrol_enabled", False), False),
             "nas_patrol_cron": _cron,
             "channel_options": CHANNEL_OPTIONS,
+            "message_templates": normalize_message_templates(raw.get("message_templates")),
+            "message_template_meta": ui_catalog_meta(),
         }
         # 保存后刷新表单无需重复探测设备，保留保存响应中的检查结果。
         db_access_warnings = (_collect_external_db_access_warnings(raw, monitor_events)
@@ -624,6 +652,16 @@ def create_app(on_config_saved=None) -> Flask:
         dnd_start_time = (payload.get("dnd_start_time") or "22:00").strip()
         dnd_end_time = (payload.get("dnd_end_time") or "07:00").strip()
         poll_batch_summary_enabled = as_bool(payload.get("poll_batch_summary_enabled", False), False)
+        startup_quiet_enabled = as_bool(payload.get("startup_quiet_enabled", False), False)
+        raw_quiet_seconds = payload.get("startup_quiet_seconds", 180)
+        try:
+            startup_quiet_seconds = int(raw_quiet_seconds)
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "message": "启动静默期时长必须为 30–1800 的整数秒。"}), 400
+        if startup_quiet_seconds < STARTUP_QUIET_MIN_SECONDS or startup_quiet_seconds > STARTUP_QUIET_MAX_SECONDS:
+            return jsonify({"ok": False, "message": "启动静默期时长必须为 30–1800 秒。"}), 400
+        startup_quiet_keep_urgent = as_bool(payload.get("startup_quiet_keep_urgent", True), True)
+        startup_quiet_only_after_boot = as_bool(payload.get("startup_quiet_only_after_boot", True), True)
         minimal_push_enabled = as_bool(payload.get("minimal_push_enabled", False), False)
         ssh_ignore_loopback = as_bool(payload.get("ssh_ignore_loopback", False), False)
         ssh_ignore_lan = as_bool(payload.get("ssh_ignore_lan", False), False)
@@ -637,6 +675,13 @@ def create_app(on_config_saved=None) -> Flask:
         if title_prefix and len(title_prefix) > 20:
             return jsonify({"ok": False, "message": "标题前缀过长（最多 20 个字符）。"}), 400
         bark_icon = (payload.get("bark_icon") or "").strip()
+        # message_templates：缺省则保留原配置；显式传入则规范化（非法结构丢弃后仍可存）
+        if "message_templates" in payload:
+            if payload.get("message_templates") is not None and not isinstance(payload.get("message_templates"), dict):
+                return jsonify({"ok": False, "message": "message_templates 必须为对象。"}), 400
+            message_templates = normalize_message_templates(payload.get("message_templates"))
+        else:
+            message_templates = None
 
         if dnd_enabled:
             if not dnd_start_time or not dnd_end_time:
@@ -763,6 +808,10 @@ def create_app(on_config_saved=None) -> Flask:
                 "dnd_start_time": dnd_start_time,
                 "dnd_end_time": dnd_end_time,
                 "poll_batch_summary_enabled": poll_batch_summary_enabled,
+                "startup_quiet_enabled": startup_quiet_enabled,
+                "startup_quiet_seconds": startup_quiet_seconds,
+                "startup_quiet_keep_urgent": startup_quiet_keep_urgent,
+                "startup_quiet_only_after_boot": startup_quiet_only_after_boot,
                 "minimal_push_enabled": minimal_push_enabled,
                 "ssh_ignore_loopback": ssh_ignore_loopback,
                 "ssh_ignore_lan": ssh_ignore_lan,
@@ -775,6 +824,8 @@ def create_app(on_config_saved=None) -> Flask:
                 "web_password_enabled": password_enabled,
             }
         )
+        if message_templates is not None:
+            raw["message_templates"] = message_templates
 
         try:
             _save_raw_config(raw)
@@ -802,6 +853,173 @@ def create_app(on_config_saved=None) -> Flask:
             "warnings": warning_messages(db_access_warnings), "warning_details": db_access_warnings,
         })
 
+    @app.post("/api/message-template/preview")
+    def message_template_preview():
+        """抽屉实时预览：用样例数据渲染草稿或已存模板。"""
+        payload = request.get_json(silent=True) or {}
+        event_type = str(payload.get("event_type") or "").strip()
+        if not event_type:
+            return jsonify({"ok": False, "message": "缺少 event_type。"}), 400
+        if not is_template_allowed(event_type):
+            return jsonify({"ok": False, "message": "该事件不支持自定义模板。"}), 400
+        raw = _load_raw_config()
+        prefix = _title_prefix_from_dict(raw)
+        official_title = MultiPlatformNotifier.EVENT_TITLES.get(
+            event_type, f"📋 飞牛NAS-系统事件: {event_type}"
+        )
+        official_note = MultiPlatformNotifier.EVENT_NOTES.get(event_type, "") or ""
+        sample = sample_event_data(event_type)
+        ts = "2026-11-23 12:00:00"
+        title_override = payload.get("title")
+        body_override = payload.get("body")
+        has_draft = "title" in payload or "body" in payload
+        rendered = render_message(
+            event_type,
+            sample,
+            timestamp=ts,
+            prefix=prefix,
+            templates=normalize_message_templates(raw.get("message_templates")),
+            official_title=official_title,
+            official_note=official_note,
+            title_override=str(title_override) if has_draft else None,
+            body_override=str(body_override) if has_draft else None,
+        )
+        if rendered is None:
+            # 无自定义时预览官方默认模板文案（抽屉预填）
+            fid = family_id_for_event(event_type) or ""
+            def_title, def_body = builtin_template(fid)
+            rendered = render_message(
+                event_type,
+                sample,
+                timestamp=ts,
+                prefix=prefix,
+                official_title=official_title,
+                official_note=official_note,
+                title_override=def_title,
+                body_override=def_body,
+            )
+        if rendered is None:
+            return jsonify({"ok": False, "message": "预览渲染失败。"}), 400
+        scope, title, body = rendered
+        warnings = []
+        if len(title) > TITLE_SOFT_WARN_CHARS:
+            warnings.append(f"标题约 {len(title)} 字，部分渠道可能截断（建议 ≤{TITLE_SOFT_WARN_CHARS}）。")
+        # 返回渲染上下文（含别名规范化后的 ip/threshold 等），供芯片灰显判断
+        sample_vars = build_context(
+            event_type,
+            sample,
+            prefix=prefix,
+            timestamp=ts,
+            official_title=official_title,
+            official_note=official_note,
+        )
+        return jsonify({
+            "ok": True,
+            "data": {
+                "scope": scope,
+                "title": title,
+                "body": body,
+                "sample_vars": sample_vars,
+                "warnings": warnings,
+                "status": template_status_for_event(
+                    event_type, normalize_message_templates(raw.get("message_templates"))
+                ),
+            },
+        })
+
+    @app.post("/api/message-template/test")
+    def message_template_test():
+        """用草稿或已存模板构造样例事件并试发到已配置渠道。"""
+        notifier = None
+        try:
+            payload = request.get_json(silent=True) or {}
+            event_type = str(payload.get("event_type") or "").strip()
+            if not event_type:
+                return jsonify({"ok": False, "message": "缺少 event_type。"}), 400
+            if not is_template_allowed(event_type):
+                return jsonify({"ok": False, "message": "该事件不支持自定义模板。"}), 400
+            raw = _load_raw_config()
+            if as_bool(raw.get("minimal_push_enabled"), False) and not as_bool(
+                raw.get("poll_batch_summary_enabled"), False
+            ):
+                return jsonify({
+                    "ok": False,
+                    "message": "当前已开启极简推送，自定义模板不会生效；请先关闭极简后再试发。",
+                }), 400
+            templates = normalize_message_templates(raw.get("message_templates"))
+            scope = str(payload.get("scope") or "event").strip()
+            if "title" in payload or "body" in payload:
+                entry = {
+                    "title": str(payload.get("title") or ""),
+                    "body": str(payload.get("body") or ""),
+                    "updated_at": now_iso(),
+                }
+                if not entry["title"].strip() and not entry["body"].strip():
+                    return jsonify({"ok": False, "message": "标题与正文不能同时为空。"}), 400
+                if scope == "family":
+                    fid = family_id_for_event(event_type)
+                    if not fid:
+                        return jsonify({"ok": False, "message": "无法解析事件族。"}), 400
+                    templates["families"][fid] = entry
+                    # 试发时去掉该事件覆盖，确保能看到族模板效果
+                    templates["events"].pop(event_type, None)
+                else:
+                    templates["events"][event_type] = entry
+            raw_for_send = dict(raw)
+            raw_for_send["message_templates"] = templates
+            # 试发时关闭极简，确保走模板路径
+            raw_for_send["minimal_push_enabled"] = False
+            notifier = _build_notifier_from_raw(raw_for_send)
+            sample = sample_event_data(event_type)
+            sample["_template_test"] = secrets.token_hex(6)
+            ts = now_iso().replace("T", " ").replace("Z", "")
+            ok, channel_results = notifier.send_notification(
+                event_type, sample, "", ts
+            )
+            channel_results = redact_json(channel_results) if isinstance(channel_results, list) else []
+            if ok:
+                failures = [
+                    f"{cr.get('channel') or '渠道'}: {cr.get('error') or '发送失败'}"
+                    for cr in channel_results
+                    if isinstance(cr, dict) and (cr.get("error") or not cr.get("success"))
+                ]
+                partial = bool(failures)
+                message = (
+                    "试发部分成功。" + "；".join(failures)
+                    if partial
+                    else "试发已发送，请检查各渠道是否收到样例消息。"
+                )
+                return jsonify({
+                    "ok": True,
+                    "partial": partial,
+                    "message": redact_secrets(message),
+                    "channel_results": channel_results or [],
+                })
+            fail_bits = []
+            for cr in channel_results or []:
+                if not isinstance(cr, dict):
+                    continue
+                name = str(cr.get("channel") or "渠道")
+                err = cr.get("error")
+                if err:
+                    fail_bits.append(f"{name}: {err}")
+                elif not cr.get("success"):
+                    fail_bits.append(f"{name}: 发送失败")
+            detail = "；".join(fail_bits) if fail_bits else "请检查渠道配置"
+            return jsonify({
+                "ok": False,
+                "message": redact_secrets(f"试发失败。{detail}"),
+                "channel_results": channel_results or [],
+            }), 500
+        except Exception as e:
+            return jsonify({"ok": False, "message": redact_secrets(f"试发异常：{e}")}), 500
+        finally:
+            if notifier is not None:
+                try:
+                    notifier.close()
+                except Exception:
+                    app.logger.warning("关闭模板试发通知器失败", exc_info=True)
+
     @app.post("/api/test")
     def test_push():
         notifier = None
@@ -819,22 +1037,23 @@ def create_app(on_config_saved=None) -> Flask:
                 content,
                 {
                     "hostname": socket.gethostname(),
-                    "version": "2.9.0",
+                    "version": "2.10.0",
                 },
             )
             ok = out.get("success", False) if isinstance(out, dict) else bool(out)
             channel_results = out.get("channel_results") if isinstance(out, dict) else None
-            channel_results = channel_results if isinstance(channel_results, list) else []
+            channel_results = redact_json(channel_results) if isinstance(channel_results, list) else []
             if ok:
                 fail_count = out.get("fail_count", 0) if isinstance(out, dict) else 0
                 failures = [f"{cr.get('channel') or '渠道'}: {cr.get('error') or '发送失败'}"
                             for cr in channel_results if isinstance(cr, dict) and (cr.get("error") or not cr.get("success"))]
                 partial = bool(fail_count or failures)
+                message = ("测试消息部分发送成功，部分目标失败。" + "；".join(failures)
+                           if partial else "测试消息已发送，请检查各渠道是否收到。")
                 return jsonify({
                     "ok": True,
                     "partial": partial,
-                    "message": ("测试消息部分发送成功，部分目标失败。" + "；".join(failures)
-                                if partial else "测试消息已发送，请检查各渠道是否收到。"),
+                    "message": redact_secrets(message),
                     "channel_results": channel_results or [],
                 })
             # 拼出各渠道失败原因，便于排查魔法推送等自建服务
@@ -852,11 +1071,11 @@ def create_app(on_config_saved=None) -> Flask:
             detail = "；".join(fail_bits) if fail_bits else "请检查配置"
             return jsonify({
                 "ok": False,
-                "message": f"所有渠道发送失败。{detail}",
+                "message": redact_secrets(f"所有渠道发送失败。{detail}"),
                 "channel_results": channel_results or [],
             }), 500
         except Exception as e:
-            return jsonify({"ok": False, "message": f"测试发送异常：{e}"}), 500
+            return jsonify({"ok": False, "message": redact_secrets(f"测试发送异常：{e}")}), 500
         finally:
             if notifier is not None:
                 try:

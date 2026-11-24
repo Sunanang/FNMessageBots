@@ -23,6 +23,7 @@ from email.header import Header
 from email.utils import formataddr
 
 from monitor.sqlite_uri import connect_readonly_with_fallback
+from utils.logtime_display import display_now_str
 from utils.value_parser import as_bool
 from .channel_params import (
     meow_fields,
@@ -209,6 +210,7 @@ class MultiPlatformNotifier:
         'DISK_IO_ERR': '⚠️ 飞牛NAS-磁盘IO错误告警',
         'TEST_PUSH': '🧪 飞牛NAS-测试推送',
         'DND_SUMMARY': '📋 飞牛NAS-勿扰时段汇总',
+        'STARTUP_QUIET_SUMMARY': '🌙 飞牛NAS-开机静默期汇总',
         'NAS_PATROL_REPORT': '飞牛NAS-巡检任务完成',
         'POLL_BATCH_SUMMARY': '飞牛NAS-多事件合并通知',
         'BACKUP_TASK_SUCCESS': '✅ 飞牛NAS-备份任务完成',
@@ -523,6 +525,7 @@ class MultiPlatformNotifier:
                  title_prefix: str = "",
                  minimal_push_enabled: bool = False,
                  poll_batch_summary_enabled: bool = False,
+                 message_templates: Optional[Dict[str, Any]] = None,
                  user_lookup_db_path: str = "",
                  activity_user_lookup_db_path: str = "",
                  logger_user_lookup_db_path: str = "",
@@ -568,6 +571,8 @@ class MultiPlatformNotifier:
             self.title_prefix = (title_prefix or "").strip()
         self.minimal_push_enabled = bool(minimal_push_enabled)
         self.poll_batch_summary_enabled = bool(poll_batch_summary_enabled)
+        from utils.message_template import normalize_message_templates
+        self.message_templates = normalize_message_templates(message_templates)
         self.user_lookup_db_path = (user_lookup_db_path or "").strip()
         self.activity_user_lookup_db_path = (activity_user_lookup_db_path or "").strip()
         self.logger_user_lookup_db_path = (logger_user_lookup_db_path or "").strip()
@@ -734,10 +739,10 @@ class MultiPlatformNotifier:
         merged_data = {
             'merged_disks': event_list,
             'count': len(event_list),
-            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            'timestamp': display_now_str(),
         }
 
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ts = display_now_str()
         if self._minimal_push_effective():
             one_line = self._build_minimal_one_line(event_type, merged_data)
             message = MultiPlatformMessage(title=one_line, content="")
@@ -1348,7 +1353,7 @@ class MultiPlatformNotifier:
             "title": message.title or "",
             "content": message.content or "",
             "text": message.merged_plain_text(),
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "time": display_now_str(),
         }
         results = []
         for param_str in param_list:
@@ -1671,6 +1676,27 @@ class MultiPlatformNotifier:
         if self._minimal_push_effective() and event_type not in ("POLL_BATCH_SUMMARY", "NAS_PATROL_REPORT", MEDIA_SUMMARY_EVENT):
             one_line = self._build_minimal_one_line(event_type, event_data)
             return MultiPlatformMessage(title=one_line, content="")
+
+        # 自定义模板：极简开启时跳过；黑名单/汇总类由 is_template_allowed 排除
+        if not self._minimal_push_effective():
+            from utils.message_template import is_template_allowed, render_message
+            if is_template_allowed(event_type):
+                official_title = self.EVENT_TITLES.get(
+                    event_type, self._fallback_event_title(event_type)
+                )
+                official_note = self.EVENT_NOTES.get(event_type, "") or ""
+                rendered = render_message(
+                    event_type,
+                    event_data if isinstance(event_data, dict) else {},
+                    timestamp=timestamp or "",
+                    prefix=self.title_prefix or "",
+                    templates=self.message_templates,
+                    official_title=official_title,
+                    official_note=official_note,
+                )
+                if rendered:
+                    _scope, custom_title, custom_body = rendered
+                    return MultiPlatformMessage(title=custom_title, content=custom_body)
 
         title_event_type = event_type
         # 批量汇总若仅包含单一事件类型，则标题回退为该事件原始标题
@@ -3471,7 +3497,7 @@ class MultiPlatformNotifier:
         content = f"{message}\n"
         
         # 添加简化的时间信息（正文不保留时钟类符号）
-        content += f"\n{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        content += f"\n{display_now_str()}"
         
         return self._strip_body_emojis(content)
 
@@ -3483,6 +3509,7 @@ class MultiPlatformNotifier:
             "APP_STOP": "监控停止",
             "APP_ERROR": "监控异常",
             "DND_SUMMARY": "勿扰汇总",
+            "STARTUP_QUIET_SUMMARY": "开机静默期汇总",
             "TEST_PUSH": "测试推送",
         }
         action = action_map.get(event_type, event_type)
@@ -3516,7 +3543,7 @@ class MultiPlatformNotifier:
         # 构建事件数据
         event_data = {
             'message': message,
-            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'timestamp': display_now_str(),
             'hostname': additional_info.get('hostname', '') if additional_info else '',
             'version': additional_info.get('version', '1.0') if additional_info else '1.0',
         }
@@ -3623,6 +3650,9 @@ class MultiPlatformNotifier:
         elif event_type == 'DND_SUMMARY':
             # 汇总正文和发送状态共用事件类型，但不能互相去重。
             key = f"DND_SUMMARY_{int(time.time() / 60)}_{event_data.get('message', '')}"
+        elif event_type == 'STARTUP_QUIET_SUMMARY':
+            # 同一次静默期只发一条；重复调用按分钟 + 正文去重
+            key = f"STARTUP_QUIET_SUMMARY_{int(time.time() / 60)}_{event_data.get('message', '')}"
         else:
             # 其他事件：按分钟去重
             minute_window = int(time.time() / 60)
