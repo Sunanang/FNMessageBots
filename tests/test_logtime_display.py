@@ -12,6 +12,8 @@ from utils.logtime_display import (
     format_logger_row_time,
     get_logtime_display_offset_seconds,
     note_logtime_datetime_pair,
+    observe_logger_row,
+    set_logtime_skew_state_path,
 )
 
 
@@ -21,6 +23,7 @@ class LogtimeDisplayTests(unittest.TestCase):
 
     def setUp(self):
         logtime_display._learned_logtime_skew_seconds = None
+        logtime_display._skew_state_file = None
 
     def test_standard_unix_timestamp_has_no_default_compensation(self):
         with patch.dict(os.environ, {'TZ': 'Asia/Shanghai'}, clear=True):
@@ -71,3 +74,24 @@ class LogtimeDisplayTests(unittest.TestCase):
             self.assertEqual(format_logger_row_time(0, {"datetime": ts}), '2026-11-24 06:52:37')
         with patch.dict(os.environ, {'TZ': 'Asia/Shanghai'}, clear=True):
             self.assertEqual(format_logger_row_time(0, {"datetime": ts}), '2026-11-24 14:52:37')
+
+    def test_observe_unmonitored_row_still_learns_skew(self):
+        with patch.dict(os.environ, {'TZ': 'Asia/Shanghai'}, clear=True):
+            observe_logger_row(1000, {"datetime": 1000 + 28800})
+            self.assertEqual(get_logtime_display_offset_seconds(), 28800)
+            self.assertEqual(
+                format_logger_row_time(1000, {"template": "LoginSucc"}),
+                format_logger_row_time(0, {"datetime": 1000 + 28800}),
+            )
+
+    def test_skew_state_file_roundtrip(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "logtime_skew.json"
+            with patch.dict(os.environ, {'TZ': 'Asia/Shanghai'}, clear=True):
+                set_logtime_skew_state_path(path)
+                note_logtime_datetime_pair(10, 10 + 28800)
+                self.assertTrue(path.exists())
+                logtime_display._learned_logtime_skew_seconds = None
+                set_logtime_skew_state_path(path)
+                self.assertEqual(get_logtime_display_offset_seconds(), 28800)

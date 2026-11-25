@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import time
 from datetime import datetime, tzinfo
+from pathlib import Path
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
@@ -13,6 +16,26 @@ _logger = logging.getLogger(__name__)
 # 由「同一行 parameter.datetime - logtime」学到的存库差值（秒）。
 # 这是数据库两列的差，不是写死的时区偏移；换 TZ 不会改这个差值。
 _learned_logtime_skew_seconds: Optional[int] = None
+_skew_state_file: Optional[Path] = None
+_tz_applied = False
+
+
+def apply_process_timezone() -> str:
+    """按环境变量 TZ 刷新进程本地时区（Docker 依赖此步骤，否则 naive fromtimestamp 仍是 UTC）。"""
+    global _tz_applied
+    name = (os.environ.get("TZ") or "").strip()
+    if name:
+        try:
+            time.tzset()
+        except Exception as e:
+            _logger.warning("TZ=%s 调用 tzset 失败: %s", name, e)
+    _tz_applied = True
+    try:
+        now = datetime.now(get_display_tz())
+        label = now.strftime("%Z (%z)")
+    except Exception:
+        label = name or "未知"
+    return label
 
 
 def get_display_tz() -> tzinfo:
@@ -25,6 +48,44 @@ def get_display_tz() -> tzinfo:
             _logger.warning("无效 TZ=%s，回退系统本地时区", name)
     local = datetime.now().astimezone().tzinfo
     return local or ZoneInfo("UTC")
+
+
+def set_logtime_skew_state_path(path: Any) -> None:
+    """设置差值落盘路径（通常 cursor_dir/logtime_skew.json），并尝试加载已有校准。"""
+    global _skew_state_file, _learned_logtime_skew_seconds
+    text = str(path or "").strip()
+    _skew_state_file = Path(text) if text else None
+    if _skew_state_file is None or not _skew_state_file.exists():
+        return
+    try:
+        raw = json.loads(_skew_state_file.read_text(encoding="utf-8"))
+        skew = int(raw.get("skew_seconds"))
+    except Exception as e:
+        _logger.debug("读取 logtime 校准缓存失败: %s", e)
+        return
+    if abs(skew) > 172800:
+        return
+    if _learned_logtime_skew_seconds != skew:
+        _learned_logtime_skew_seconds = skew
+        _logger.info(
+            "已加载 logtime 校准缓存：parameter.datetime - logtime = %+d 秒",
+            skew,
+        )
+
+
+def _persist_learned_skew(skew: int) -> None:
+    if _skew_state_file is None:
+        return
+    try:
+        _skew_state_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _skew_state_file.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps({"skew_seconds": int(skew)}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        tmp.replace(_skew_state_file)
+    except Exception as e:
+        _logger.debug("写入 logtime 校准缓存失败: %s", e)
 
 
 def get_logtime_display_offset_seconds() -> int:
@@ -48,7 +109,6 @@ def extract_parameter_datetime_seconds(parameter: Any) -> Optional[int]:
     """从 parameter JSON 取飞牛写入的 datetime 字段（Unix 秒）。"""
     if isinstance(parameter, str) and parameter.strip():
         try:
-            import json
             parameter = json.loads(parameter)
         except Exception:
             return None
@@ -87,12 +147,27 @@ def note_logtime_datetime_pair(logtime: Any, parameter_datetime: Any) -> Optiona
         return _learned_logtime_skew_seconds
     if _learned_logtime_skew_seconds != skew:
         _learned_logtime_skew_seconds = skew
+        _persist_learned_skew(skew)
         _logger.info(
             "已按数据库字段校准展示：parameter.datetime - logtime = %+d 秒"
             "（与 TZ 无关；可用 LOGTIME_DISPLAY_OFFSET_SECONDS 覆盖）",
             skew,
         )
     return _learned_logtime_skew_seconds
+
+
+def observe_logger_row(logtime: Any, parameter: Any = None) -> Optional[int]:
+    """任意日志行都可调用：有 datetime 就学习差值，不要求该事件在监控列表里。"""
+    param_dt = extract_parameter_datetime_seconds(parameter)
+    if param_dt is None:
+        return _learned_logtime_skew_seconds
+    try:
+        lt = int(logtime or 0)
+    except (TypeError, ValueError):
+        return _learned_logtime_skew_seconds
+    if lt <= 0:
+        return _learned_logtime_skew_seconds
+    return note_logtime_datetime_pair(lt, param_dt)
 
 
 def format_logger_row_time(logtime: Any, parameter: Any = None) -> str:
@@ -124,4 +199,6 @@ def format_logger_row_time(logtime: Any, parameter: Any = None) -> str:
 
 def display_now_str() -> str:
     """合并推送 / 系统通知等“发送时刻”：跟随 TZ / 系统本地时区。"""
+    if not _tz_applied and (os.environ.get("TZ") or "").strip():
+        apply_process_timezone()
     return datetime.now(get_display_tz()).strftime("%Y-%m-%d %H:%M:%S")

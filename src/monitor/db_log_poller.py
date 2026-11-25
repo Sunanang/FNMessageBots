@@ -17,6 +17,8 @@ from utils.logtime_display import (
     extract_parameter_datetime_seconds,
     format_logger_row_time,
     note_logtime_datetime_pair,
+    observe_logger_row,
+    set_logtime_skew_state_path,
 )
 
 from .models import JournalEntry
@@ -178,6 +180,7 @@ class DBLogPoller:
         self._batch_fail_count = 0
         self.logger = logging.getLogger(__name__)
         self.cursor_dir.mkdir(parents=True, exist_ok=True)
+        set_logtime_skew_state_path(self.cursor_dir / "logtime_skew.json")
 
     def add_handler(self, event_type: str, handler: Callable):
         """注册事件类型对应的处理函数（event_type 为项目内类型，如 LoginSucc、SSH_LOGIN_SUCCESS）。"""
@@ -248,16 +251,22 @@ class DBLogPoller:
         try:
             with closing(connect_readonly_with_fallback(self.db_path, timeout=5.0, allow_immutable=False)) as conn:
                 rows = conn.execute(
-                    "SELECT logtime, parameter FROM log ORDER BY id DESC LIMIT 80"
+                    "SELECT logtime, parameter FROM log ORDER BY id DESC LIMIT 300"
                 ).fetchall()
+            learned = None
             for logtime, parameter in rows:
                 param_dt = extract_parameter_datetime_seconds(parameter)
                 if param_dt is None:
                     continue
-                note_logtime_datetime_pair(logtime, param_dt)
+                learned = note_logtime_datetime_pair(logtime, param_dt)
                 break
+            if learned is None:
+                self.logger.warning(
+                    "近期日志未见 parameter.datetime，LoginSucc 等仅有 logtime 的事件"
+                    "可能仍偏差约 8 小时；有 SSH/磁盘等带 datetime 的事件后会自动校准"
+                )
         except Exception as e:
-            self.logger.debug("校准 logtime 与 parameter.datetime 失败: %s", e)
+            self.logger.warning("校准 logtime 与 parameter.datetime 失败: %s", e)
 
     def _get_max_log_id(self) -> Optional[int]:
         """获取 log 表当前最大 id；启动时用此值作为游标，只处理此后新写入的记录。"""
@@ -294,6 +303,8 @@ class DBLogPoller:
         rows = self._fetch_new_rows(last_id)
         batch_events: List[Dict[str, Any]] = []
         for row in rows:
+            # 未纳入监控的行也学习 datetime/logtime 差值，避免只开登录通知时永远学不到 +28800
+            observe_logger_row(row.get("logtime"), row.get("parameter"))
             row_id = row.get("id", 0)
             db_event_id = (row.get("eventId") or "").strip()
             if not db_event_id:
