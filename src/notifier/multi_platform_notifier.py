@@ -2597,7 +2597,9 @@ class MultiPlatformNotifier:
             if iv > 10_000_000_000:
                 iv = int(iv / 1000)
             try:
-                return datetime.fromtimestamp(iv).strftime("%Y-%m-%d %H:%M:%S")
+                from utils.logtime_display import format_unix_seconds_for_display
+
+                return format_unix_seconds_for_display(iv)
             except (OSError, ValueError):
                 return ""
 

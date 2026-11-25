@@ -27,18 +27,20 @@ DEDUP_TTL_SECONDS = 3 * 24 * 3600
 
 
 def _ts_to_str(ts: Optional[int]) -> str:
+    from utils.logtime_display import display_now_str, format_unix_seconds_for_display
+
     if ts is None:
-        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        return display_now_str()
     try:
         v = int(ts)
     except (TypeError, ValueError):
-        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        return display_now_str()
     if v > 10_000_000_000:
         v = int(v / 1000)
     try:
-        return datetime.fromtimestamp(v).strftime("%Y-%m-%d %H:%M:%S")
+        return format_unix_seconds_for_display(v)
     except (OSError, ValueError):
-        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        return display_now_str()
 
 
 def _normalize_ts_to_seconds(ts: Optional[int]) -> int:

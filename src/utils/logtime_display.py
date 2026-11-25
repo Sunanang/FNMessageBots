@@ -18,6 +18,7 @@ _logger = logging.getLogger(__name__)
 _learned_logtime_skew_seconds: Optional[int] = None
 _skew_state_file: Optional[Path] = None
 _tz_applied = False
+_env_skew_conflict_warned = False
 
 
 def apply_process_timezone() -> str:
@@ -93,16 +94,35 @@ def get_logtime_display_offset_seconds() -> int:
     raw = os.environ.get("LOGTIME_DISPLAY_OFFSET_SECONDS")
     if raw is not None and str(raw).strip() != "":
         try:
-            return int(raw)
+            env_offset = int(raw)
         except (TypeError, ValueError):
-            return 0
+            env_offset = 0
+        global _env_skew_conflict_warned
+        if (
+            not _env_skew_conflict_warned
+            and _learned_logtime_skew_seconds is not None
+            and abs(int(_learned_logtime_skew_seconds) - env_offset) > 3600
+        ):
+            _env_skew_conflict_warned = True
+            _logger.warning(
+                "LOGTIME_DISPLAY_OFFSET_SECONDS=%s 与库内学到的 %+d 秒不一致；"
+                "将以环境变量为准。若推送时间多偏 8 小时，请删掉该环境变量后重建容器",
+                raw,
+                int(_learned_logtime_skew_seconds),
+            )
+        return env_offset
     if _learned_logtime_skew_seconds is not None:
         return _learned_logtime_skew_seconds
     return 0
 
 
-def _format_unix_seconds(ts: int) -> str:
+def format_unix_seconds_for_display(ts: int) -> str:
+    """把真实 Unix 秒格式化为展示用本地时间（跟随 TZ；不加 logtime 列差值）。"""
     return datetime.fromtimestamp(int(ts), tz=get_display_tz()).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _format_unix_seconds(ts: int) -> str:
+    return format_unix_seconds_for_display(ts)
 
 
 def extract_parameter_datetime_seconds(parameter: Any) -> Optional[int]:

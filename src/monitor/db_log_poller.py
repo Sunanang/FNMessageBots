@@ -247,23 +247,47 @@ class DBLogPoller:
             self.logger.warning("写入游标失败: %s", e)
 
     def _seed_logtime_skew_from_db(self) -> None:
-        """从近期同时带 logtime 与 parameter.datetime 的行学习差值，供 LoginSucc 等无 datetime 的事件使用。"""
+        """从带 parameter.datetime 的行学习差值，供 LoginSucc 等无 datetime 的事件使用。
+
+        先按 id 倒序扫近期行；若近期全是 LoginSucc（无 datetime），再专门查带 datetime 的行，
+        避免冷启动第一条登录通知仍差 8 小时。
+        """
         try:
             with closing(connect_readonly_with_fallback(self.db_path, timeout=5.0, allow_immutable=False)) as conn:
                 rows = conn.execute(
                     "SELECT logtime, parameter FROM log ORDER BY id DESC LIMIT 300"
                 ).fetchall()
+                if not any(extract_parameter_datetime_seconds(p) is not None for _, p in rows):
+                    rows = conn.execute(
+                        "SELECT logtime, parameter FROM log"
+                        " WHERE parameter LIKE '%datetime%'"
+                        " ORDER BY id DESC LIMIT 50"
+                    ).fetchall()
             learned = None
+            samples: List[int] = []
             for logtime, parameter in rows:
                 param_dt = extract_parameter_datetime_seconds(parameter)
                 if param_dt is None:
                     continue
-                learned = note_logtime_datetime_pair(logtime, param_dt)
-                break
+                try:
+                    samples.append(int(param_dt) - int(logtime))
+                except (TypeError, ValueError):
+                    continue
+                if learned is None:
+                    learned = note_logtime_datetime_pair(logtime, param_dt)
+            # 多样本不一致时打警告（仍采用首个有效样本，与 note 行为一致）
+            if len(samples) >= 3:
+                distinct = {s for s in samples if abs(s) <= 172800}
+                if len(distinct) > 1:
+                    self.logger.warning(
+                        "日志库 datetime/logtime 差值不一致：%s，已采用 %+d 秒",
+                        sorted(distinct)[:5],
+                        int(learned or 0),
+                    )
             if learned is None:
                 self.logger.warning(
-                    "近期日志未见 parameter.datetime，LoginSucc 等仅有 logtime 的事件"
-                    "可能仍偏差约 8 小时；有 SSH/磁盘等带 datetime 的事件后会自动校准"
+                    "库内未见可用的 parameter.datetime，LoginSucc 等仅有 logtime 的事件"
+                    "可能仍偏差约 8 小时；出现 SSH/磁盘等带 datetime 的事件后会自动校准"
                 )
         except Exception as e:
             self.logger.warning("校准 logtime 与 parameter.datetime 失败: %s", e)

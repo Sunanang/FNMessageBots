@@ -497,21 +497,15 @@ class SshJournalPoller:
 
     @staticmethod
     def _ts_from_entry(obj: Dict[str, Any]) -> str:
+        from utils.logtime_display import display_now_str, format_unix_seconds_for_display
+
         raw = obj.get("__REALTIME_TIMESTAMP")
         try:
-            # 微秒
-            us = int(raw)
-            sec = us / 1_000_000.0
-            try:
-                from zoneinfo import ZoneInfo
-
-                return datetime.fromtimestamp(sec, tz=ZoneInfo("Asia/Shanghai")).strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                )
-            except Exception:
-                return datetime.fromtimestamp(sec).strftime("%Y-%m-%d %H:%M:%S")
+            # journal 微秒 → 秒
+            sec = int(raw) / 1_000_000.0
+            return format_unix_seconds_for_display(int(sec))
         except Exception:
-            return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            return display_now_str()
 
     def _emit(self, event_type: str, event_data: Dict[str, Any], raw_msg: str, ts: str) -> None:
         event_data = dict(event_data)

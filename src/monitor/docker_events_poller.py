@@ -81,13 +81,15 @@ def _short_container_id(cid: str) -> str:
 
 
 def _parse_event_timestamp(ev: Dict[str, Any]) -> str:
+    from utils.logtime_display import display_now_str, format_unix_seconds_for_display
+
     ts = ev.get("time") or ev.get("Time")
     if isinstance(ts, int) and ts > 0:
         try:
-            return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+            return format_unix_seconds_for_display(ts)
         except Exception:
             pass
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return display_now_str()
 
 
 class DockerEventsPoller:

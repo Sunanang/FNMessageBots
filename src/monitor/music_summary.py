@@ -1,8 +1,9 @@
 """音乐库静默批次的数据与文案；不依赖数据库或推送客户端。"""
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any, Dict, List
+
+from utils.logtime_display import format_unix_seconds_for_display
 
 MUSIC_SUMMARY_EVENT = "MUSIC_LIBRARY_SUMMARY"
 MUSIC_DEBOUNCE_SEC = 60
@@ -65,8 +66,8 @@ def build_music_summary(pending: Dict[str, Any]) -> Dict[str, Any]:
         "track_count": int(sum(by_type.values())),
         "by_type": by_type,
         "sections": sections,
-        "period_start": datetime.fromtimestamp(pending["first_activity_ts"]).strftime("%Y-%m-%d %H:%M:%S"),
-        "period_end": datetime.fromtimestamp(pending["last_activity_ts"]).strftime("%Y-%m-%d %H:%M:%S"),
+        "period_start": format_unix_seconds_for_display(int(pending["first_activity_ts"])),
+        "period_end": format_unix_seconds_for_display(int(pending["last_activity_ts"])),
         "debounce_sec": MUSIC_DEBOUNCE_SEC,
     }
 
