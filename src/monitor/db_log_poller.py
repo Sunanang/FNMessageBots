@@ -16,7 +16,9 @@ from typing import Callable, Dict, List, Optional, Any, Sequence
 from utils.logtime_display import (
     extract_parameter_datetime_seconds,
     format_logger_row_time,
+    is_logtime_skew_known,
     note_logtime_datetime_pair,
+    observe_live_row_wall_clock,
     observe_logger_row,
     set_logtime_skew_state_path,
 )
@@ -178,6 +180,8 @@ class DBLogPoller:
         self._thread: Optional[threading.Thread] = None
         self._cursor_file = self.cursor_dir / "db_poller_cursor.txt"
         self._batch_fail_count = 0
+        # 上一次开始轮询的时间；用于判断本轮新行是否「轮询连续」写入（见 observe_live_row_wall_clock）
+        self._last_poll_wall: Optional[float] = None
         self.logger = logging.getLogger(__name__)
         self.cursor_dir.mkdir(parents=True, exist_ok=True)
         set_logtime_skew_state_path(self.cursor_dir / "logtime_skew.json")
@@ -284,10 +288,10 @@ class DBLogPoller:
                         sorted(distinct)[:5],
                         int(learned or 0),
                     )
-            if learned is None:
+            if learned is None and not is_logtime_skew_known():
                 self.logger.warning(
-                    "库内未见可用的 parameter.datetime，LoginSucc 等仅有 logtime 的事件"
-                    "可能仍偏差约 8 小时；出现 SSH/磁盘等带 datetime 的事件后会自动校准"
+                    "库内未见可用的 parameter.datetime；将在下一条新写入的日志行到达时按其 logtime 与本机时间自动校准，"
+                    "出现 SSH/磁盘等带 datetime 的事件后会以 datetime 为准再次校准"
                 )
         except Exception as e:
             self.logger.warning("校准 logtime 与 parameter.datetime 失败: %s", e)
@@ -324,11 +328,19 @@ class DBLogPoller:
                 self.skip_ssh_events = bool(self.journal_available_checker())
             except Exception as e:
                 self.logger.debug("刷新 SSH journal 可用性失败: %s", e)
+        poll_started = time.time()
+        # 上一轮距今不超过 3 个轮询周期才视为「轮询连续」：此时新行的写入时刻离现在很近，
+        # now - logtime 才能代表 logtime 相对本机时钟的差值（冷启动 / 长时间停机后的积压行不用于估计）
+        prev_poll = self._last_poll_wall
+        self._last_poll_wall = poll_started
+        live_poll = prev_poll is not None and (poll_started - prev_poll) <= 3 * self.poll_interval
         rows = self._fetch_new_rows(last_id)
         batch_events: List[Dict[str, Any]] = []
         for row in rows:
             # 未纳入监控的行也学习 datetime/logtime 差值，避免只开登录通知时永远学不到 +28800
             observe_logger_row(row.get("logtime"), row.get("parameter"))
+            if live_poll:
+                observe_live_row_wall_clock(row.get("logtime"), row.get("parameter"), now=int(poll_started))
             row_id = row.get("id", 0)
             db_event_id = (row.get("eventId") or "").strip()
             if not db_event_id:

@@ -16,7 +16,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import Config
 from utils.logger import setup_logging
-from utils.logtime_display import apply_process_timezone, display_now_str, get_logtime_display_offset_seconds
+from utils.logtime_display import (
+    apply_process_timezone,
+    describe_logtime_skew,
+    display_now_str,
+    set_logtime_skew_state_path,
+)
 from utils.push_stats import init as init_push_stats
 from utils.notification_outbox import NotificationOutbox, OutboxWriteError
 from monitor.db_log_poller import DBLogPoller
@@ -100,11 +105,14 @@ class Application:
     def _print_banner(self):
         """打印启动横幅"""
         tz_label = apply_process_timezone()
-        offset = get_logtime_display_offset_seconds()
+        # 先加载上次落盘的校准，横幅才不会在重启后误显示 +0
+        cursor_dir = str(getattr(self.config, "cursor_dir", "") or "").strip()
+        if cursor_dir:
+            set_logtime_skew_state_path(Path(cursor_dir) / "logtime_skew.json")
         banner = f"""
         启动时间: {display_now_str()}
         运行时区: {tz_label}，TZ={os.environ.get('TZ') or '系统默认'}
-        日志库时间校准: {offset:+d} 秒（LoginSucc 等无 datetime 的事件会加上该差值）
+        日志库时间校准: {describe_logtime_skew()}
         监控模式: 数据库轮询 (logger_data.db3 log 表)
         通知方式: 企业微信/企业微信应用/钉钉/飞书机器人/Bark/PushPlus/魔法推送/SMTP邮件/通用Webhook/MeoW
 

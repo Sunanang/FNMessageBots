@@ -20,6 +20,11 @@ _skew_state_file: Optional[Path] = None
 _tz_applied = False
 _env_skew_conflict_warned = False
 
+# 兜底：库里从未出现过 parameter.datetime 时，用「本轮新写入的行」的 now - logtime 估计差值。
+_WALL_CLOCK_MIN_SKEW_SECONDS = 3600  # 不超过 1 小时的差视为正常（轮询延迟 / 小误差），不学习
+_WALL_CLOCK_MAX_SKEW_SECONDS = 172800
+_WALL_CLOCK_QUANTUM_SECONDS = 900  # 15 分钟取整，覆盖常见时区偏移，并吸收秒级轮询延迟
+
 
 def apply_process_timezone() -> str:
     """按环境变量 TZ 刷新进程本地时区（Docker 依赖此步骤，否则 naive fromtimestamp 仍是 UTC）。"""
@@ -116,6 +121,24 @@ def get_logtime_display_offset_seconds() -> int:
     return 0
 
 
+def is_logtime_skew_known() -> bool:
+    """是否已有可用差值：显式环境变量，或已从库 / 缓存学到。"""
+    raw = os.environ.get("LOGTIME_DISPLAY_OFFSET_SECONDS")
+    if raw is not None and str(raw).strip() != "":
+        return True
+    return _learned_logtime_skew_seconds is not None
+
+
+def describe_logtime_skew() -> str:
+    """启动横幅用：给出当前差值及其来源；尚未学到时明确说明待校准，而不是显示误导性的 +0。"""
+    raw = os.environ.get("LOGTIME_DISPLAY_OFFSET_SECONDS")
+    if raw is not None and str(raw).strip() != "":
+        return f"{get_logtime_display_offset_seconds():+d} 秒（来自环境变量 LOGTIME_DISPLAY_OFFSET_SECONDS）"
+    if _learned_logtime_skew_seconds is not None:
+        return f"{_learned_logtime_skew_seconds:+d} 秒（来自库内校准缓存）"
+    return "待校准（轮询对齐后按库内 datetime 或新写入的日志行自动学习）"
+
+
 def format_unix_seconds_for_display(ts: int) -> str:
     """把真实 Unix 秒格式化为展示用本地时间（跟随 TZ；不加 logtime 列差值）。"""
     return datetime.fromtimestamp(int(ts), tz=get_display_tz()).strftime("%Y-%m-%d %H:%M:%S")
@@ -173,6 +196,39 @@ def note_logtime_datetime_pair(logtime: Any, parameter_datetime: Any) -> Optiona
             "（与 TZ 无关；可用 LOGTIME_DISPLAY_OFFSET_SECONDS 覆盖）",
             skew,
         )
+    return _learned_logtime_skew_seconds
+
+
+def observe_live_row_wall_clock(logtime: Any, parameter: Any = None, *, now: Optional[int] = None) -> Optional[int]:
+    """库内从无 datetime 字段时的兜底：用本轮新写入的行估计 logtime 相对本机时钟的差值。
+
+    调用方须保证该行是「轮询连续期间」新写入的（写入到被读取的延迟很小），否则 now - logtime
+    会混入任意的历史滞后。单条即采用（与 datetime 单对学习一致），之后 datetime 行仍可覆盖。
+    """
+    global _learned_logtime_skew_seconds
+    if _learned_logtime_skew_seconds is not None:
+        return _learned_logtime_skew_seconds
+    if extract_parameter_datetime_seconds(parameter) is not None:
+        return _learned_logtime_skew_seconds
+    try:
+        lt = int(logtime or 0)
+    except (TypeError, ValueError):
+        return _learned_logtime_skew_seconds
+    if lt <= 0:
+        return _learned_logtime_skew_seconds
+    current = int(time.time()) if now is None else int(now)
+    estimate = current - lt
+    if abs(estimate) <= _WALL_CLOCK_MIN_SKEW_SECONDS or abs(estimate) > _WALL_CLOCK_MAX_SKEW_SECONDS:
+        return _learned_logtime_skew_seconds
+    # 15 分钟取整：吸收秒级轮询延迟，同时保留真实时区偏移（均为 15 分钟的整数倍）
+    value = int(round(estimate / _WALL_CLOCK_QUANTUM_SECONDS)) * _WALL_CLOCK_QUANTUM_SECONDS
+    _learned_logtime_skew_seconds = value
+    _persist_learned_skew(value)
+    _logger.info(
+        "库内无 parameter.datetime，已按新写入日志行与本机时钟校准展示：logtime 相对本机时间 %+d 秒"
+        "（可用 LOGTIME_DISPLAY_OFFSET_SECONDS 覆盖）",
+        value,
+    )
     return _learned_logtime_skew_seconds
 
 
