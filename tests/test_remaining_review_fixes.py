@@ -188,8 +188,17 @@ class RemainingReviewFixTests(unittest.TestCase):
             self.assertIs(result, supervisor.return_value.start.return_value)
             factory, host, port, path, prefix = supervisor.call_args.args
             self.assertIs(factory(), self.app)
-            self.assertEqual((host, port, path, prefix), ("127.0.0.1", "19080", socket_path, "/app/FnMessageBot"))
+            # FPK（有网关 Socket）：不开 TCP 入口，端口为空
+            self.assertEqual((host, port, path, prefix), ("127.0.0.1", "", socket_path, "/app/FnMessageBot"))
             create.assert_called_once_with(on_config_saved=callback)
+
+    def test_ui_start_without_gateway_keeps_tcp_port_for_docker(self):
+        with patch.dict(os.environ, {"UI_HOST": "0.0.0.0", "UI_PORT": "19080"}, clear=True), \
+             patch.object(ui_app, "create_app", return_value=self.app), \
+             patch.object(ui_app, "UIServerSupervisor") as supervisor:
+            ui_app.start_ui_server_in_background()
+            factory, host, port, path, prefix = supervisor.call_args.args
+            self.assertEqual((host, port, path, prefix), ("0.0.0.0", "19080", "", ""))
 
     def test_health_endpoint_needs_no_session_or_readable_config(self):
         self.config.write_text("invalid JSON")

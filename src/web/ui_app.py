@@ -1213,14 +1213,17 @@ def create_app(on_config_saved=None) -> Flask:
 def start_ui_server_in_background(on_config_saved=None) -> UIServerSupervisor:
     """启动并持续维护配置 UI 服务。on_config_saved 用于保存配置后的热加载。
 
-    - TCP：UI_HOST（默认 0.0.0.0）/ UI_PORT（默认 18080）；剥离客户端自带的 X-Trim-* 头。
-    - 统一网关：设置 FNMB_GATEWAY_SOCKET 时额外监听该 Unix Socket，前缀取 FNMB_GATEWAY_PREFIX。
+    - 统一网关：设置 FNMB_GATEWAY_SOCKET 时监听该 Unix Socket（FPK），前缀取 FNMB_GATEWAY_PREFIX；
+      此时不再开 TCP 入口，用户无需填写端口。
+    - TCP（Docker 等无网关场景）：UI_HOST（默认 0.0.0.0）/ UI_PORT（默认 18080）；剥离客户端自带的 X-Trim-* 头。
     """
+    socket_path = (os.getenv("FNMB_GATEWAY_SOCKET") or "").strip()
     host = (os.getenv("UI_HOST") or "0.0.0.0").strip() or "0.0.0.0"
+    tcp_port = "" if socket_path else os.getenv("UI_PORT", "18080")
     return UIServerSupervisor(
         lambda: create_app(on_config_saved=on_config_saved),
-        host, os.getenv("UI_PORT", "18080"),
-        (os.getenv("FNMB_GATEWAY_SOCKET") or "").strip(),
+        host, tcp_port,
+        socket_path,
         (os.getenv("FNMB_GATEWAY_PREFIX") or "").strip(),
     ).start()
 

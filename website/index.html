@@ -485,7 +485,7 @@
           <dl class="spec">
             <div><dt>运行方式</dt><dd>Python 单进程</dd></div>
             <div><dt>分发渠道</dt><dd class="mono">10</dd></div>
-            <div><dt>配置端口</dt><dd class="mono">18080 / 18230</dd></div>
+            <div><dt>配置端口</dt><dd class="mono">18080（Docker）/ 无需端口（FPK）</dd></div>
             <div><dt>发行</dt><dd>Docker / FPK</dd></div>
           </dl>
         </div>
@@ -607,7 +607,7 @@
           <div class="section-top"><span class="eyebrow">04 — 配置页</span></div>
           <div class="panel-grid reveal">
             <div class="cfg">
-              <div class="cfg-bar"><span class="dot"></span>localhost:18230 · 通知配置</div>
+              <div class="cfg-bar"><span class="dot"></span>日志推送 · 通知配置</div>
               <div class="cfg-row"><span class="k">企业微信</span><span class="v">https://qyapi.weixin.qq.com/c…</span><span class="sw on"></span></div>
               <div class="cfg-row"><span class="k">钉钉</span><span class="v">https://oapi.dingtalk.com/…</span><span class="sw on"></span></div>
               <div class="cfg-row"><span class="k">飞书</span><span class="v">https://open.feishu.cn/…</span><span class="sw on"></span></div>
@@ -619,7 +619,7 @@
             </div>
             <div class="panel-copy">
               <h3 style="font-size:19px; font-weight:600; letter-spacing:-0.02em">默认监听本机，带访问密码。</h3>
-              <p>Docker 版默认端口 <strong>18080</strong>，FPK 版安装时默认 <strong>18230</strong>，仅本机可访问，从飞牛桌面打开。</p>
+              <p>Docker 版默认端口 <strong>18080</strong>；FPK 版无需端口，从飞牛桌面「日志推送」打开，仅 NAS 管理员可访问。</p>
               <p><strong>保存即生效。</strong> 改完点保存，配置热加载，一般不需要重启容器。</p>
               <p>key、token、SMTP 密码在页面上打码显示。<strong>密码不会明文保存</strong>，部署时可用环境变量预置初始密码（仅未设过密码时生效）。</p>
               <p>另有历史记录页，能翻到最近的推送记录（最多保留 1 万条），以及哪些渠道投递失败过。</p>

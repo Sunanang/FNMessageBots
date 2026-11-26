@@ -99,16 +99,6 @@ if ! touch "${TRIM_PKGVAR}/.fnmb_wtest" 2>/dev/null; then
 fi
 rm -f "${TRIM_PKGVAR}/.fnmb_wtest"
 
-source "$(dirname "${BASH_SOURCE[0]}")/ui_port"
-# 覆盖安装也可能执行 install_callback；安装向导默认值不能改掉原监听端口。
-if [ -f "${TRIM_PKGVAR}/config/config.json" ] || [ -e "${TRIM_PKGVAR}/config/ui_port" ]; then
-    save_fnmb_ui_port
-elif [ "${wizard_ui_port+x}" = x ]; then
-    save_fnmb_ui_port "${wizard_ui_port}"
-else
-    save_fnmb_ui_port
-fi
-
 # 初始化配置（仅首次）
 FNMB_FRESH_CONFIG=0
 if [ ! -f "${TRIM_PKGVAR}/config/config.json" ]; then

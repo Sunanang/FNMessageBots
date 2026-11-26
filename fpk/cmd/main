@@ -81,9 +81,8 @@ start_process() {
     fi
 
     log_msg "Starting process ..."
-    local app_code_dir app_main py pypath ui_port
-    source "$(dirname "${BASH_SOURCE[0]}")/ui_port" || fail_user_visible "启动失败：缺少端口配置脚本，请重新安装。"
-    ui_port="$(read_fnmb_ui_port)" || return 1
+    local app_code_dir app_main py pypath
+    # FPK 只经飞牛网关 Socket 提供 Web 页面，不占用 TCP 端口，无需读取端口配置。
     app_code_dir="$(resolve_app_code_dir)" || fail_user_visible "启动失败：未找到应用代码，请重新安装。"
     app_main="${app_code_dir}/src/main.py"
     # --target 模式（2.9.0 起的装法）优先；旧版本留下的 venv 继续兼容，避免老安装升级失败后起不来。
@@ -102,7 +101,7 @@ start_process() {
     fi
     # 在子进程中直接 exec，不拼接 shell 命令；记录的 PID 就是 Python PID。
     (
-        export APP_HOME="${TRIM_PKGVAR}" UI_HOST="127.0.0.1" UI_PORT="${ui_port}"
+        export APP_HOME="${TRIM_PKGVAR}"
         export FNMB_GATEWAY_SOCKET="${GATEWAY_SOCKET}" FNMB_GATEWAY_PREFIX="${GATEWAY_PREFIX}"
         export PYTHONUNBUFFERED=1 PYTHONPATH="${pypath}"
         # 与 Docker 镜像一致，勿扰/展示默认按上海墙钟，避免宿主 TZ 干扰

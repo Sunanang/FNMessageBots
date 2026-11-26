@@ -194,7 +194,7 @@
         <section class="faq-list">
           <article class="faq-item">
             <h2>1. 如何打开应用？安装失败怎么办？</h2>
-            <p><strong>FPK：</strong>安装时填写监听端口（默认 18230，范围 1024～65535），升级保留原设置。从飞牛桌面的「日志推送」打开，仅 NAS 管理员可访问；监听端口仅供本机使用。
+            <p><strong>FPK：</strong>无需填写端口。从飞牛桌面的「日志推送」打开，仅 NAS 管理员可访问；经飞牛网关访问，不对局域网开放端口。
 <strong>Docker：</strong>安装前在 Compose 同目录的 <code>.env</code> 中填写 <code>UI_PORT=19080</code>（示例）；不填默认 18080。访问 <code>http://NAS地址:所选端口</code>，修改端口后需重建容器。</p>
             <p><strong>旧 root 版升级普通版：</strong>若提示应用数据属主不正确，先停止应用，按安装错误中给出的命令修复后再升级。默认路径可执行：</p>
             <pre class="faq-pre">sudo chown -hR -P -- FnMessageBot:FnMessageBot "$(readlink -f /var/apps/FnMessageBot/var)"</pre>

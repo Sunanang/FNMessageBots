@@ -42,13 +42,11 @@ class FpkLifecycleTests(unittest.TestCase):
         code = install / "cmd/fnmessagebots"
         (code / "src").mkdir(parents=True)
         (code / "requirements.txt").write_text("")
-        (code / "src/main.py").write_text("import os,signal,sys,time\nfrom pathlib import Path\nPath(os.environ['APP_HOME'],'reported.port').write_text(os.environ['UI_PORT'])\nPath(os.environ['APP_HOME'],'reported.pid').write_text(str(os.getpid()))\nsignal.signal(signal.SIGTERM,lambda *_: sys.exit(0))\nwhile True: time.sleep(.1)\n")
+        # 启动脚本不再导出 UI_PORT：记录环境变量内容，应为空
+        (code / "src/main.py").write_text("import os,signal,sys,time\nfrom pathlib import Path\nPath(os.environ['APP_HOME'],'reported.env').write_text(os.environ.get('UI_PORT',''))\nPath(os.environ['APP_HOME'],'reported.pid').write_text(str(os.getpid()))\nsignal.signal(signal.SIGTERM,lambda *_: sys.exit(0))\nwhile True: time.sleep(.1)\n")
         main = install / "cmd/main"
         shutil.copy2(fpk / "cmd/main", main)
-        shutil.copy2(fpk / "cmd/ui_port", main.parent / "ui_port")
         shutil.copy2(fpk / "cmd/python_env", main.parent / "python_env")
-        (self.data / "config").mkdir()
-        (self.data / "config/ui_port").write_text("19080\n")
         (self.data / "venv/bin").mkdir(parents=True)
         (self.data / "venv/bin/python").symlink_to(sys.executable)
         try:
@@ -58,7 +56,7 @@ class FpkLifecycleTests(unittest.TestCase):
                     break
                 time.sleep(.02)
             self.assertEqual((self.data / "app.pid").read_text(), (self.data / "reported.pid").read_text())
-            self.assertEqual((self.data / "reported.port").read_text(), "19080")
+            self.assertEqual((self.data / "reported.env").read_text(), "")
             subprocess.run(["bash", str(main), "stop"], env=self.env, check=True, capture_output=True, timeout=15)
             self.assertFalse((self.data / "app.pid").exists())
             status = subprocess.run(["bash", str(main), "status"], env=self.env, capture_output=True, timeout=5)
@@ -115,34 +113,17 @@ class FpkLifecycleTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("root:rootgroup", capture.read_text())
 
-    def run_port_helper(self, function, *args, extra_env=None):
-        script = 'fail_user_visible() { printf "%s\\n" "$1"; exit 1; }; source "$1"; shift; "$@"'
-        return subprocess.run(["bash", "-c", script, "test", str(fpk / "cmd/ui_port"), function, *args], env={**self.env, **(extra_env or {})}, capture_output=True, text=True, timeout=5)
+    def test_launcher_and_callbacks_no_longer_depend_on_tcp_port(self):
+        # FPK 只走飞牛网关 Socket：启动脚本与回调不得再读写端口配置，也不得导出 UI_PORT
+        for name in ("main", "install_callback", "upgrade_callback"):
+            text = (fpk / "cmd" / name).read_text(encoding="utf-8")
+            with self.subTest(script=name):
+                self.assertNotIn("ui_port", text)
+                self.assertNotIn("UI_PORT", text)
+                self.assertNotIn("wizard_ui_port", text)
+        self.assertFalse((fpk / "cmd/ui_port").exists())
 
-    def test_legacy_install_without_port_uses_default(self):
-        result = self.run_port_helper("read_fnmb_ui_port")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout, "18230")
-        self.assertFalse((self.data / "config/ui_port").exists())
-
-    def test_invalid_ports_do_not_replace_saved_port(self):
-        result = self.run_port_helper("save_fnmb_ui_port", "19080")
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        for value in ("", "0", "1023", "65536", "9999999999999", "18080; touch injected", "$(touch injected)", "18 080", "19080\n19081"):
-            with self.subTest(value=value):
-                result = self.run_port_helper("save_fnmb_ui_port", value)
-                self.assertEqual(result.returncode, 1)
-                self.assertIn("1024～65535", result.stdout)
-                self.assertEqual((self.data / "config/ui_port").read_text(), "19080\n")
-
-    def test_corrupt_saved_port_is_reported(self):
-        (self.data / "config").mkdir()
-        (self.data / "config/ui_port").write_text("invalid\n")
-        result = self.run_port_helper("read_fnmb_ui_port")
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("端口配置无效", result.stdout)
-
-    def test_install_callback_saves_wizard_port_and_upgrade_preserves_it(self):
+    def test_install_callback_sets_password_without_any_port(self):
         install = self.base / "install"
         code = install / "cmd/fnmessagebots"
         (code / "src").mkdir(parents=True)
@@ -150,35 +131,33 @@ class FpkLifecycleTests(unittest.TestCase):
         (code / "src/main.py").write_text("")
         (code / "requirements.txt").write_text("")
         (code / "config/config.json").write_text("{}")
-        for name in ("install_callback", "upgrade_callback", "data_permissions", "ui_port", "python_env"):
+        for name in ("install_callback", "upgrade_callback", "data_permissions", "python_env"):
             shutil.copy2(fpk / "cmd" / name, install / "cmd" / name)
         # 依赖安装走商店 Python 替身（pip 直接成功），其余完整运行真实安装、升级回调。
         result = subprocess.run(["bash", str(install / "cmd/install_callback")], env={
-            **self.env, "wizard_ui_port": "19080", "wizard_web_password": "first-password-123",
+            **self.env, "wizard_web_password": "first-password-123",
             "wizard_web_password_confirm": "first-password-123",
         }, capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual((self.data / "config/ui_port").read_text(), "19080\n")
+        self.assertFalse((self.data / "config/ui_port").exists())
         import hashlib
         configured = json.loads((self.data / "config/config.json").read_text())
         self.assertEqual(configured["web_password_hash"], hashlib.pbkdf2_hmac(
             "sha256", b"first-password-123", bytes.fromhex(configured["web_password_salt"]), 100000).hex())
         self.assertNotIn("first-password-123", (self.data / "config/config.json").read_text())
-        result = subprocess.run(["bash", str(install / "cmd/upgrade_callback")], env={**self.env, "wizard_ui_port": "18230"}, capture_output=True, text=True, timeout=10)
+        result = subprocess.run(["bash", str(install / "cmd/upgrade_callback")], env=self.env, capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual((self.data / "config/ui_port").read_text(), "19080\n")
-        self.assertEqual((self.data / "config/ui_port").stat().st_mode & 0o777, 0o600)
+        self.assertFalse((self.data / "config/ui_port").exists())
 
-    def test_wizard_rejects_ports_outside_normal_user_range(self):
+    def test_wizard_asks_only_for_access_password(self):
         wizard = json.loads((fpk / "wizard/install").read_text())
-        field = next(item for step in wizard for item in step["items"] if item.get("field") == "wizard_ui_port")
-        pattern = next(rule["pattern"] for rule in field["rules"] if "pattern" in rule)
-        for value in ("1024", "1099", "1100", "18230", "19080", "65535"):
-            self.assertIsNotNone(re.fullmatch(pattern, value), value)
-        for value in ("", "1023", "0", "65536", "99999", "18080.0", "port"):
-            self.assertIsNone(re.fullmatch(pattern, value), value)
+        fields = [item.get("field") for step in wizard for item in step["items"] if item.get("field")]
+        self.assertNotIn("wizard_ui_port", fields)
+        self.assertEqual(fields, ["wizard_web_password", "wizard_web_password_confirm"])
+        password = next(item for step in wizard for item in step["items"] if item.get("field") == "wizard_web_password")
+        self.assertTrue(any("8" in rule.get("message", "") for rule in password["rules"]))
 
-    def test_reinstall_preserves_config_and_port_but_applies_wizard_password(self):
+    def test_reinstall_preserves_config_but_applies_wizard_password(self):
         import hashlib
         import sqlite3
         install = self.base / "install"
@@ -188,14 +167,13 @@ class FpkLifecycleTests(unittest.TestCase):
         (code / "src/main.py").write_text("")
         (code / "requirements.txt").write_text("")
         (code / "config/config.json").write_text('{"monitor_events":["LoginFail"]}')
-        for name in ("install_callback", "upgrade_callback", "data_permissions", "ui_port", "python_env"):
+        for name in ("install_callback", "upgrade_callback", "data_permissions", "python_env"):
             shutil.copy2(fpk / "cmd" / name, install / "cmd" / name)
         (self.data / "config").mkdir()
         original = {"monitor_events": ["LoginSucc"], "wechat_webhook_url": "https://example.invalid/keep",
                     "web_password_salt": "old-salt", "web_password_hash": "old-hash", "web_password_enabled": False}
         (self.data / "config/config.json").write_text(json.dumps(original))
         (self.data / "config/ui_preferences.json").write_text('{"theme":"dark"}')
-        (self.data / "config/ui_port").write_text("19080\n")
         cursor = self.data / "data/cursor"
         cursor.mkdir(parents=True)
         (cursor / "push_stats.json").write_text('{"total":{"success":123,"fail":4},"daily":{}}')
@@ -216,15 +194,14 @@ class FpkLifecycleTests(unittest.TestCase):
             if p.is_file() and "venv" not in p.parts and p.name != "config.json"
         }
 
-        # 覆盖安装：向导密码必须写入；端口与推送配置保留
+        # 覆盖安装：向导密码必须写入；推送配置与历史数据保留
         result = subprocess.run(["bash", str(install / "cmd/install_callback")], env={
-            **self.env, "wizard_ui_port": "18230", "wizard_web_password": "new-password-123",
+            **self.env, "wizard_web_password": "new-password-123",
             "wizard_web_password_confirm": "new-password-123",
         }, capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         for path, contents in preserve.items():
             self.assertEqual((self.data / path).read_bytes(), contents, str(path))
-        self.assertEqual((self.data / "config/ui_port").read_text(), "19080\n")
         configured = json.loads((self.data / "config/config.json").read_text())
         self.assertEqual(configured["monitor_events"], ["LoginSucc"])
         self.assertEqual(configured["wechat_webhook_url"], "https://example.invalid/keep")
@@ -242,12 +219,12 @@ class FpkLifecycleTests(unittest.TestCase):
         # 升级回调：即使环境里有向导密码变量，也不改密码（升级向导不收集密码）
         before_upgrade = (self.data / "config/config.json").read_bytes()
         result = subprocess.run(["bash", str(install / "cmd/upgrade_callback")], env={
-            **self.env, "wizard_ui_port": "18230", "wizard_web_password": "another-password-999",
+            **self.env, "wizard_web_password": "another-password-999",
             "wizard_web_password_confirm": "another-password-999",
         }, capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual((self.data / "config/config.json").read_bytes(), before_upgrade)
-        self.assertEqual((self.data / "config/ui_port").read_text(), "19080\n")
+
 
 if __name__ == "__main__":
     unittest.main()

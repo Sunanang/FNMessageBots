@@ -11,7 +11,8 @@
 临时环境完整执行安装、覆盖安装和升级回调，验证以下文件逐字节保留：
 
 - `config/config.json`：原渠道、事件选择、密码盐值/哈希和密码开关。
-- `config/ui_port`、`config/ui_preferences.json`：原端口及外观。
+- `config/ui_preferences.json`：外观设置。
+- `config/ui_port`（旧版 FPK 遗留文件，新版不再读取，保留不动）。
 - `data/cursor/push_stats.json`、历史与待发 SQLite 数据库。
 - `data/logs/` 中的既有日志。
 

@@ -67,14 +67,17 @@ class UIServerSupervisor:
         self._port = port
         self._app_failure = ""
         self._app_warning_time = 0.0
-        self._listeners: dict[str, _Listener] = {
-            "TCP 配置入口": _Listener(host, 0, StripGatewayHeadersMiddleware),
-        }
+        self._listeners: dict[str, _Listener] = {}
+        # 空端口表示不开 TCP 入口（FPK 只经飞牛网关 Socket 访问，不占用用户可见端口）
+        if port:
+            self._listeners["TCP 配置入口"] = _Listener(host, 0, StripGatewayHeadersMiddleware)
         if socket_path:
             self._listeners["统一网关 Socket"] = _Listener(
                 f"unix://{socket_path}", 0,
                 lambda app: GatewayPrefixMiddleware(app, gateway_prefix),
             )
+        if not self._listeners:
+            raise ValueError("Web 配置入口未配置：需要 TCP 端口或网关 Socket 其一")
 
     def start(self) -> UIServerSupervisor:
         self._check_listeners()

@@ -81,8 +81,6 @@ source "$(dirname "${BASH_SOURCE[0]}")/data_permissions"
 prepare_app_data_permissions
 
 mkdir -p "${TRIM_PKGVAR}" "${TRIM_PKGVAR}/config" "${TRIM_PKGVAR}/data/logs" "${TRIM_PKGVAR}/data/cursor"
-source "$(dirname "${BASH_SOURCE[0]}")/ui_port"
-save_fnmb_ui_port
 chmod 600 "${TRIM_PKGVAR}/config/config.json" 2>/dev/null || true
 
 # 依赖安装（2.9.0 起）：与 install_callback 一致，统一用 --target 模式 + 包内离线 wheels。
