@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
@@ -11,6 +12,10 @@ from monitor.batch_dedupe import fingerprint_poll_batch_item
 from monitor.models import JournalEntry
 
 RETRY_SECONDS = 60
+# 待发队列上限：所有渠道长期失败时（比如 webhook 被删），队列不能无限堆积
+MAX_POLL_EVENTS = 5000
+
+_logger = logging.getLogger(__name__)
 
 
 class OutboxWriteError(RuntimeError):
@@ -80,6 +85,23 @@ class NotificationOutbox:
                     if (item.get("event_data") or {}).get("_source_cursor") else fingerprint_poll_batch_item(item),
                     json.dumps(payload, ensure_ascii=False),
                 ))
+            self._trim(conn, len(items))
+
+    @staticmethod
+    def _trim(conn: sqlite3.Connection, added: int) -> None:
+        """超出上限时丢最老的待发项，避免渠道长期失败把磁盘写满。"""
+        total = conn.execute("SELECT COUNT(*) FROM poll_events").fetchone()[0]
+        if total <= MAX_POLL_EVENTS:
+            return
+        overflow = total - MAX_POLL_EVENTS
+        conn.execute(
+            "DELETE FROM poll_events WHERE id IN "
+            "(SELECT id FROM poll_events ORDER BY rowid ASC LIMIT ?)",
+            (overflow,),
+        )
+        _logger.warning(
+            "待发通知队列超过 %s 条，丢弃最老的 %s 条（新增 %s 条）", MAX_POLL_EVENTS, overflow, added
+        )
 
     def poll_items(self) -> List[Dict[str, Any]]:
         with self._connect() as conn:

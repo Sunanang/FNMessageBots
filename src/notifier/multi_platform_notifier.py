@@ -591,6 +591,8 @@ class MultiPlatformNotifier:
         
         # 事件去重缓存
         self.sent_events = {}
+        # 正在发送中的指纹：多线程同时处理同一事件时，只有抢到占位的那一个能发出去
+        self._inflight: Dict[str, float] = {}
         self._dedup_lock = threading.RLock()
         
         # 磁盘事件合并缓存 - 使用时间窗口缓存多个磁盘事件
@@ -833,7 +835,7 @@ class MultiPlatformNotifier:
         event_fingerprint = ""
         if not skip_dedup:
             event_fingerprint = self._generate_fingerprint(event_type, event_data)
-            if self._is_duplicate(event_fingerprint):
+            if not self._reserve_fingerprint(event_fingerprint):
                 self.logger.debug(f"跳过重复事件: {event_type}")
                 return False, [
                     {
@@ -892,13 +894,15 @@ class MultiPlatformNotifier:
         self._send_to_extra_channels(message, results, channel_results)
         
         if results and any(results):  # 至少一个平台发送成功
-            if not skip_dedup and event_fingerprint:
-                with self._dedup_lock:
-                    self.sent_events[event_fingerprint] = time.time()
+            if not skip_dedup:
+                self._mark_fingerprint_sent(event_fingerprint)
             self._record_send_result(True)
             self.logger.info(f"通知发送成功: {event_type}")
             return True, channel_results
         else:
+            # 全渠道失败：放开占位，让下一轮轮询能重试同一条事件
+            if not skip_dedup:
+                self._release_fingerprint(event_fingerprint)
             self._record_send_result(False)
             self.logger.warning(f"所有通知发送失败: {event_type}")
             return False, channel_results
@@ -1641,7 +1645,17 @@ class MultiPlatformNotifier:
                 brief = str(it.get('brief') or '')[:30]
                 preview_sig_parts.append(f"{et}@{ts}#{brief}")
             preview_sig = "|".join(preview_sig_parts)
-            key = f"{event_type}_{minute_window}_{count}_{type_count}_{by_type_sig}_{preview_sig}"
+            # 只用前 5 条做预览会漏掉第 6 条之后的差异，把两个不同批次判成同一批而漏推；
+            # 这里再用「全部条目的 类型+时间戳」摘要兜底。
+            items_sig = hashlib.md5("|".join(
+                f"{it.get('event_type') or ''}@{it.get('timestamp') or ''}"
+                for it in items
+                if isinstance(it, dict)
+            ).encode()).hexdigest()[:16]
+            key = (
+                f"{event_type}_{minute_window}_{count}_{type_count}_"
+                f"{by_type_sig}_{len(items)}_{items_sig}_{preview_sig}"
+            )
         elif event_type == "NAS_PATROL_REPORT":
             key = f"{event_type}_{int(time.time())}"
         else:
@@ -1655,7 +1669,7 @@ class MultiPlatformNotifier:
         return hashlib.md5(key.encode()).hexdigest()
     
     def _is_duplicate(self, fingerprint: str) -> bool:
-        """检查是否为重复事件"""
+        """只读判重（不占位）。发送路径请用 _reserve_fingerprint。"""
         with self._dedup_lock:
             if fingerprint in self.sent_events:
                 last_time = self.sent_events[fingerprint]
@@ -1664,6 +1678,43 @@ class MultiPlatformNotifier:
                 del self.sent_events[fingerprint]
         
         return False
+
+    def _reserve_fingerprint(self, fingerprint: str, *, inflight_ttl: float = 120.0) -> bool:
+        """原子占用一个指纹：返回 True 表示本次获得发送权。
+
+        原来是「先 _is_duplicate 再发送成功才写入」，两个线程可以同时通过检查、各发一条
+        （同一事件发两次）。这里把「检查 + 占位」放进同一把锁里，抢不到的直接丢弃。
+        占位用带时间戳的 inflight 表，异常导致没释放时按 inflight_ttl 自愈。
+        """
+        if not fingerprint:
+            return True
+        now = time.time()
+        with self._dedup_lock:
+            last_time = self.sent_events.get(fingerprint)
+            if last_time is not None:
+                if now - last_time < self.dedup_window:
+                    return False
+                del self.sent_events[fingerprint]
+            started_at = self._inflight.get(fingerprint)
+            if started_at is not None and now - started_at < inflight_ttl:
+                return False
+            self._inflight[fingerprint] = now
+            return True
+
+    def _mark_fingerprint_sent(self, fingerprint: str) -> None:
+        """发送成功后登记，供 dedup_window 内的后续事件判重。"""
+        if not fingerprint:
+            return
+        with self._dedup_lock:
+            self._inflight.pop(fingerprint, None)
+            self.sent_events[fingerprint] = time.time()
+
+    def _release_fingerprint(self, fingerprint: str) -> None:
+        """发送失败/放弃时释放占位，让下一次轮询能重试。"""
+        if not fingerprint:
+            return
+        with self._dedup_lock:
+            self._inflight.pop(fingerprint, None)
 
     def _minimal_push_effective(self) -> bool:
         """极简是否实际生效：开启轮询汇总时关闭极简（汇总需完整正文）。"""
@@ -3554,7 +3605,7 @@ class MultiPlatformNotifier:
         event_fingerprint = self._generate_system_fingerprint(event_type, event_data)
         
         # 检查去重
-        if self._is_duplicate(event_fingerprint):
+        if not self._reserve_fingerprint(event_fingerprint):
             self.logger.debug(f"跳过重复系统事件: {event_type}")
             return {
                 "success": False,
@@ -3617,11 +3668,11 @@ class MultiPlatformNotifier:
         fail_count = sum(cr.get("fail_count", int(not cr.get("success"))) for cr in channel_results)
         any_ok = bool(results and success_count > 0)
         if any_ok:
-            with self._dedup_lock:
-                self.sent_events[event_fingerprint] = time.time()
+            self._mark_fingerprint_sent(event_fingerprint)
             self._record_send_result(True)
             self.logger.info(f"系统事件通知发送成功: {event_type}")
         else:
+            self._release_fingerprint(event_fingerprint)
             self._record_send_result(False)
             self.logger.warning(f"系统事件通知发送失败: {event_type}")
         return {

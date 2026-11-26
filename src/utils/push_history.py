@@ -7,11 +7,11 @@ import json
 import os
 import sqlite3
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Any, List, Optional
-from zoneinfo import ZoneInfo
 
+from utils.logtime_display import display_now_str, get_display_tz
 from utils.secret_redact import redact_json, redact_secrets
 
 _lock = threading.Lock()
@@ -283,7 +283,9 @@ def add_record(
     """写入一条推送记录。若总条数超过 MAX_RECORDS，删除最老的 DELETE_BATCH 条。"""
     if not _db_path:
         return
-    created_at = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
+    # 与通知正文/历史页其它时间统一走 display 时区（跟随 TZ），别在这里写死上海：
+    # 非中国时区部署时，记录时间会和推送里的时间差 6~7 小时。
+    created_at = display_now_str()
     detail_str = _serialize_detail(detail)
     summary = redact_secrets(summary or "")
     if len(summary) > 500:
@@ -413,17 +415,21 @@ def get_total_counts() -> Dict[str, int]:
 
 
 def get_today_counts() -> Dict[str, int]:
-    """返回当日统计：total, success, fail（Asia/Shanghai，当天字符串匹配）。"""
+    """返回当日统计：total, success, fail（按展示时区的当天日期，范围查询）。"""
     if not _db_path:
         return {"total": 0, "success": 0, "fail": 0}
-    today = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
+    today = datetime.now(get_display_tz()).strftime("%Y-%m-%d")
     with _lock:
         conn = _conn()
         try:
+            # 用范围比较代替「截取日期再等值」，才能走 idx_push_history_created_at
+            tomorrow = (
+                datetime.strptime(today, "%Y-%m-%d") + timedelta(days=1)
+            ).strftime("%Y-%m-%d")
             cur = conn.execute(
                 "SELECT COUNT(*) AS total, SUM(CASE WHEN success=1 THEN 1 ELSE 0 END) AS ok "
-                "FROM push_history WHERE substr(created_at, 1, 10) = ?",
-                (today,),
+                "FROM push_history WHERE created_at >= ? AND created_at < ?",
+                (today, tomorrow),
             )
             row = cur.fetchone()
             total = row[0] or 0
