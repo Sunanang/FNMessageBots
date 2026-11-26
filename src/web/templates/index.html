@@ -2529,7 +2529,9 @@
         showToast(false, "该事件不支持自定义模板");
         return;
       }
-      const scope = opts.scope === "family" ? "family" : "event";
+      // 组标题入口只针对本类：锁定为 family，不提供「仅本事件」（组标题的 eventType 仅用于示例数据）
+      const lockScope = !!opts.lockScope;
+      const scope = (lockScope || opts.scope === "family") ? "family" : "event";
       const eventType = opts.eventType || "";
       if (!eventType) {
         showToast(false, "无法打开：缺少示例事件");
@@ -2537,6 +2539,7 @@
       }
       tplDrawerState = {
         scope,
+        lockScope,
         familyId: familyId || (messageTemplateMeta.event_family || {})[eventType] || "",
         eventType,
         eventTitle: opts.eventTitle || eventType,
@@ -2546,6 +2549,10 @@
       document.querySelectorAll('input[name="tpl-scope"]').forEach(r => {
         r.checked = r.value === scope;
       });
+      const scopeRowEl = document.getElementById("tpl-scope-row");
+      if (scopeRowEl) scopeRowEl.style.display = lockScope ? "none" : "";
+      const copyFamilyBtn = document.getElementById("tpl-copy-family-btn");
+      if (copyFamilyBtn) copyFamilyBtn.style.display = lockScope ? "none" : "";
       document.getElementById("tpl-drawer-heading").textContent =
         scope === "family" ? "组通知样式定义" : "单通知样式定义";
       document.getElementById("tpl-drawer-sub").textContent =
@@ -2694,10 +2701,16 @@
         && (body || "") === (meta.default_body || "");
     }
 
+    function currentTplScope() {
+      if (!tplDrawerState) return "event";
+      if (tplDrawerState.lockScope) return "family";
+      const radio = document.querySelector('input[name="tpl-scope"]:checked');
+      return radio ? radio.value : tplDrawerState.scope;
+    }
+
     async function saveTplFromDrawer() {
       if (!tplDrawerState) return;
-      const scopeRadio = document.querySelector('input[name="tpl-scope"]:checked');
-      const scope = scopeRadio ? scopeRadio.value : tplDrawerState.scope;
+      const scope = currentTplScope();
       const title = (document.getElementById("tpl-title-input").value || "");
       const body = (document.getElementById("tpl-body-input").value || "");
       if (!title.trim() && !body.trim()) {
@@ -2771,8 +2784,7 @@
 
     async function resetTplFromDrawer() {
       if (!tplDrawerState) return;
-      const scopeRadio = document.querySelector('input[name="tpl-scope"]:checked');
-      const scope = scopeRadio ? scopeRadio.value : tplDrawerState.scope;
+      const scope = currentTplScope();
       const next = cloneTemplates(messageTemplates);
       next.families = next.families || {};
       next.events = next.events || {};
@@ -2800,8 +2812,7 @@
 
     async function testTplFromDrawer() {
       if (!tplDrawerState) return;
-      const scopeRadio = document.querySelector('input[name="tpl-scope"]:checked');
-      const scope = scopeRadio ? scopeRadio.value : tplDrawerState.scope;
+      const scope = currentTplScope();
       const btn = document.getElementById("tpl-test-btn");
       const old = btn ? btn.textContent : "";
       if (btn) { btn.disabled = true; btn.textContent = "试发中…"; }
@@ -2971,6 +2982,7 @@
               const firstEv = (cat.events || [])[0];
               openTplDrawer({
                 scope: "family",
+                lockScope: true,
                 familyId,
                 eventType: firstEv ? firstEv.id : "",
                 eventTitle: cat.name || familyId,

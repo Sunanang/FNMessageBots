@@ -881,8 +881,9 @@ def create_app(on_config_saved=None) -> Flask:
             templates=normalize_message_templates(raw.get("message_templates")),
             official_title=official_title,
             official_note=official_note,
-            title_override=str(title_override) if has_draft else None,
-            body_override=str(body_override) if has_draft else None,
+            # None 与空串同义：与试发接口一致，避免把 JSON null 渲染成字面量 "None"
+            title_override=str(title_override or "") if has_draft else None,
+            body_override=str(body_override or "") if has_draft else None,
         )
         if rendered is None:
             # 无自定义时预览官方默认模板文案（抽屉预填）

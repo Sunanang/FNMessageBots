@@ -255,3 +255,20 @@ def test_empty_title_keeps_body_with_official_title_fallback():
     assert msg.content == "自定义正文 alice"
     assert msg.title
     assert "登录" in msg.title or "飞牛NAS" in msg.title
+
+
+def test_category_header_drawer_locks_family_scope():
+    """组标题入口只能编辑本类：不得出现「仅本事件」，保存/恢复/试发都按本类处理。"""
+    from pathlib import Path
+
+    html = (Path(__file__).resolve().parents[1] / "src/web/templates/index.html").read_text(encoding="utf-8")
+    # 组标题按钮：打开时带 lockScope，且 eventType 只是示例事件
+    header_open = html[html.index('catTplBtn.addEventListener("click"'):]
+    header_open = header_open[:header_open.index("});")]
+    assert 'scope: "family"' in header_open and "lockScope: true" in header_open
+    # 抽屉逻辑：锁定时隐藏范围切换与复制按钮
+    assert 'scopeRowEl.style.display = lockScope ? "none" : ""' in html
+    assert 'copyFamilyBtn.style.display = lockScope ? "none" : ""' in html
+    # 保存/恢复/试发统一经 currentTplScope()，锁定时不读取单选框
+    assert html.count("const scope = currentTplScope();") == 3
+    assert 'if (tplDrawerState.lockScope) return "family";' in html
