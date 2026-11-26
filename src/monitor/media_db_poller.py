@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 from zoneinfo import ZoneInfo
 
+from utils.logtime_display import display_now_str, format_unix_seconds_for_display
+
 from .models import JournalEntry
 from .sqlite_uri import connect_readonly_with_fallback
 from .media_summary import MEDIA_DEBOUNCE_SEC, MEDIA_SUMMARY_EVENT, build_media_summary
@@ -37,18 +39,19 @@ _DEDUP_TTL = 24 * 3600
 
 
 def _ms_to_str(ms: Optional[int]) -> str:
+    # 与其它事件一致：展示时间跟随 TZ（logtime_display），不写死北京时间。
     if ms is None:
-        return datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
+        return display_now_str()
     try:
         v = int(ms)
     except (TypeError, ValueError):
-        return datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
+        return display_now_str()
     if v > 10_000_000_000:
         v = int(v / 1000)
     try:
-        return datetime.fromtimestamp(v, tz=ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
+        return format_unix_seconds_for_display(v)
     except (OSError, ValueError):
-        return datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
+        return display_now_str()
 
 
 class MediaDBPoller:
@@ -232,7 +235,7 @@ class MediaDBPoller:
         event_data.setdefault("_source_cursor", fp)
         event_data.setdefault("_source_event_id", event_type)
         raw_log = json.dumps(raw_obj, ensure_ascii=False)
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S") if event_type == MEDIA_SUMMARY_EVENT else _ms_to_str(ts_field_ms)
+        ts = display_now_str() if event_type == MEDIA_SUMMARY_EVENT else _ms_to_str(ts_field_ms)
         entry = JournalEntry(
             cursor=f"trimmedia-{event_type}-{now}-{hash(fp) & 0xFFFFFFFF:x}",
             timestamp=ts,

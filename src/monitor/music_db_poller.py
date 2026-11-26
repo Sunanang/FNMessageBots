@@ -22,6 +22,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 from zoneinfo import ZoneInfo
 
+from utils.logtime_display import display_now_str, format_unix_seconds_for_display
+
 from .models import JournalEntry
 from .music_summary import (
     MUSIC_DEBOUNCE_SEC,
@@ -64,7 +66,9 @@ def _maybe_int(v: Any) -> Optional[int]:
 
 
 def _ts_to_local_str(ts: Any) -> str:
-    now = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
+    # 展示时间统一走 logtime_display（跟随 TZ），不要写死北京时间：
+    # 否则同一条推送里，音乐事件与登录/应用事件的时间会差 7 小时。
+    now = display_now_str()
     if ts is None:
         return now
     try:
@@ -76,7 +80,7 @@ def _ts_to_local_str(ts: Any) -> str:
     if v > 10_000_000_000:
         v = int(v / 1000)
     try:
-        return datetime.fromtimestamp(v, tz=ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
+        return format_unix_seconds_for_display(v)
     except (OSError, ValueError):
         return now
 
@@ -305,7 +309,7 @@ class MusicDBPoller:
         event_data.setdefault("_source_event_id", event_type)
         raw_log = json.dumps(raw_obj, ensure_ascii=False)
         ts = (
-            datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
+            display_now_str()
             if event_type == MUSIC_SUMMARY_EVENT
             else _ts_to_local_str(ts_field)
         )

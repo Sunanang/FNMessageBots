@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 from zoneinfo import ZoneInfo
 
+from utils.logtime_display import display_now_str, format_unix_seconds_for_display
+
 from .models import JournalEntry
 from utils.notification_outbox import OutboxWriteError
 from .sqlite_uri import connect_readonly_with_fallback
@@ -65,7 +67,7 @@ def _sec_to_local_str(sec: Optional[int]) -> str:
     if v <= 0:
         return "永久有效"
     try:
-        return datetime.fromtimestamp(v, tz=ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
+        return format_unix_seconds_for_display(v)
     except (OSError, ValueError):
         return str(v)
 
@@ -228,9 +230,7 @@ class PhotoDBPoller:
         event_data.setdefault("_source_cursor", fp)
         event_data.setdefault("_source_event_id", event_type)
         raw_log = json.dumps(raw_obj, ensure_ascii=False)
-        ts = _sec_to_local_str(ts_sec) if ts_sec else datetime.now(ZoneInfo("Asia/Shanghai")).strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
+        ts = _sec_to_local_str(ts_sec) if ts_sec else display_now_str()
         entry = JournalEntry(
             cursor=f"photo-{event_type}-{now}-{hash(fp) & 0xFFFFFFFF:x}",
             timestamp=ts,

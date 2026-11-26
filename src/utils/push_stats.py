@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Dict, Any
 from zoneinfo import ZoneInfo
 
+from utils.logtime_display import get_display_tz
+
 _lock = threading.Lock()
 _stats_path: str = ""
 
@@ -56,7 +58,8 @@ def _save(data: Dict[str, Any]) -> None:
 
 
 def _today_key() -> str:
-    return datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
+    # 「今天」跟着展示时区走，别写死北京时间，否则非中国时区的日界会错一天
+    return datetime.now(get_display_tz()).strftime("%Y-%m-%d")
 
 
 def record(success: bool) -> None:
